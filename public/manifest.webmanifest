@@ -1,0 +1,17 @@
+{
+  "name": "Aether",
+  "short_name": "Aether",
+  "description": "A glass desk for every CLI.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070b10",
+  "theme_color": "#070b10",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
