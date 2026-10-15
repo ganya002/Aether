@@ -594,6 +594,9 @@ final class DragPreview: NSWindow {
             backing: .buffered,
             defer: false
         )
+        // Swift already owns this window. The default released-when-closed
+        // flag sends a second release, which faults in the next pool drain.
+        isReleasedWhenClosed = false
         isOpaque = false
         backgroundColor = .clear
         level = .floating
