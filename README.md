@@ -30,12 +30,15 @@ The shell still receives Control, so Control-C is the shell's. Option types the 
 | ⌘↩ | Fill the window with the focused terminal |
 | ⌘⌥ arrows | Focus the neighbor |
 | ⌘⇧ arrows | Resize the split |
+| ⌘⇧L / ⌘⌥⇧L | Next / previous layout |
 | ⌘⇧E | Equalize splits |
 | ⌘B | Broadcast keys to every terminal in the window |
 | ⌘F | Find |
 | ⌘, | Settings |
 
-Drag the six dots on a pane to drop it on an edge, swap it with another pane, or pull it off into a new window. Drag the rest of the pane's title to move the window.
+⌘⇧L cycles the layout of the panes you already have: Tall, Fat, Grid, Columns, Rows, then Stack. Tall keeps the focused pane large on the left. Fat puts it across the top. Stack shows one pane at a time, and the arrow keys move through the stack. A new terminal joins the current layout. ⌘D still makes a manual split.
+
+Drag the six dots on a pane to drop it on an edge, swap it with another pane, or pull it off into a new window. Drag the rest of the pane's title to move the window. While you resize a window, the panes frost over and darken, then ease back when you let go.
 
 ⌘K runs whatever you type (`btop`, `nvim`, `ssh`, a pipeline) in a new terminal. ⌘↩ in that launcher opens it in a new window.
 

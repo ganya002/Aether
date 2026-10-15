@@ -67,7 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             menuItem.state = model.keyBroadcast ? .on : .off
             return model.keyDeskID != nil
         case #selector(closePane), #selector(splitRight), #selector(splitDown), #selector(toggleMaximize),
-             #selector(equalizeSplits), #selector(focusDirectional(_:)), #selector(resizeDirectional(_:)):
+             #selector(equalizeSplits), #selector(focusDirectional(_:)), #selector(resizeDirectional(_:)),
+             #selector(cycleLayoutForward), #selector(cycleLayoutBackward):
             return model.keyDeskID != nil
         default:
             return true
@@ -92,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .columns: model.arrange(.columns)
             case .rows: model.arrange(.rows)
             case .grid: model.arrange(.grid)
+            case .nextLayout: model.cycleLayout(by: 1)
             case .arrangeWindows: model.arrangeWindows()
             case .broadcast: model.toggleBroadcast()
             case .settings: settingsPanel.show()
@@ -192,6 +194,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             item("Fill Window", #selector(toggleMaximize), "\r"),
             item("Equalize Splits", #selector(equalizeSplits), "e", [.command, .shift]),
+            item("Next Layout", #selector(cycleLayoutForward), "l", [.command, .shift]),
+            item("Previous Layout", #selector(cycleLayoutBackward), "l", [.command, .option, .shift]),
             item("Tile Columns", #selector(tileColumns), ""),
             item("Tile Rows", #selector(tileRows), ""),
             item("Tile Grid", #selector(tileGrid), ""),
@@ -294,6 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     @objc private func toggleMaximize() { model.toggleMaximize() }
     @objc private func equalizeSplits() { model.equalize() }
+    @objc private func cycleLayoutForward() { model.cycleLayout(by: 1) }
+    @objc private func cycleLayoutBackward() { model.cycleLayout(by: -1) }
     @objc private func tileColumns() { model.arrange(.columns) }
     @objc private func tileRows() { model.arrange(.rows) }
     @objc private func tileGrid() { model.arrange(.grid) }

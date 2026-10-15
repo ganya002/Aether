@@ -7,6 +7,24 @@ private func close(_ value: Double, _ expected: Double) -> Bool {
     abs(value - expected) < 0.000_1
 }
 
+@Test func fatKeepsThePrimaryPaneAcrossTheTop() {
+    let tree = Layout.arrange(["a", "b", "c"], pattern: .fat)!
+    let rects = Layout.layoutRects(tree)
+    #expect(close(rects["a"]!.h, 0.58))
+    #expect(close(rects["a"]!.w, 1))
+    #expect(rects["b"]!.y > rects["a"]!.y)
+    #expect(close(rects["b"]!.y, rects["c"]!.y))
+    #expect(rects["b"]!.x < rects["c"]!.x)
+}
+
+@Test func layoutCycleWraps() {
+    #expect(LayoutKind.tall.stepped(1) == .fat)
+    #expect(LayoutKind.stack.stepped(1) == .tall)
+    #expect(LayoutKind.tall.stepped(-1) == .stack)
+    #expect(LayoutKind.splits.stepped(1) == .tall)
+    #expect(LayoutKind.splits.stepped(-1) == .stack)
+}
+
 @Test func columnsHaveEqualWidth() {
     let tree = Layout.arrange(["a", "b", "c"], pattern: .columns)
     let rects = Layout.layoutRects(tree)

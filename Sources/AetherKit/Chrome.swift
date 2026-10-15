@@ -11,6 +11,7 @@ enum PaletteAction: Equatable {
     case columns
     case rows
     case grid
+    case nextLayout
     case arrangeWindows
     case broadcast
     case settings
@@ -245,6 +246,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         PaletteRow(title: "Tile columns", detail: "Arrange the panes", kind: .action(.columns)),
         PaletteRow(title: "Tile rows", detail: "Arrange the panes", kind: .action(.rows)),
         PaletteRow(title: "Tile grid", detail: "Arrange the panes", kind: .action(.grid)),
+        PaletteRow(title: "Next layout", detail: "⌘⇧L", kind: .action(.nextLayout)),
         PaletteRow(title: "Arrange windows", detail: "Grid the glass windows on this screen", kind: .action(.arrangeWindows)),
         PaletteRow(title: "Broadcast keys", detail: "⌘B", kind: .action(.broadcast)),
         PaletteRow(title: "Settings", detail: "⌘,", kind: .action(.settings)),
@@ -409,6 +411,8 @@ final class ShortcutController: NSWindowController {
         ⌘⌥ arrows   Focus the neighbor
         ⌘⇧ arrows   Resize the split
         ⌘⇧E         Equalize splits
+        ⌘⇧L         Next layout
+        ⌘⌥⇧L        Previous layout
         ⌘B          Broadcast keys to every terminal in the window
         ⌘,          Settings
         ⌘+  ⌘-     Font size

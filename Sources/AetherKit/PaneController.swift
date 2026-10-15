@@ -341,6 +341,12 @@ final class PaneController {
         chrome.layer?.cornerRadius = min(14, settings.cornerRadius - 4)
     }
 
+    func applyShade(_ shade: Double, settings: Settings) {
+        let veil: NSColor = settings.text == .light ? .black : .white
+        chrome.terminal.nativeBackgroundColor = veil.withAlphaComponent(shade)
+        chrome.header.setScrim(veil.withAlphaComponent(max(shade, 0.55)))
+    }
+
     func noteTitle(_ title: String) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }

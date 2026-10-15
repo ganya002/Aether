@@ -17,7 +17,59 @@ public enum Direction: String, Equatable, Sendable {
 }
 
 public enum Pattern: String, Equatable, Sendable {
-    case columns, rows, grid, main, mainRight
+    case columns, rows, grid, main, mainRight, fat
+}
+
+/// How a desk arranges the panes it already has. `splits` keeps a hand-built tree.
+public enum LayoutKind: String, Codable, Equatable, Sendable {
+    case tall, fat, grid, columns, rows, stack, splits
+
+    public static let cycle: [LayoutKind] = [.tall, .fat, .grid, .columns, .rows, .stack]
+
+    public var title: String {
+        switch self {
+        case .tall: "Tall"
+        case .fat: "Fat"
+        case .grid: "Grid"
+        case .columns: "Columns"
+        case .rows: "Rows"
+        case .stack: "Stack"
+        case .splits: "Splits"
+        }
+    }
+
+    public var pattern: Pattern? {
+        switch self {
+        case .tall: .main
+        case .fat: .fat
+        case .grid: .grid
+        case .columns: .columns
+        case .rows: .rows
+        case .stack, .splits: nil
+        }
+    }
+
+    public init?(pattern: Pattern) {
+        switch pattern {
+        case .columns: self = .columns
+        case .rows: self = .rows
+        case .grid: self = .grid
+        case .main: self = .tall
+        case .fat: self = .fat
+        case .mainRight: return nil
+        }
+    }
+
+    /// Steps around the kitty-style ring. `splits` enters the ring at Tall, or at Stack when moving backward.
+    public func stepped(_ delta: Int) -> LayoutKind {
+        let ring = Self.cycle
+        guard let index = ring.firstIndex(of: self) else {
+            return delta >= 0 ? ring[0] : ring[ring.count - 1]
+        }
+        let count = ring.count
+        let next = (index + delta % count + count) % count
+        return ring[next]
+    }
 }
 
 public enum LayoutNode: Equatable, Codable, Sendable {
@@ -240,6 +292,14 @@ public enum Layout {
                 ratio: unique.count == 2 ? 0.42 : 0.44,
                 a: chain(Array(unique.dropFirst()), axis: .col),
                 b: .pane(first)
+            )
+        case .fat:
+            return .split(
+                id: makeID(),
+                axis: .col,
+                ratio: unique.count == 2 ? 0.62 : 0.58,
+                a: .pane(first),
+                b: chain(Array(unique.dropFirst()), axis: .row)
             )
         }
     }

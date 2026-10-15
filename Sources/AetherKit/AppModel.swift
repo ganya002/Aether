@@ -12,6 +12,7 @@ struct PaneState: Codable, Equatable {
 struct Desk: Equatable {
     var id: String
     var layout: LayoutNode
+    var kind: LayoutKind
     var focusedID: String
     var maximizedID: String?
     var broadcast: Bool
@@ -77,6 +78,7 @@ final class AppModel {
         let desk = Desk(
             id: id,
             layout: .pane(paneID),
+            kind: .tall,
             focusedID: paneID,
             maximizedID: nil,
             broadcast: false,
@@ -88,7 +90,7 @@ final class AppModel {
         let controller = makeController(desk)
         makePane(desk.panes[paneID]!, settings: settings)
         controller.sync()
-        controller.showWindow(nil)
+        controller.presentAnimated()
         startSoon(paneID)
         scheduleSave()
     }
@@ -100,14 +102,20 @@ final class AppModel {
         }
         let directory = cwd ?? desk.panes[desk.focusedID]?.cwd ?? System.home()
         let paneID = UUID().uuidString
-        let zone: Zone = command == nil ? .right : .right
-        desk.layout = Layout.insert(desk.layout, target: desk.focusedID, zone: zone, newID: paneID)
+        let previous = desk.focusedID
+        var ids = Layout.visualIDs(desk.layout)
+        ids.append(paneID)
         desk.focusedID = paneID
         desk.maximizedID = nil
         desk.panes[paneID] = PaneState(id: paneID, cwd: directory, command: command, title: Self.initialTitle(command: command, cwd: directory), exitCode: nil)
+        if desk.kind == .splits {
+            desk.layout = Layout.insert(desk.layout, target: previous, zone: .right, newID: paneID)
+        } else {
+            desk.layout = Self.layout(for: ids, kind: desk.kind)
+        }
         desks[deskID] = desk
         makePane(desk.panes[paneID]!, settings: settings)
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
         startSoon(paneID)
         scheduleSave()
     }
@@ -119,13 +127,14 @@ final class AppModel {
         }
         let directory = desk.panes[desk.focusedID]?.cwd ?? System.home()
         let paneID = UUID().uuidString
+        desk.kind = .splits
         desk.layout = Layout.insert(desk.layout, target: desk.focusedID, zone: zone, newID: paneID)
         desk.focusedID = paneID
         desk.maximizedID = nil
         desk.panes[paneID] = PaneState(id: paneID, cwd: directory, command: command, title: Self.initialTitle(command: command, cwd: directory), exitCode: nil)
         desks[deskID] = desk
         makePane(desk.panes[paneID]!, settings: settings)
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
         startSoon(paneID)
         scheduleSave()
     }
@@ -133,21 +142,25 @@ final class AppModel {
     func closePane(_ paneID: String) {
         guard let deskID = deskID(containing: paneID), var desk = desks[deskID] else { return }
         panes[paneID]?.shutdown()
-        panes[paneID]?.chrome.removeFromSuperview()
         panes[paneID] = nil
         desk.panes[paneID] = nil
         if desk.maximizedID == paneID { desk.maximizedID = nil }
-        guard let next = Layout.remove(desk.layout, paneID) else {
+        let remaining = Layout.visualIDs(desk.layout).filter { $0 != paneID }
+        guard !remaining.isEmpty else {
             desks[deskID] = desk
             closeDesk(deskID)
             return
         }
-        desk.layout = next
         if desk.focusedID == paneID {
-            desk.focusedID = next.panes[0]
+            desk.focusedID = remaining[0]
+        }
+        if desk.kind == .splits, let next = Layout.remove(desk.layout, paneID) {
+            desk.layout = next
+        } else {
+            desk.layout = Self.layout(for: remaining, kind: desk.kind)
         }
         desks[deskID] = desk
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
         scheduleSave()
     }
 
@@ -187,6 +200,15 @@ final class AppModel {
 
     func focus(_ direction: Direction) {
         guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
+        if desk.kind == .stack && desk.maximizedID == nil {
+            let ids = Layout.visualIDs(desk.layout)
+            guard let index = ids.firstIndex(of: desk.focusedID), ids.count > 1 else { return }
+            let delta = (direction == .right || direction == .down) ? 1 : -1
+            desk.focusedID = ids[(index + delta + ids.count) % ids.count]
+            desks[deskID] = desk
+            controllers[deskID]?.sync(animated: true)
+            return
+        }
         let rects = Layout.layoutRects(desk.layout)
         guard let next = Layout.neighbor(rects, id: desk.focusedID, direction: direction) else { return }
         desk.focusedID = next
@@ -196,14 +218,14 @@ final class AppModel {
             desk.maximizedID = nil
         }
         desks[deskID] = desk
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
     }
 
     func nudge(_ direction: Direction) {
         guard let deskID = keyDeskID, var desk = desks[deskID], desk.maximizedID == nil else { return }
         desk.layout = Layout.nudge(desk.layout, pane: desk.focusedID, direction: direction)
         desks[deskID] = desk
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
         scheduleSave()
     }
 
@@ -211,7 +233,7 @@ final class AppModel {
         guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
         desk.maximizedID = desk.maximizedID == desk.focusedID ? nil : desk.focusedID
         desks[deskID] = desk
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
     }
 
     func equalize() {
@@ -219,18 +241,40 @@ final class AppModel {
         desk.layout = Layout.equalize(desk.layout)
         desk.maximizedID = nil
         desks[deskID] = desk
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
         scheduleSave()
     }
 
     func arrange(_ pattern: Pattern) {
+        guard let kind = LayoutKind(pattern: pattern) else { return }
         guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
-        let ids = Layout.visualIDs(desk.layout)
-        guard let next = Layout.arrange(ids, pattern: pattern) else { return }
-        desk.layout = next
+        desk.kind = kind
+        var ids = Layout.visualIDs(desk.layout)
+        if let index = ids.firstIndex(of: desk.focusedID) {
+            ids.remove(at: index)
+            ids.insert(desk.focusedID, at: 0)
+        }
+        desk.layout = Self.layout(for: ids, kind: kind)
         desk.maximizedID = nil
         desks[deskID] = desk
-        controllers[deskID]?.sync()
+        controllers[deskID]?.sync(animated: true)
+        controllers[deskID]?.flashLayout(kind.title)
+        scheduleSave()
+    }
+
+    func cycleLayout(by delta: Int) {
+        guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
+        desk.kind = desk.kind.stepped(delta)
+        var ids = Layout.visualIDs(desk.layout)
+        if let index = ids.firstIndex(of: desk.focusedID) {
+            ids.remove(at: index)
+            ids.insert(desk.focusedID, at: 0)
+        }
+        desk.maximizedID = nil
+        desk.layout = Self.layout(for: ids, kind: desk.kind)
+        desks[deskID] = desk
+        controllers[deskID]?.sync(animated: true)
+        controllers[deskID]?.flashLayout(desk.kind.title)
         scheduleSave()
     }
 
@@ -401,11 +445,12 @@ final class AppModel {
         guard let sourceID = deskID(containing: paneID), let targetDeskID = deskID(containing: targetID) else { return }
         if sourceID == targetDeskID {
             guard var desk = desks[sourceID] else { return }
+            desk.kind = .splits
             desk.layout = Layout.move(desk.layout, source: paneID, target: targetID, zone: zone)
             desk.focusedID = paneID
             desk.maximizedID = nil
             desks[sourceID] = desk
-            controllers[sourceID]?.sync()
+            controllers[sourceID]?.sync(animated: true)
             scheduleSave()
             return
         }
@@ -425,16 +470,19 @@ final class AppModel {
             source.panes = [:]
             desks[sourceID] = source
         }
+        source.kind = .splits
+        target.kind = .splits
         target.layout = Layout.insert(target.layout, target: targetID, zone: zone, newID: paneID)
         target.panes[paneID] = record
         target.focusedID = paneID
         target.maximizedID = nil
+        desks[sourceID] = source
         desks[targetDeskID] = target
-        controllers[targetDeskID]?.sync()
+        controllers[targetDeskID]?.sync(animated: true)
         if removed == nil {
             closeDesk(sourceID)
         } else {
-            controllers[sourceID]?.sync()
+            controllers[sourceID]?.sync(animated: true)
         }
         controllers[targetDeskID]?.window?.makeKeyAndOrderFront(nil)
         scheduleSave()
@@ -444,6 +492,8 @@ final class AppModel {
         guard let sourceID = deskID(containing: paneID), let targetDeskID = deskID(containing: targetID), sourceID != targetDeskID else { return }
         guard var source = desks[sourceID], var target = desks[targetDeskID] else { return }
         guard let sourceRecord = source.panes[paneID], let targetRecord = target.panes[targetID] else { return }
+        source.kind = .splits
+        target.kind = .splits
         source.layout = replace(source.layout, paneID, with: targetID)
         target.layout = replace(target.layout, targetID, with: paneID)
         source.panes[paneID] = nil
@@ -454,8 +504,8 @@ final class AppModel {
         if target.focusedID == targetID { target.focusedID = paneID }
         desks[sourceID] = source
         desks[targetDeskID] = target
-        controllers[sourceID]?.sync()
-        controllers[targetDeskID]?.sync()
+        controllers[sourceID]?.sync(animated: true)
+        controllers[targetDeskID]?.sync(animated: true)
         scheduleSave()
     }
 
@@ -491,6 +541,7 @@ final class AppModel {
         let desk = Desk(
             id: deskID,
             layout: .pane(paneID),
+            kind: .tall,
             focusedID: paneID,
             maximizedID: nil,
             broadcast: false,
@@ -501,8 +552,8 @@ final class AppModel {
         order.append(deskID)
         let controller = makeController(desk)
         controller.sync()
-        controllers[sourceID]?.sync()
-        controller.showWindow(nil)
+        controllers[sourceID]?.sync(animated: true)
+        controller.presentAnimated()
         scheduleSave()
     }
 
@@ -532,6 +583,7 @@ final class AppModel {
         let desk = Desk(
             id: saved.id,
             layout: layout,
+            kind: saved.kind ?? .splits,
             focusedID: focused.id,
             maximizedID: saved.maximizedID.flatMap { panes[$0] == nil ? nil : $0 },
             broadcast: false,
@@ -657,6 +709,7 @@ final class AppModel {
                 layout: desk.layout,
                 focusedID: desk.focusedID,
                 maximizedID: desk.maximizedID,
+                kind: desk.kind,
                 panes: desk.layout.panes.compactMap { desk.panes[$0] }
             )
         }
@@ -688,7 +741,17 @@ struct SavedDesk: Codable {
     var layout: LayoutNode
     var focusedID: String
     var maximizedID: String?
+    var kind: LayoutKind?
     var panes: [PaneState]
+}
+
+extension AppModel {
+    static func layout(for ids: [String], kind: LayoutKind) -> LayoutNode {
+        guard let first = ids.first else { return .pane(UUID().uuidString) }
+        if ids.count == 1 { return .pane(first) }
+        let pattern = kind.pattern ?? .rows
+        return Layout.arrange(ids, pattern: pattern) ?? .pane(first)
+    }
 }
 
 enum SessionStore {
