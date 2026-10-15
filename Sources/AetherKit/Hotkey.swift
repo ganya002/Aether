@@ -19,6 +19,29 @@ enum GlassMotion {
             window.animator().alphaValue = 1
         }
     }
+
+    /// Fade and lift the panel until it is gone. `finish` decides whether the
+    /// panel is still the one that should disappear.
+    static func vaporize(_ window: NSWindow, finish: @escaping () -> Bool = { true }) {
+        guard window.isVisible else { return }
+        let home = window.frame
+        var gone = home.insetBy(dx: home.width * 0.08, dy: home.height * 0.1)
+        gone.origin.y += 18
+        Motion.group(0.22, {
+            window.animator().alphaValue = 0
+            window.animator().setFrame(gone, display: true)
+        }, done: {
+            guard finish() else { return }
+            window.orderOut(nil)
+            window.setFrame(home, display: false)
+            window.alphaValue = 1
+        })
+    }
+}
+
+final class VaporPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 /// Control-Command-grave, swallowed by the system so it works from any app.

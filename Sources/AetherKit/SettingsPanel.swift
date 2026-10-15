@@ -5,7 +5,7 @@ private final class FlippedDocument: NSView {
 }
 
 @MainActor
-final class SettingsController: NSWindowController {
+final class SettingsController: NSWindowController, NSWindowDelegate {
     private let glassView = NSGlassEffectView()
     private let shade = NSSlider()
     private let radius = NSSlider()
@@ -23,11 +23,13 @@ final class SettingsController: NSWindowController {
     private let dropdown = NSButton(checkboxWithTitle: "Dropdown terminal    ⌃⌘`", target: nil, action: nil)
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
     private var applying = false
+    private var escMonitor: Any?
+    private var vaporToken = 0
 
     init() {
-        let panel = NSPanel(
+        let panel = VaporPanel(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 760),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -39,6 +41,7 @@ final class SettingsController: NSWindowController {
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         super.init(window: panel)
+        panel.delegate = self
 
         glassView.autoresizingMask = [.width, .height]
         glassView.frame = panel.contentView?.bounds ?? .zero
@@ -140,10 +143,29 @@ final class SettingsController: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     func show() {
+        vaporToken += 1
         load()
         window?.center()
         guard let window else { return }
         GlassMotion.present(window)
+        if escMonitor == nil {
+            escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, event.window === self.window, event.keyCode == 53 else { return event }
+                self.vaporize()
+                return nil
+            }
+        }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        vaporize()
+    }
+
+    func vaporize() {
+        guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
+        vaporToken += 1
+        let token = vaporToken
+        GlassMotion.vaporize(window) { [weak self] in self?.vaporToken == token }
     }
 
     @objc private func changed() {

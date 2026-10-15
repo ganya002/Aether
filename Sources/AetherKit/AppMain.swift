@@ -327,8 +327,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func splitRight() { model.splitFocused(.right) }
     @objc private func splitDown() { model.splitFocused(.bottom) }
     @objc private func closePane() {
-        if NSApp.keyWindow === palette.window || NSApp.keyWindow === settingsPanel.window || NSApp.keyWindow === shortcuts.window {
-            NSApp.keyWindow?.performClose(nil)
+        if NSApp.keyWindow === palette.window {
+            palette.vaporize()
+            return
+        }
+        if NSApp.keyWindow === settingsPanel.window {
+            settingsPanel.vaporize()
+            return
+        }
+        if NSApp.keyWindow === shortcuts.window {
+            shortcuts.vaporize()
             return
         }
         closeFocusedPane()

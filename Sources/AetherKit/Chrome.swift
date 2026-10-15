@@ -32,17 +32,18 @@ struct PaletteRow: Equatable {
 }
 
 @MainActor
-final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate {
     var onPick: ((PaletteRow) -> Void)?
     private let field = NSTextField()
     private let table = NSTableView()
     private let scroll = NSScrollView()
     private var rows: [PaletteRow] = []
+    private var vaporToken = 0
 
     init() {
-        let panel = NSPanel(
+        let panel = VaporPanel(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
-            styleMask: [.titled, .fullSizeContentView, .closable],
+            styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -55,7 +56,9 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.title = "Launch"
+        panel.isMovableByWindowBackground = true
         super.init(window: panel)
+        panel.delegate = self
 
         let glass = NSGlassEffectView(frame: panel.contentView?.bounds ?? .zero)
         glass.autoresizingMask = [.width, .height]
@@ -96,11 +99,16 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
         column.title = ""
+        column.width = 544
+        column.minWidth = 200
+        column.maxWidth = 4000
+        column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
         table.headerView = nil
         table.backgroundColor = .clear
-        table.rowHeight = 38
-        table.intercellSpacing = NSSize(width: 0, height: 2)
+        table.rowHeight = 42
+        table.intercellSpacing = NSSize(width: 0, height: 4)
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.dataSource = self
         table.delegate = self
         table.refusesFirstResponder = true
@@ -118,10 +126,11 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
     func show() {
         field.stringValue = ""
         reload()
+        vaporToken += 1
         if let parent = NSApp.keyWindow?.frame {
-            let size = window?.frame.size ?? NSSize(width: 560, height: 420)
+            let size = NSSize(width: 560, height: 420)
             let origin = NSPoint(x: parent.midX - size.width / 2, y: parent.maxY - size.height - 48)
-            window?.setFrameOrigin(origin)
+            window?.setFrame(NSRect(origin: origin, size: size), display: false)
         } else {
             window?.center()
         }
@@ -129,40 +138,38 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
             glass.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
         }
         guard let window else { return }
+        fitColumn()
         GlassMotion.present(window)
         window.makeFirstResponder(field)
+        DispatchQueue.main.async { [weak self] in self?.fitColumn() }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        vaporize()
+    }
+
+    func vaporize() {
+        guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
+        vaporToken += 1
+        let token = vaporToken
+        GlassMotion.vaporize(window) { [weak self] in self?.vaporToken == token }
+    }
+
+    private func fitColumn() {
+        guard let column = table.tableColumns.first else { return }
+        let width = max(320, scroll.bounds.width)
+        column.width = width
+        table.frame.size.width = width
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let item = rows[row]
-        let cell = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("row"), owner: self) as? NSTableCellView ?? {
-            let view = NSTableCellView()
-            view.identifier = NSUserInterfaceItemIdentifier("row")
-            let title = NSTextField(labelWithString: "")
-            title.font = .systemFont(ofSize: 13, weight: .medium)
-            title.translatesAutoresizingMaskIntoConstraints = false
-            let detail = NSTextField(labelWithString: "")
-            detail.font = .systemFont(ofSize: 11)
-            detail.textColor = .secondaryLabelColor
-            detail.translatesAutoresizingMaskIntoConstraints = false
-            detail.tag = 2
-            view.addSubview(title)
-            view.addSubview(detail)
-            view.textField = title
-            NSLayoutConstraint.activate([
-                title.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-                title.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-                title.topAnchor.constraint(equalTo: view.topAnchor, constant: 3),
-                detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-                detail.trailingAnchor.constraint(equalTo: title.trailingAnchor),
-                detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 0),
-            ])
-            return view
-        }()
+        let cell = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("row"), owner: self) as? PaletteRowView ?? PaletteRowView()
         cell.textField?.stringValue = item.title
-        (cell.viewWithTag(2) as? NSTextField)?.stringValue = item.detail
+        cell.detail.stringValue = item.detail
+        fitColumn()
         return cell
     }
 
@@ -185,7 +192,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
             return true
         }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            close()
+            vaporize()
             return true
         }
         return false
@@ -198,7 +205,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         if case .command(let command, _) = row.kind, NSApp.currentEvent?.modifierFlags.contains(.command) == true {
             row = PaletteRow(title: row.title, detail: row.detail, kind: .command(command, newWindow: true))
         }
-        close()
+        vaporize()
         onPick?(row)
     }
 
@@ -259,13 +266,47 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
     ]
 }
 
+final class PaletteRowView: NSTableCellView {
+    let detail = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = NSUserInterfaceItemIdentifier("row")
+        let title = NSTextField(labelWithString: "")
+        title.font = .systemFont(ofSize: 13, weight: .medium)
+        title.lineBreakMode = .byTruncatingTail
+        title.maximumNumberOfLines = 1
+        title.isEditable = false
+        title.isBordered = false
+        title.drawsBackground = false
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+        detail.maximumNumberOfLines = 1
+        textField = title
+        addSubview(title)
+        addSubview(detail)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        let width = max(0, bounds.width - 28)
+        textField?.frame = NSRect(x: 14, y: bounds.height - 22, width: width, height: 16)
+        detail.frame = NSRect(x: 14, y: 4, width: width, height: 14)
+    }
+}
+
 
 @MainActor
-final class ShortcutController: NSWindowController {
+final class ShortcutController: NSWindowController, NSWindowDelegate {
+    private var vaporToken = 0
     init() {
-        let panel = NSPanel(
+        let panel = VaporPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -273,7 +314,10 @@ final class ShortcutController: NSWindowController {
         panel.titlebarAppearsTransparent = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        panel.isMovableByWindowBackground = true
+        panel.hasShadow = true
         super.init(window: panel)
+        panel.delegate = self
         let effect = NSGlassEffectView(frame: panel.contentView?.bounds ?? .zero)
         effect.autoresizingMask = [.width, .height]
         effect.style = .regular
@@ -320,11 +364,23 @@ final class ShortcutController: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     func show() {
+        vaporToken += 1
         window?.center()
         guard let window else { return }
         if let glass = window.contentView as? NSGlassEffectView {
             glass.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
         }
         GlassMotion.present(window)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        vaporize()
+    }
+
+    func vaporize() {
+        guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
+        vaporToken += 1
+        let token = vaporToken
+        GlassMotion.vaporize(window) { [weak self] in self?.vaporToken == token }
     }
 }
