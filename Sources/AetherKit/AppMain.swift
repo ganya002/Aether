@@ -42,6 +42,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         model.restoreOrCreate()
         NSApp.activate(ignoringOtherApps: true)
+        promptToMoveIntoApplications()
+    }
+
+    /// The curl installer leaves Aether in Downloads and launches it. The first time it
+    /// starts from anywhere other than an Applications folder, say so.
+    private func promptToMoveIntoApplications() {
+        let bundle = Bundle.main.bundleURL
+        guard bundle.pathExtension == "app" else { return }
+        let path = bundle.standardizedFileURL.path
+        let homes = [
+            "/Applications/",
+            (NSHomeDirectory() as NSString).appendingPathComponent("Applications") + "/",
+        ]
+        if homes.contains(where: { path.hasPrefix($0) }) { return }
+        let key = "aether.promptedApplicationsFolder"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let alert = NSAlert()
+            alert.messageText = "Drag Aether into Applications"
+            alert.informativeText = "Aether is running from \(bundle.deletingLastPathComponent().lastPathComponent). Drag Aether.app into your Applications folder so Spotlight and the Dock can open it."
+            alert.addButton(withTitle: "Show in Finder")
+            alert.addButton(withTitle: "Later")
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.activateFileViewerSelecting([bundle])
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications"))
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

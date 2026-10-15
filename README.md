@@ -6,6 +6,14 @@ Open as many windows as you want, split them, and drag a pane out into a window 
 
 Requires macOS 26 or later.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ganya002/Aether/main/scripts/install.sh | bash
+```
+
+That builds Aether, puts it in Downloads, and opens it. The first time it starts, it asks you to drag it into Applications.
+
 ## Build
 
 ```bash
