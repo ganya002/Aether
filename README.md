@@ -1,52 +1,44 @@
 # Aether
 
-A glass desk for every CLI. Aether tiles as many real terminals as you want on one wallpaper, with the panes translucent enough that the background shows through. It is a local app: one small Node process on your machine, no Electron, and your shells never leave it.
+A native macOS terminal. Every pane is a real shell, and the window is Liquid Glass: it refracts whatever is actually behind it. There is no wallpaper image and no browser.
 
-Drag a pane onto another to split or swap. Drag the gaps to resize. Switch a desk to freeform and place windows anywhere, with edges that snap. Launch `vim`, `lazygit`, `ssh`, a repl, or whatever is on your `PATH` — each pane is a real PTY with color, unicode, and mouse reporting.
+Open as many windows as you want, split them, and drag a pane out into a window of its own. Windows snap to each other when you let go. Hold Option to skip the snap.
 
-## Run it
+Requires macOS 26 or later.
+
+## Build
 
 ```bash
-npm install
-npm start
+./scripts/build-app.sh
+open dist/Aether.app
 ```
 
-Then open [http://127.0.0.1:41773](http://127.0.0.1:41773).
-
-On a Mac, `npm run mac` starts the server and opens a chromeless Chrome, Edge, or Brave window you can keep in the Dock. That uses the browser you already have, which is lighter than shipping a second one.
-
-The desk is saved in `~/Library/Application Support/Aether` on macOS and `~/.config/aether` on Linux. Uploaded wallpapers live there too.
+`swift test` checks the layout engine.
 
 ## Daily keys
 
-On a Mac the modifier is ⌘. On Linux and Windows it is Ctrl. The shell still receives Ctrl-C, and on a Mac it still receives Ctrl for readline.
+The shell still receives Control, so Control-C is the shell's. Option types the macOS character.
 
 | Keys | Action |
 | --- | --- |
-| ⌘K | Run a command, or search panes and actions |
-| ⌘T | New terminal |
+| ⌘N | New window |
+| ⌘T | New terminal in this window |
+| ⌘K | Launch a command or search actions |
 | ⌘D / ⌘⇧D | Split right / split down |
-| ⌘W | Close the focused pane |
-| ⌘↩ | Fill the desk with the focused pane |
+| ⌘W | Close the focused terminal |
+| ⌘⇧W | Close the window |
+| ⌘↩ | Fill the window with the focused terminal |
 | ⌘⌥ arrows | Focus the neighbor |
-| ⌘⇧ arrows | Resize |
-| ⌘B | Broadcast keys to every pane on the desk |
-| ⌘E | Tile or freeform |
-| ⌘F | Find in the focused pane |
+| ⌘⇧ arrows | Resize the split |
+| ⌘⇧E | Equalize splits |
+| ⌘B | Broadcast keys to every terminal in the window |
+| ⌘F | Find |
 | ⌘, | Settings |
 
-Drop an image on the wallpaper to use it as the background. Drop a file on a pane to paste its path.
+Drag the six dots on a pane to drop it on an edge, swap it with another pane, or pull it off into a new window. Drag the rest of the pane's title to move the window.
 
-## Low power
+⌘K runs whatever you type (`btop`, `nvim`, `ssh`, a pipeline) in a new terminal. ⌘↩ in that launcher opens it in a new window.
 
-The default look is frosted glass on a still image. WebGL is off, because many panes each holding a GL context costs more than the canvas renderer. Hidden desks unmount their renderers; the processes keep running so a dev server survives a desk switch.
+Shade, glass style, type size, and snap behavior live in Settings. Shade only exists so the type stays readable. Turn it down to see more of the desktop through the glass.
 
-Turn on **Low power** in the Look panel to drop blur, grain, and motion. Turn scrollback down in Settings if you keep dozens of shells open.
-
-## Scripts
-
-```bash
-npm test
-npm run typecheck
-npm run build && npm run serve
-```
+Sessions are remembered in `~/Library/Application Support/Aether/session.json`. Processes start again in the directory they were left in.
