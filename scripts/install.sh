@@ -63,7 +63,9 @@ if [[ -z "$SWIFT" ]]; then
   echo "Install the Xcode Command Line Tools, or run: swiftly install 6.2"
   exit 1
 fi
-export PATH="$(dirname "$SWIFT"):$PATH"
+export SWIFT
+export PATH="$(dirname "$SWIFT"):/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+hash -r
 
 WORKDIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORKDIR"; }
@@ -77,7 +79,7 @@ if [[ ! -d "$SRC" ]]; then
   exit 1
 fi
 
-echo "Building Aether… this can take a minute the first time."
+echo "Building Aether with $("$SWIFT" --version | awk '/Swift version/{print; exit}'). This can take a minute the first time."
 "$SRC/scripts/build-app.sh"
 
 DEST="$HOME/Downloads/Aether.app"
