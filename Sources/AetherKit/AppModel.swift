@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 struct PaneState: Codable, Equatable {
@@ -16,6 +17,7 @@ struct Desk: Equatable {
     var focusedID: String
     var maximizedID: String?
     var broadcast: Bool
+    var dropdown: Bool = false
     var frame: CGRect
     var panes: [String: PaneState]
 }
@@ -33,6 +35,8 @@ final class AppModel {
     private var directoryTimer: Timer?
     private var closing: Set<String> = []
     private var lastKeyDesk: String?
+    private var dropdownID: String?
+    private var busySince: [String: Date] = [:]
 
     private init() {
         directoryTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { _ in
@@ -49,8 +53,10 @@ final class AppModel {
                 return id
             }
         }
-        if let lastKeyDesk, desks[lastKeyDesk] != nil { return lastKeyDesk }
-        return order.last
+        if let lastKeyDesk, desks[lastKeyDesk] != nil, controllers[lastKeyDesk]?.window?.isVisible == true {
+            return lastKeyDesk
+        }
+        return order.last { controllers[$0]?.window?.isVisible == true }
     }
 
     func noteKey(_ deskID: String) {
@@ -58,9 +64,19 @@ final class AppModel {
     }
 
     func restoreOrCreate() {
-        if let snapshot = SessionStore.load() {
+        let snapshot = SessionStore.load()
+        if let snapshot {
             settings = snapshot.settings
-            settings.clamp()
+        }
+        let portable = ConfigStore.load()
+        if let portable {
+            settings = portable
+        }
+        settings.clamp()
+        if portable == nil, (snapshot?.version ?? 0) < Settings.currentVersion, settings.glass == .clear {
+            settings.glass = .regular
+        }
+        if let snapshot {
             for saved in snapshot.desks {
                 restore(saved)
             }
@@ -68,6 +84,8 @@ final class AppModel {
         if desks.isEmpty {
             newWindow()
         }
+        ConfigStore.save(settings)
+        applyDock()
     }
 
     func newWindow(command: String? = nil, cwd: String? = nil, frame: CGRect? = nil) {
@@ -93,6 +111,52 @@ final class AppModel {
         controller.presentAnimated()
         startSoon(paneID)
         scheduleSave()
+    }
+
+    func toggleDropdown() {
+        guard settings.dropdownEnabled else { return }
+        if let id = dropdownID, let controller = controllers[id] {
+            if controller.window?.isVisible == true, (controller.window?.alphaValue ?? 0) > 0.4 {
+                controller.dismissDropdown()
+            } else {
+                controller.presentDropdown()
+            }
+            return
+        }
+        let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
+        let width = min(980, screen.width - 36)
+        let height = min(460, max(320, screen.height * 0.44))
+        let frame = CGRect(x: screen.midX - width / 2, y: screen.maxY - height - 8, width: width, height: height)
+        let id = UUID().uuidString
+        let paneID = UUID().uuidString
+        let directory = focusedDirectory() ?? System.home()
+        var desk = Desk(
+            id: id,
+            layout: .pane(paneID),
+            kind: .tall,
+            focusedID: paneID,
+            maximizedID: nil,
+            broadcast: false,
+            frame: frame,
+            panes: [paneID: PaneState(id: paneID, cwd: directory, command: nil, title: Self.initialTitle(command: nil, cwd: directory), exitCode: nil)]
+        )
+        desk.dropdown = true
+        desks[id] = desk
+        order.append(id)
+        dropdownID = id
+        let controller = makeController(desk)
+        makePane(desk.panes[paneID]!, settings: settings)
+        controller.sync()
+        controller.presentDropdown()
+        startSoon(paneID)
+    }
+
+    func noteDropdownHidden(_ deskID: String) {
+        guard dropdownID == deskID, lastKeyDesk == deskID else { return }
+        lastKeyDesk = order.last { $0 != deskID && controllers[$0]?.window?.isVisible == true }
+        if let lastKeyDesk, let window = controllers[lastKeyDesk]?.window {
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     func newPane(command: String? = nil, cwd: String? = nil) {
@@ -179,6 +243,7 @@ final class AppModel {
         }
         desks[deskID] = nil
         order.removeAll { $0 == deskID }
+        if dropdownID == deskID { dropdownID = nil }
         closing.insert(deskID)
         DispatchQueue.main.async { [weak self] in
             self?.controllers[deskID] = nil
@@ -282,7 +347,7 @@ final class AppModel {
         let screen = controllers[keyDeskID ?? ""]?.window?.screen?.visibleFrame
             ?? NSScreen.main?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1200, height: 800)
-        let ids = order.filter { desks[$0] != nil }
+        let ids = order.filter { desks[$0] != nil && desks[$0]?.dropdown != true }
         let rects = Layout.tidyRects(ids, gap: 0.018)
         for id in ids {
             guard let norm = rects[id], let window = controllers[id]?.window else { continue }
@@ -635,7 +700,16 @@ final class AppModel {
         for controller in controllers.values {
             controller.sync()
         }
+        applyDock()
+        HotkeyCenter.setEnabled(settings.dropdownEnabled)
+        ConfigStore.save(settings)
         scheduleSave()
+    }
+
+    private func applyDock() {
+        let policy: NSApplication.ActivationPolicy = settings.hideDockIcon ? .accessory : .regular
+        guard NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
     }
 
     private func refreshDirectories() {
@@ -646,6 +720,45 @@ final class AppModel {
                 pane.noteDirectory(cwd)
             }
         }
+        watchCommands()
+    }
+
+    private func watchCommands() {
+        guard settings.notifyOnFinish else {
+            busySince.removeAll()
+            return
+        }
+        let now = Date()
+        var live: Set<String> = []
+        for (id, pane) in panes {
+            live.insert(id)
+            guard let process = pane.chrome.terminal.process, process.running, process.childfd >= 0, process.shellPid > 0 else {
+                busySince[id] = nil
+                continue
+            }
+            let foreground = tcgetpgrp(process.childfd)
+            let busy = foreground > 0 && foreground != process.shellPid
+            if busy {
+                if busySince[id] == nil { busySince[id] = now }
+                continue
+            }
+            guard let started = busySince[id] else { continue }
+            busySince[id] = nil
+            let elapsed = now.timeIntervalSince(started)
+            guard elapsed >= 2 else { continue }
+            guard let deskID = deskID(containing: id) else { continue }
+            let window = controllers[deskID]?.window
+            let visibleHere = NSApp.isActive && window?.isKeyWindow == true && !NSApp.isHidden
+            guard !visibleHere else { continue }
+            FinishNotifier.deliver(title: pane.title, body: Self.finishedPhrase(elapsed))
+        }
+        busySince = busySince.filter { live.contains($0.key) }
+    }
+
+    private static func finishedPhrase(_ elapsed: TimeInterval) -> String {
+        let seconds = Int(elapsed.rounded())
+        if seconds < 60 { return "Finished in \(seconds)s" }
+        return "Finished in \(seconds / 60)m \(seconds % 60)s"
     }
 
     private func focusedDirectory() -> String? {
@@ -660,7 +773,10 @@ final class AppModel {
     private func cascadedFrame() -> CGRect {
         let size = CGSize(width: 780, height: 500)
         let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
-        if let previous = order.reversed().compactMap({ controllers[$0]?.window?.frame }).first {
+        if let previous = order.reversed().compactMap({ id -> CGRect? in
+            guard desks[id]?.dropdown != true else { return nil }
+            return controllers[id]?.window?.frame
+        }).first {
             var frame = CGRect(origin: CGPoint(x: previous.minX + 32, y: previous.minY - 32), size: size)
             if !screen.intersects(frame) {
                 frame.origin = CGPoint(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2)
@@ -698,7 +814,7 @@ final class AppModel {
     private func saveNow() {
         guard !CommandLine.arguments.contains("--smoke") else { return }
         let saved = order.compactMap { id -> SavedDesk? in
-            guard let desk = desks[id] else { return nil }
+            guard let desk = desks[id], !desk.dropdown else { return nil }
             let frame = controllers[id]?.window?.frame ?? desk.frame
             return SavedDesk(
                 id: desk.id,
@@ -751,6 +867,24 @@ extension AppModel {
         if ids.count == 1 { return .pane(first) }
         let pattern = kind.pattern ?? .rows
         return Layout.arrange(ids, pattern: pattern) ?? .pane(first)
+    }
+}
+
+enum ConfigStore {
+    static func fileURL() -> URL {
+        System.supportDirectory().appendingPathComponent("config.json")
+    }
+
+    static func load() -> Settings? {
+        guard let data = try? Data(contentsOf: fileURL()) else { return nil }
+        return try? JSONDecoder().decode(Settings.self, from: data)
+    }
+
+    static func save(_ settings: Settings) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(settings) else { return }
+        try? data.write(to: fileURL(), options: .atomic)
     }
 }
 

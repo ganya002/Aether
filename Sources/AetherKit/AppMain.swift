@@ -41,6 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return
         }
         model.restoreOrCreate()
+        HotkeyCenter.onFire = { [weak self] in
+            self?.model.toggleDropdown()
+        }
+        HotkeyCenter.install()
+        HotkeyCenter.setEnabled(model.settings.dropdownEnabled)
         NSApp.activate(ignoringOtherApps: true)
         promptToMoveIntoApplications()
     }
@@ -127,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .broadcast: model.toggleBroadcast()
             case .settings: settingsPanel.show()
             case .find: showFind()
+            case .dropdown: model.toggleDropdown()
             }
         }
     }
@@ -239,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             responderItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             responderItem("Zoom", #selector(NSWindow.performZoom(_:)), ""),
             item("Launch…", #selector(showPalette), "k"),
+            item("Dropdown Terminal", #selector(showDropdown), ""),
         ]))
         main.addItem(menu("Help", items: [
             item("Keyboard Shortcuts", #selector(showShortcuts), ""),
@@ -314,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func showSettings() { settingsPanel.show() }
     @objc private func showShortcuts() { shortcuts.show() }
     @objc private func showPalette() { palette.show() }
+    @objc private func showDropdown() { model.toggleDropdown() }
     @objc private func newWindow() { model.newWindow() }
     @objc private func newPane() { model.newPane() }
     @objc private func splitRight() { model.splitFocused(.right) }

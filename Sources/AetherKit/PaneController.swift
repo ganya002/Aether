@@ -5,6 +5,7 @@ import SwiftTerm
 final class AetherTerminal: LocalProcessTerminalView {
     var onUserInput: ((ArraySlice<UInt8>) -> Void)?
     var onFocus: (() -> Void)?
+    var workingDirectory: () -> String = { System.home() }
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         super.send(source: source, data: data)
@@ -12,6 +13,65 @@ final class AetherTerminal: LocalProcessTerminalView {
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        matchScreenScale()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        matchScreenScale()
+    }
+
+    override func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        if PathOpener.open(link, cwd: workingDirectory()) { return }
+        super.requestOpenLink(source: source, link: link, params: params)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if event.modifierFlags.contains(.command),
+           event.clickCount == 1,
+           !event.modifierFlags.contains(.shift),
+           self.selection?.active != true,
+           let token = token(at: event),
+           PathOpener.open(token, cwd: workingDirectory()) {
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    private func matchScreenScale() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        layer?.contentsScale = scale
+    }
+
+    private func token(at event: NSEvent) -> String? {
+        guard let terminal, terminal.cols > 0, terminal.rows > 0 else { return nil }
+        let local = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(local) else { return nil }
+        let cellWidth = max(1, bounds.width / CGFloat(terminal.cols))
+        let cellHeight = max(1, bounds.height / CGFloat(terminal.rows))
+        let column = min(terminal.cols - 1, max(0, Int(local.x / cellWidth)))
+        let row = min(terminal.rows - 1, max(0, Int((bounds.height - local.y) / cellHeight)))
+        guard let line = terminal.getLine(row: row) else { return nil }
+        let text = line.translateToString(trimRight: true)
+        guard !text.isEmpty else { return nil }
+        let pattern = #"(?:https?://|mailto:)[^\s<>\"']+|(?:~|\.\.?|[A-Za-z0-9_])[A-Za-z0-9_./~+\-]*[A-Za-z0-9](?::\d+(?::\d+)?)?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        var found: String?
+        regex.enumerateMatches(in: text, range: range) { match, _, stop in
+            guard let match, let span = Range(match.range, in: text) else { return }
+            let start = text.distance(from: text.startIndex, to: span.lowerBound)
+            let end = text.distance(from: text.startIndex, to: span.upperBound)
+            if column >= start - 1, column <= end {
+                found = String(text[span])
+                stop.pointee = true
+            }
+        }
+        return found
+    }
 }
 
 @MainActor
@@ -20,7 +80,13 @@ final class PaneChrome: NSView {
     let header = PaneHeader()
     let terminal: AetherTerminal
     let exitBanner = ExitBanner()
+    private let clip = NSView()
     private let outline = PassthroughView()
+    private let rest = PassthroughView()
+    private var blur: FrostView?
+    private var appliedFocus: Bool?
+    private var appliedRest: FocusRest?
+    private var appliedTone: TextTone?
 
     init(paneID: String, font: NSFont) {
         self.paneID = paneID
@@ -29,18 +95,29 @@ final class PaneChrome: NSView {
         options.cursorStyle = .steadyBar
         options.termName = "xterm-256color"
         terminal = AetherTerminal(frame: .zero, font: font, options: options)
+        terminal.scrollerStyle = .overlay
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 12
-        layer?.masksToBounds = true
-        header.translatesAutoresizingMaskIntoConstraints = true
-        terminal.translatesAutoresizingMaskIntoConstraints = true
-        exitBanner.translatesAutoresizingMaskIntoConstraints = true
-        outline.translatesAutoresizingMaskIntoConstraints = true
-        addSubview(terminal)
-        addSubview(header)
-        addSubview(exitBanner)
-        addSubview(outline)
+        layer?.masksToBounds = false
+        layer?.shadowColor = NSColor.white.cgColor
+        layer?.shadowOffset = .zero
+        layer?.shadowOpacity = 0
+        layer?.shadowRadius = 2
+        clip.wantsLayer = true
+        clip.layer?.masksToBounds = true
+        clip.layer?.cornerRadius = 12
+        rest.wantsLayer = true
+        rest.layer?.backgroundColor = NSColor.black.cgColor
+        rest.alphaValue = 0
+        for view in [clip, terminal, header, exitBanner, rest, outline] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = true
+        }
+        addSubview(clip)
+        clip.addSubview(terminal)
+        clip.addSubview(header)
+        clip.addSubview(exitBanner)
+        clip.addSubview(rest)
+        clip.addSubview(outline)
         exitBanner.isHidden = true
     }
 
@@ -49,18 +126,76 @@ final class PaneChrome: NSView {
 
     override func layout() {
         super.layout()
+        let radius = layer?.cornerRadius ?? 12
+        clip.frame = bounds
+        clip.layer?.cornerRadius = radius
+        layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
         let headerHeight: CGFloat = 34
         header.frame = NSRect(x: 0, y: bounds.height - headerHeight, width: bounds.width, height: headerHeight)
         let bannerHeight: CGFloat = exitBanner.isHidden ? 0 : 36
         exitBanner.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: 28)
         terminal.frame = NSRect(x: 0, y: bannerHeight, width: bounds.width, height: max(0, bounds.height - headerHeight - bannerHeight))
+        rest.frame = bounds
+        blur?.frame = bounds
         outline.frame = bounds
-        outline.layer?.cornerRadius = layer?.cornerRadius ?? 12
+        outline.layer?.cornerRadius = radius
     }
 
-    func setFocused(_ focused: Bool) {
-        outline.layer?.borderWidth = focused ? 1 : 0.5
-        outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0.16).cgColor
+    func setFocused(_ focused: Bool, settings: Settings) {
+        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text { return }
+        let animate = appliedFocus != nil
+        appliedFocus = focused
+        appliedRest = settings.focusRest
+        appliedTone = settings.text
+        let dim: CGFloat = focused || settings.focusRest != .dim ? 0 : (settings.text == .light ? 0.22 : 0.12)
+        let showBlur = !focused && settings.focusRest == .blur
+        if showBlur, blur == nil {
+            let view = FrostView(frame: bounds)
+            view.alphaValue = 0
+            clip.addSubview(view, positioned: .below, relativeTo: outline)
+            blur = view
+        }
+        let apply = {
+            self.outline.layer?.borderWidth = focused ? 1.8 : 0.5
+            self.outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.96 : 0.12).cgColor
+            self.layer?.shadowOpacity = focused ? 0.82 : 0
+            self.layer?.shadowRadius = focused ? 14 : 2
+            self.rest.alphaValue = dim
+            self.blur?.alphaValue = showBlur ? 1 : 0
+            self.header.setFindVisible(focused)
+        }
+        if animate {
+            bloom(focused)
+            Motion.group(Motion.snap) { apply() }
+        } else {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            apply()
+            CATransaction.commit()
+        }
+        if !showBlur, let blur {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Motion.snap) { [weak self] in
+                guard let self, self.appliedRest != .blur || self.appliedFocus == true else { return }
+                blur.removeFromSuperview()
+                if self.blur === blur { self.blur = nil }
+            }
+        }
+    }
+
+    private func bloom(_ focused: Bool) {
+        guard let layer else { return }
+        let opacity = CABasicAnimation(keyPath: "shadowOpacity")
+        opacity.fromValue = layer.presentation()?.shadowOpacity ?? layer.shadowOpacity
+        opacity.toValue = focused ? 0.82 : 0
+        opacity.duration = Motion.snap
+        opacity.timingFunction = Motion.ease()
+        layer.add(opacity, forKey: "shadowOpacity")
+        let radius = CABasicAnimation(keyPath: "shadowRadius")
+        radius.fromValue = layer.presentation()?.shadowRadius ?? layer.shadowRadius
+        radius.toValue = focused ? 14 : 2
+        radius.duration = Motion.snap
+        radius.timingFunction = Motion.ease()
+        layer.add(radius, forKey: "shadowRadius")
     }
 
     func showExit(code: Int32?) {
@@ -81,9 +216,11 @@ final class PaneHeader: NSView {
     var onGripDrag: ((NSEvent) -> Void)?
     var onWindowDrag: ((NSEvent) -> Void)?
     var onClose: (() -> Void)?
+    var onFind: (() -> Void)?
 
     private let titleField = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
+    private let findButton = NSButton()
     private var tone: TextTone = .light
     private var scrim = NSColor.black.withAlphaComponent(0.55)
 
@@ -104,6 +241,17 @@ final class PaneHeader: NSView {
         closeButton.translatesAutoresizingMaskIntoConstraints = true
         closeButton.toolTip = "Close terminal"
         addSubview(closeButton)
+
+        findButton.isBordered = false
+        findButton.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")
+        findButton.imageScaling = .scaleProportionallyDown
+        findButton.contentTintColor = NSColor.white.withAlphaComponent(0.78)
+        findButton.target = self
+        findButton.action = #selector(findPressed)
+        findButton.translatesAutoresizingMaskIntoConstraints = true
+        findButton.toolTip = "Find  ⌘F"
+        findButton.alphaValue = 0
+        addSubview(findButton)
     }
 
     @available(*, unavailable)
@@ -115,7 +263,12 @@ final class PaneHeader: NSView {
         let color: NSColor = tone == .light ? .white : NSColor(srgbRed: 0.09, green: 0.1, blue: 0.12, alpha: 1)
         titleField.textColor = color.withAlphaComponent(0.92)
         closeButton.contentTintColor = color.withAlphaComponent(0.75)
+        findButton.contentTintColor = color.withAlphaComponent(0.75)
         needsDisplay = true
+    }
+
+    func setFindVisible(_ visible: Bool) {
+        findButton.alphaValue = visible ? 1 : 0
     }
 
     func setScrim(_ color: NSColor) {
@@ -126,7 +279,8 @@ final class PaneHeader: NSView {
     override func layout() {
         super.layout()
         closeButton.frame = NSRect(x: bounds.width - 30, y: 5, width: 24, height: 24)
-        titleField.frame = NSRect(x: 28, y: 7, width: max(0, bounds.width - 64), height: 20)
+        findButton.frame = NSRect(x: bounds.width - 56, y: 5, width: 24, height: 24)
+        titleField.frame = NSRect(x: 28, y: 7, width: max(0, bounds.width - 92), height: 20)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -164,8 +318,18 @@ final class PaneHeader: NSView {
         addCursorRect(NSRect(x: 26, y: 0, width: max(0, bounds.width - 56), height: bounds.height), cursor: .openHand)
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if hit === findButton, findButton.alphaValue < 0.2 { return self }
+        return hit
+    }
+
     @objc private func closePressed() {
         onClose?()
+    }
+
+    @objc private func findPressed() {
+        onFind?()
     }
 }
 
@@ -216,6 +380,21 @@ final class ExitBanner: NSView {
 }
 
 @MainActor
+final class FrostView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        blendingMode = .withinWindow
+        material = .hudWindow
+        state = .active
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 final class PassthroughView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -309,10 +488,11 @@ final class PaneController {
             chrome.terminal.terminate()
         }
         let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let environment = PaneController.shellEnvironment()
         if trimmed.isEmpty {
-            chrome.terminal.startProcess(executable: shell, args: ["-l"], currentDirectory: directory)
+            chrome.terminal.startProcess(executable: shell, args: ["-l"], environment: environment, currentDirectory: directory)
         } else {
-            chrome.terminal.startProcess(executable: shell, args: ["-lc", trimmed], currentDirectory: directory)
+            chrome.terminal.startProcess(executable: shell, args: ["-lc", trimmed], environment: environment, currentDirectory: directory)
         }
         chrome.hideExit()
     }
@@ -336,6 +516,8 @@ final class PaneController {
         chrome.terminal.caretColor = foreground
         chrome.terminal.nativeBackgroundColor = veil.withAlphaComponent(settings.shade)
         chrome.terminal.selectedTextBackgroundColor = foreground.withAlphaComponent(0.22)
+        chrome.terminal.appearance = NSAppearance(named: settings.text == .light ? .darkAqua : .aqua)
+        chrome.terminal.workingDirectory = { [weak self] in self?.cwd ?? System.home() }
         chrome.header.setScrim(veil.withAlphaComponent(max(settings.shade, 0.55)))
         chrome.header.setCaption(caption, tone: settings.text)
         chrome.layer?.cornerRadius = min(14, settings.cornerRadius - 4)
@@ -388,9 +570,41 @@ final class PaneController {
         chrome.header.onClose = { [weak self] in
             self?.onClose?()
         }
+        chrome.header.onFind = { [weak self] in
+            self?.showFind()
+        }
         chrome.exitBanner.onRestart = { [weak self] in
             self?.onRestart?()
         }
+    }
+
+    private func showFind() {
+        onFocus?()
+        windowFocus()
+        let item = NSMenuItem()
+        item.tag = NSTextFinder.Action.showFindInterface.rawValue
+        NSApp.sendAction(#selector(NSResponder.performTextFinderAction(_:)), to: chrome.terminal, from: item)
+    }
+
+    private func windowFocus() {
+        chrome.window?.makeKeyAndOrderFront(nil)
+        chrome.window?.makeFirstResponder(chrome.terminal)
+    }
+
+    static func shellEnvironment() -> [String] {
+        var env = Terminal.getEnvironmentVariables(termName: "xterm-256color", trueColor: true)
+        let current = ProcessInfo.processInfo.environment
+        for key in ["PATH", "HOME", "SSH_AUTH_SOCK"] {
+            guard let value = current[key] else { continue }
+            env.removeAll { $0.hasPrefix("\(key)=") }
+            env.append("\(key)=\(value)")
+        }
+        if let lang = current["LANG"], lang.uppercased().contains("UTF-8") {
+            env.removeAll { $0.hasPrefix("LANG=") }
+            env.append("LANG=\(lang)")
+        }
+        env.append("TERM_PROGRAM=Aether")
+        return env
     }
 
     static func font(size: Double) -> NSFont {

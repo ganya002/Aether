@@ -24,6 +24,21 @@ public enum TextTone: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// How panes that are not focused sit behind the one that is.
+public enum FocusRest: String, Codable, CaseIterable, Sendable {
+    case dim
+    case blur
+    case unchanged
+
+    public var title: String {
+        switch self {
+        case .dim: "Dim"
+        case .blur: "Blur"
+        case .unchanged: "As is"
+        }
+    }
+}
+
 public struct Settings: Codable, Equatable, Sendable {
     public var shade: Double
     public var glass: GlassStyle
@@ -32,17 +47,25 @@ public struct Settings: Codable, Equatable, Sendable {
     public var cornerRadius: Double
     public var gap: Double
     public var snapWindows: Bool
+    public var focusRest: FocusRest
+    public var notifyOnFinish: Bool
+    public var dropdownEnabled: Bool
+    public var hideDockIcon: Bool
 
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public init(
         shade: Double = 0.24,
-        glass: GlassStyle = .clear,
+        glass: GlassStyle = .regular,
         text: TextTone = .light,
         fontSize: Double = 13,
         cornerRadius: Double = 20,
         gap: Double = 10,
-        snapWindows: Bool = true
+        snapWindows: Bool = true,
+        focusRest: FocusRest = .dim,
+        notifyOnFinish: Bool = true,
+        dropdownEnabled: Bool = true,
+        hideDockIcon: Bool = false
     ) {
         self.shade = shade
         self.glass = glass
@@ -51,17 +74,25 @@ public struct Settings: Codable, Equatable, Sendable {
         self.cornerRadius = cornerRadius
         self.gap = gap
         self.snapWindows = snapWindows
+        self.focusRest = focusRest
+        self.notifyOnFinish = notifyOnFinish
+        self.dropdownEnabled = dropdownEnabled
+        self.hideDockIcon = hideDockIcon
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         shade = try container.decodeIfPresent(Double.self, forKey: .shade) ?? 0.24
-        glass = try container.decodeIfPresent(GlassStyle.self, forKey: .glass) ?? .clear
+        glass = try container.decodeIfPresent(GlassStyle.self, forKey: .glass) ?? .regular
         text = try container.decodeIfPresent(TextTone.self, forKey: .text) ?? .light
         fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize) ?? 13
         cornerRadius = try container.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 20
         gap = try container.decodeIfPresent(Double.self, forKey: .gap) ?? 10
         snapWindows = try container.decodeIfPresent(Bool.self, forKey: .snapWindows) ?? true
+        focusRest = try container.decodeIfPresent(FocusRest.self, forKey: .focusRest) ?? .dim
+        notifyOnFinish = try container.decodeIfPresent(Bool.self, forKey: .notifyOnFinish) ?? true
+        dropdownEnabled = try container.decodeIfPresent(Bool.self, forKey: .dropdownEnabled) ?? true
+        hideDockIcon = try container.decodeIfPresent(Bool.self, forKey: .hideDockIcon) ?? false
         clamp()
     }
 

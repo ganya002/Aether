@@ -37,6 +37,8 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     private var liveResizing = false
     private var settlingResize = false
     private var acceptingClose = false
+    private var dropdownGeneration = 0
+    private var dropdownRest: CGRect?
 
     init(deskID: String, frame: NSRect) {
         self.deskID = deskID
@@ -62,7 +64,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         glass.translatesAutoresizingMaskIntoConstraints = true
         glass.autoresizingMask = [.width, .height]
         glass.frame = window.contentView?.bounds ?? frame
-        glass.style = .clear
+        glass.style = .regular
         glass.cornerRadius = 20
         if #available(macOS 27.0, *) {
             glass.effectIsInteractive = true
@@ -106,6 +108,42 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    func presentDropdown() {
+        guard let window else { return }
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .managed]
+        let screen = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
+        let width = min(980, screen.width - 36)
+        let height = min(460, max(320, screen.height * 0.44))
+        let fallback = CGRect(x: screen.midX - width / 2, y: screen.maxY - height - 8, width: width, height: height)
+        let target = dropdownRest ?? fallback
+        dropdownRest = target
+        dropdownGeneration += 1
+        window.alphaValue = 0
+        window.setFrame(target.offsetBy(dx: 0, dy: 36), display: false)
+        window.makeKeyAndOrderFront(nil)
+        Motion.group(0.2) {
+            window.animator().setFrame(target, display: true)
+            window.animator().alphaValue = 1
+        }
+    }
+
+    func dismissDropdown() {
+        guard let window else { return }
+        dropdownGeneration += 1
+        let generation = dropdownGeneration
+        dropdownRest = window.frame
+        let frame = window.frame
+        Motion.group(0.16, {
+            window.animator().alphaValue = 0
+            window.animator().setFrame(frame.offsetBy(dx: 0, dy: 28), display: true)
+        }, done: { [weak self] in
+            guard let self, let window = self.window, self.dropdownGeneration == generation else { return }
+            window.orderOut(nil)
+            AppModel.shared.noteDropdownHidden(self.deskID)
+        })
+    }
+
     func flashLayout(_ title: String) {
         canvas.flash(title)
     }
@@ -141,6 +179,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         AppModel.shared.noteKey(deskID)
+        canvas.refreshFocus()
         guard let desk = AppModel.shared.desks[deskID] else { return }
         focusTerminal(desk.focusedID)
         AppModel.shared.scheduleDirectoryRefresh()
@@ -361,7 +400,7 @@ final class DeskCanvas: NSView {
             let revealing = chrome.isHidden || chrome.alphaValue < 0.05
             chrome.isHidden = false
             pane.refreshCaption(tone: settings.text)
-            pane.chrome.setFocused(item.id == desk.focusedID && window?.isKeyWindow != false)
+            pane.chrome.setFocused(item.id == desk.focusedID && window?.isKeyWindow != false, settings: settings)
             wire(pane)
             visible.insert(item.id)
             if animated && (fresh || revealing || !Self.nearly(chrome.frame, item.frame)) {
@@ -507,8 +546,9 @@ final class DeskCanvas: NSView {
         guard let deskID = (window?.windowController as? DeskController)?.deskID,
               let desk = AppModel.shared.desks[deskID] else { return }
         let key = window?.isKeyWindow == true
+        let settings = AppModel.shared.settings
         for id in desk.layout.panes {
-            AppModel.shared.panes[id]?.chrome.setFocused(key && id == desk.focusedID)
+            AppModel.shared.panes[id]?.chrome.setFocused(key && id == desk.focusedID, settings: settings)
         }
     }
 

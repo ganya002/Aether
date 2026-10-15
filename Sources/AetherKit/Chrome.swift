@@ -16,6 +16,7 @@ enum PaletteAction: Equatable {
     case broadcast
     case settings
     case find
+    case dropdown
 }
 
 struct PaletteRow: Equatable {
@@ -124,9 +125,12 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         } else {
             window?.center()
         }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        window?.makeFirstResponder(field)
+        if let glass = window?.contentView as? NSGlassEffectView {
+            glass.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
+        }
+        guard let window else { return }
+        GlassMotion.present(window)
+        window.makeFirstResponder(field)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
@@ -251,135 +255,16 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         PaletteRow(title: "Broadcast keys", detail: "⌘B", kind: .action(.broadcast)),
         PaletteRow(title: "Settings", detail: "⌘,", kind: .action(.settings)),
         PaletteRow(title: "Find", detail: "⌘F", kind: .action(.find)),
+        PaletteRow(title: "Dropdown terminal", detail: "⌃⌘`", kind: .action(.dropdown)),
     ]
 }
 
-@MainActor
-final class SettingsController: NSWindowController {
-    private let shade = NSSlider()
-    private let radius = NSSlider()
-    private let gap = NSSlider()
-    private let font = NSSlider()
-    private let glass = NSPopUpButton()
-    private let text = NSPopUpButton()
-    private let snap = NSButton(checkboxWithTitle: "Snap windows to each other when you let go", target: nil, action: nil)
-
-    init() {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 390),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        panel.title = "Settings"
-        panel.titlebarAppearsTransparent = true
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        super.init(window: panel)
-
-        let effect = NSGlassEffectView(frame: panel.contentView?.bounds ?? .zero)
-        effect.autoresizingMask = [.width, .height]
-        effect.style = .regular
-        effect.cornerRadius = 18
-        let host = NSView(frame: effect.bounds)
-        host.autoresizingMask = [.width, .height]
-        effect.contentView = host
-        panel.contentView = effect
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 22),
-            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -22),
-            stack.topAnchor.constraint(equalTo: host.topAnchor, constant: 48),
-        ])
-
-        stack.addArrangedSubview(row("Glass", glass))
-        stack.addArrangedSubview(row("Text", text))
-        stack.addArrangedSubview(sliderRow("Shade", shade, min: 0, max: 0.82))
-        stack.addArrangedSubview(sliderRow("Corners", radius, min: 8, max: 32))
-        stack.addArrangedSubview(sliderRow("Gap", gap, min: 4, max: 22))
-        stack.addArrangedSubview(sliderRow("Font", font, min: 10, max: 24))
-        snap.target = self
-        snap.action = #selector(changed)
-        stack.addArrangedSubview(snap)
-
-        let note = NSTextField(wrappingLabelWithString: "Shade is only there so the type stays readable. Clear glass is the window server bending whatever is actually behind Aether.")
-        note.font = .systemFont(ofSize: 11)
-        note.textColor = .secondaryLabelColor
-        note.preferredMaxLayoutWidth = 360
-        stack.addArrangedSubview(note)
-
-        glass.target = self
-        glass.action = #selector(changed)
-        text.target = self
-        text.action = #selector(changed)
-        for slider in [shade, radius, gap, font] {
-            slider.target = self
-            slider.action = #selector(changed)
-            slider.isContinuous = true
-        }
-        glass.addItems(withTitles: GlassStyle.allCases.map(\.title))
-        text.addItems(withTitles: TextTone.allCases.map(\.title))
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { nil }
-
-    func show() {
-        let settings = AppModel.shared.settings
-        shade.doubleValue = settings.shade
-        radius.doubleValue = settings.cornerRadius
-        gap.doubleValue = settings.gap
-        font.doubleValue = settings.fontSize
-        glass.selectItem(at: GlassStyle.allCases.firstIndex(of: settings.glass) ?? 0)
-        text.selectItem(at: TextTone.allCases.firstIndex(of: settings.text) ?? 0)
-        snap.state = settings.snapWindows ? .on : .off
-        window?.center()
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-    }
-
-    @objc private func changed() {
-        AppModel.shared.updateSettings { settings in
-            settings.shade = shade.doubleValue
-            settings.cornerRadius = radius.doubleValue
-            settings.gap = gap.doubleValue
-            settings.fontSize = font.doubleValue
-            settings.glass = GlassStyle.allCases[glass.indexOfSelectedItem]
-            settings.text = TextTone.allCases[text.indexOfSelectedItem]
-            settings.snapWindows = snap.state == .on
-        }
-    }
-
-    private func row(_ title: String, _ control: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.widthAnchor.constraint(equalToConstant: 70).isActive = true
-        let line = NSStackView(views: [label, control])
-        line.orientation = .horizontal
-        line.alignment = .centerY
-        return line
-    }
-
-    private func sliderRow(_ title: String, _ slider: NSSlider, min: Double, max: Double) -> NSView {
-        slider.minValue = min
-        slider.maxValue = max
-        slider.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        return row(title, slider)
-    }
-}
 
 @MainActor
 final class ShortcutController: NSWindowController {
     init() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -414,10 +299,13 @@ final class ShortcutController: NSWindowController {
         ⌘⇧L         Next layout
         ⌘⌥⇧L        Previous layout
         ⌘B          Broadcast keys to every terminal in the window
+        ⌃⌘`         Dropdown terminal, from any app
         ⌘,          Settings
         ⌘+  ⌘-     Font size
 
         Drag the dots on a pane to drop it on an edge, swap it, or pull it out into its own window. Drag the pane’s title to move the window. Hold ⌥ while letting go to skip snapping.
+
+        ⌘-click a path to open it. A command that finishes while Aether is in the background posts a notification.
 
         Ctrl still belongs to the shell.
         """
@@ -433,6 +321,10 @@ final class ShortcutController: NSWindowController {
 
     func show() {
         window?.center()
-        showWindow(nil)
+        guard let window else { return }
+        if let glass = window.contentView as? NSGlassEffectView {
+            glass.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
+        }
+        GlassMotion.present(window)
     }
 }
