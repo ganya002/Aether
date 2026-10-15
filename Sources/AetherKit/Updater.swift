@@ -29,11 +29,21 @@ enum ReleaseFeed {
 final class UpdateCenter {
     static let shared = UpdateCenter()
 
+    var onStatus: ((String) -> Void)?
     private var busy = false
     private var quitting = false
     private var lastCheck = Date.distantPast
     private var timer: Timer?
     private var transfer: Transfer?
+    private var stagedApp: URL?
+    private var phase: Phase = .idle
+
+    private enum Phase {
+        case idle
+        case checking
+        case downloading
+        case ready
+    }
 
     private init() {}
 
@@ -53,15 +63,43 @@ final class UpdateCenter {
         Task { await check() }
     }
 
-    func check() async {
-        guard !busy, !quitting else { return }
-        guard !CommandLine.arguments.contains("--smoke") else { return }
-        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
+    /// Settings uses this so a click always looks, even if a background check just ran.
+    func checkNow() async -> String {
+        await check(manual: true)
+    }
+
+    func installNow() {
+        guard phase == .ready, let stagedApp, !quitting else { return }
+        do {
+            try UpdateInstaller.relaunchReplacingBundle(with: stagedApp)
+            quitting = true
+        } catch {
+            report("Couldn't install the update")
+        }
+    }
+
+    @discardableResult
+    func check(manual: Bool = false) async -> String {
+        if phase == .ready {
+            presentReady()
+            return "Update found"
+        }
+        if phase == .downloading {
+            return "Update found"
+        }
+        guard !busy, !quitting else { return "Checking…" }
+        guard !CommandLine.arguments.contains("--smoke") else { return "" }
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return "You're up to date" }
         busy = true
+        phase = .checking
+        if manual { report("Checking…") }
         lastCheck = Date()
         defer {
             transfer = nil
-            if !quitting { busy = false }
+            if !quitting, phase != .downloading, phase != .ready {
+                busy = false
+                if phase == .checking { phase = .idle }
+            }
         }
         do {
             var request = URLRequest(url: ReleaseFeed.latest)
@@ -69,31 +107,70 @@ final class UpdateCenter {
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             request.setValue("Aether", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                let message = "Couldn't check for updates"
+                if manual { report(message) }
+                return message
+            }
             let local = Bundle.main.object(forInfoDictionaryKey: "AetherCommit") as? String ?? ""
-            guard let offer = ReleaseFeed.offer(from: data, localCommit: local) else { return }
-            try await downloadAndInstall(offer)
+            guard let offer = ReleaseFeed.offer(from: data, localCommit: local) else {
+                report("You're up to date")
+                return "You're up to date"
+            }
+            report("Update found")
+            try await download(offer)
+            return "Update found"
         } catch {
             hideGauge()
+            phase = .idle
+            busy = false
+            let message = "Couldn't check for updates"
+            report(message)
+            return message
         }
     }
 
-    private func downloadAndInstall(_ offer: ReleaseFeed.Offer) async throws {
-        guard let host = hostController() else { return }
-        let gauge = host.showUpdateGauge()
-        gauge.fraction = 0
-        let zip = try await download(offer.zip) { fraction in
-            gauge.fraction = fraction
+    private func download(_ offer: ReleaseFeed.Offer) async throws {
+        guard let veil = presentGauge() else {
+            phase = .idle
+            busy = false
+            return
         }
-        gauge.fraction = 1
+        phase = .downloading
+        busy = true
+        veil.setInstallEnabled(false)
+        veil.gauge.fraction = 0
+        let zip = try await fetch(offer.zip) { fraction in
+            veil.gauge.fraction = fraction
+        }
+        veil.gauge.fraction = 1
         let staged = try await Task.detached {
             try UpdateInstaller.unarchive(zip)
         }.value
-        try UpdateInstaller.relaunchReplacingBundle(with: staged)
-        quitting = true
+        stagedApp = staged
+        phase = .ready
+        busy = false
+        presentReady()
     }
 
-    private func download(_ url: URL, progress: @escaping @MainActor (Double) -> Void) async throws -> URL {
+    private func presentGauge() -> UpdateVeil? {
+        guard let host = hostController() else { return nil }
+        let veil = host.showUpdateGauge()
+        veil.onInstall = { UpdateCenter.shared.installNow() }
+        return veil
+    }
+
+    private func presentReady() {
+        guard let veil = presentGauge() else { return }
+        veil.gauge.fraction = 1
+        veil.setInstallEnabled(true)
+    }
+
+    private func report(_ message: String) {
+        onStatus?(message)
+    }
+
+    private func fetch(_ url: URL, progress: @escaping @MainActor (Double) -> Void) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             let transfer = Transfer(progress: progress, continuation: continuation)
             self.transfer = transfer

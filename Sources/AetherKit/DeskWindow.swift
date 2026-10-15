@@ -75,15 +75,16 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         canvas.addSubview(highlight)
     }
 
-    func showUpdateGauge() -> Speedometer {
+    func showUpdateGauge() -> UpdateVeil {
         if let veil = canvas.subviews.compactMap({ $0 as? UpdateVeil }).first {
             canvas.addSubview(veil)
-            return veil.gauge
+            return veil
         }
         let veil = UpdateVeil(frame: canvas.bounds)
         veil.autoresizingMask = [.width, .height]
         canvas.addSubview(veil)
-        return veil.gauge
+        veil.reveal()
+        return veil
     }
 
     func hideUpdateGauge() {

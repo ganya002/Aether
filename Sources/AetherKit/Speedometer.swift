@@ -2,13 +2,28 @@ import AppKit
 
 /// A round gauge, open at the bottom like a speedometer, with the percent in the hub.
 final class Speedometer: NSView {
-    var fraction: Double = 0 {
-        didSet {
-            if !fraction.isFinite || fraction < 0 || fraction > 1 {
-                fraction = min(1, max(0, fraction.isFinite ? fraction : 0))
-                return
+    /// Where the needle is settling. Drawing uses the sprung value, so it hops instead of snapping.
+    private var goal: Double = 0
+    private var shown: Double = 0
+    private var velocity: Double = 0
+    private var ticker: Timer?
+
+    var fraction: Double {
+        get { goal }
+        set { setFraction(newValue) }
+    }
+
+    func setFraction(_ value: Double) {
+        let clamped = min(1, max(0, value.isFinite ? value : 0))
+        let stepped = (clamped * 100).rounded() / 100
+        guard abs(stepped - goal) > 0.004 else { return }
+        goal = stepped
+        if ticker == nil {
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                self?.advanceNeedle()
             }
-            needsDisplay = true
+            ticker = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
     }
 
@@ -25,6 +40,21 @@ final class Speedometer: NSView {
     required init?(coder: NSCoder) { nil }
 
     override var isOpaque: Bool { false }
+
+    private func advanceNeedle() {
+        let dt = 1.0 / 60.0
+        let stiffness = 260.0
+        let damping = 16.0
+        velocity += ((goal - shown) * stiffness - velocity * damping) * dt
+        shown += velocity * dt
+        if abs(goal - shown) < 0.0015, abs(velocity) < 0.015 {
+            shown = goal
+            velocity = 0
+            ticker?.invalidate()
+            ticker = nil
+        }
+        needsDisplay = true
+    }
 
     override func layout() {
         super.layout()
@@ -69,15 +99,15 @@ final class Speedometer: NSView {
         NSColor.white.withAlphaComponent(0.14).setStroke()
         track.stroke()
 
-        if fraction > 0.001 {
-            let progress = arc(center: center, radius: arcRadius, start: start, sweep: sweep * CGFloat(fraction))
+        if shown > 0.001 {
+            let progress = arc(center: center, radius: arcRadius, start: start, sweep: sweep * CGFloat(shown))
             progress.lineWidth = side * 0.045
             progress.lineCapStyle = .round
             NSColor.white.withAlphaComponent(0.94).setStroke()
             progress.stroke()
         }
 
-        let needleAngle = (start - sweep * CGFloat(fraction)) * .pi / 180
+        let needleAngle = (start - sweep * CGFloat(shown)) * .pi / 180
         let hubRadius = side * 0.17
         let needle = NSBezierPath()
         needle.move(to: CGPoint(x: center.x + cos(needleAngle) * hubRadius, y: center.y + sin(needleAngle) * hubRadius))
@@ -90,7 +120,7 @@ final class Speedometer: NSView {
         faceColor.setFill()
         NSBezierPath(ovalIn: NSRect(x: center.x - hubRadius, y: center.y - hubRadius, width: hubRadius * 2, height: hubRadius * 2)).fill()
 
-        let percent = "\(Int((fraction * 100).rounded()))%"
+        let percent = "\(Int((shown * 100).rounded()))%"
         let font = NSFont.monospacedDigitSystemFont(ofSize: side * 0.145, weight: .medium)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -125,16 +155,57 @@ final class Speedometer: NSView {
 }
 
 final class UpdateVeil: NSView {
+    var onInstall: (() -> Void)?
     let gauge = Speedometer(frame: NSRect(x: 0, y: 0, width: 188, height: 188))
+    private let cluster = NSView()
+    private let install = NSButton()
+    private var revealed = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        addSubview(gauge)
+        cluster.wantsLayer = true
+        install.title = "Install now"
+        install.bezelStyle = .rounded
+        install.font = .systemFont(ofSize: 13, weight: .semibold)
+        install.target = self
+        install.action = #selector(installPressed)
+        install.isEnabled = false
+        cluster.addSubview(gauge)
+        cluster.addSubview(install)
+        addSubview(cluster)
         positionGauge()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
+
+    func reveal() {
+        guard !revealed else { return }
+        revealed = true
+        layoutSubtreeIfNeeded()
+        cluster.alphaValue = 0
+        cluster.layer?.transform = CATransform3DIdentity
+        let spring = CASpringAnimation(keyPath: "transform.scale")
+        spring.fromValue = 0.78
+        spring.toValue = 1
+        spring.mass = 0.7
+        spring.stiffness = 220
+        spring.damping = 15
+        spring.duration = spring.settlingDuration
+        spring.fillMode = .forwards
+        spring.isRemovedOnCompletion = false
+        cluster.layer?.add(spring, forKey: "reveal")
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.45
+            context.timingFunction = Motion.ease()
+            cluster.animator().alphaValue = 1
+        }
+    }
+
+    func setInstallEnabled(_ enabled: Bool) {
+        install.isEnabled = enabled
+        install.alphaValue = enabled ? 1 : 0.45
+    }
 
     override func layout() {
         super.layout()
@@ -146,15 +217,30 @@ final class UpdateVeil: NSView {
         positionGauge()
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard install.isEnabled else { return nil }
+        let local = convert(point, from: superview)
+        let inCluster = cluster.convert(local, from: self)
+        guard install.frame.contains(inCluster) else { return nil }
+        return install
+    }
+
+    @objc private func installPressed() {
+        onInstall?()
+    }
 
     private func positionGauge() {
-        let side: CGFloat = 188
-        gauge.frame = NSRect(
-            x: (bounds.width - side) / 2,
-            y: (bounds.height - side) / 2,
-            width: side,
-            height: side
+        let gaugeSide: CGFloat = 188
+        let button = NSSize(width: 132, height: 28)
+        let gap: CGFloat = 10
+        let height = gaugeSide + gap + button.height
+        cluster.frame = NSRect(
+            x: (bounds.width - gaugeSide) / 2,
+            y: (bounds.height - height) / 2,
+            width: gaugeSide,
+            height: height
         )
+        gauge.frame = NSRect(x: 0, y: button.height + gap, width: gaugeSide, height: gaugeSide)
+        install.frame = NSRect(x: (gaugeSide - button.width) / 2, y: 0, width: button.width, height: button.height)
     }
 }

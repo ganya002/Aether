@@ -22,6 +22,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let notify = NSButton(checkboxWithTitle: "Notify when a command finishes in the background", target: nil, action: nil)
     private let dropdown = NSButton(checkboxWithTitle: "Dropdown terminal    ⌃⌘`", target: nil, action: nil)
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
+    private let updateStatus = NSTextField(labelWithString: "")
     private var applying = false
     private var escMonitor: Any?
     private var vaporToken = 0
@@ -105,6 +106,15 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(notify)
         stack.addArrangedSubview(dropdown)
         stack.addArrangedSubview(dock)
+        stack.addArrangedSubview(section("Updates"))
+        let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
+        check.bezelStyle = .rounded
+        check.font = .systemFont(ofSize: 12, weight: .medium)
+        stack.addArrangedSubview(check)
+        updateStatus.font = .systemFont(ofSize: 11)
+        updateStatus.textColor = .tertiaryLabelColor
+        updateStatus.stringValue = ""
+        stack.addArrangedSubview(updateStatus)
 
         let reveal = NSButton(title: "Show Config in Finder", target: self, action: #selector(revealConfig))
         reveal.bezelStyle = .rounded
@@ -143,6 +153,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     func show() {
         vaporToken += 1
         load()
+        UpdateCenter.shared.onStatus = { [weak self] message in
+            self?.updateStatus.stringValue = message
+        }
         window?.center()
         guard let window else { return }
         GlassMotion.present(window)
@@ -183,6 +196,14 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             settings.hideDockIcon = dock.state == .on
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
+    }
+
+    @objc private func checkForUpdates() {
+        updateStatus.stringValue = "Checking…"
+        Task {
+            let message = await UpdateCenter.shared.checkNow()
+            self.updateStatus.stringValue = message
+        }
     }
 
     @objc private func revealConfig() {
