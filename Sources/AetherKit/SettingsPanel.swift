@@ -47,9 +47,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         glassView.frame = panel.contentView?.bounds ?? .zero
         glassView.style = .regular
         glassView.cornerRadius = 22
-        if #available(macOS 27.0, *) {
-            glassView.effectIsInteractive = true
-        }
+        glassView.enableInteractiveGlass()
         let host = NSView(frame: glassView.bounds)
         host.autoresizingMask = [.width, .height]
         glassView.contentView = host

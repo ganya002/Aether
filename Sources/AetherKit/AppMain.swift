@@ -48,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         HotkeyCenter.setEnabled(model.settings.dropdownEnabled)
         NSApp.activate(ignoringOtherApps: true)
         promptToMoveIntoApplications()
+        UpdateCenter.shared.start()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        UpdateCenter.shared.checkSoon()
     }
 
     /// The curl installer leaves Aether in Downloads and launches it. The first time it

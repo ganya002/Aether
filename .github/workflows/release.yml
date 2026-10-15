@@ -1,0 +1,27 @@
+name: Publish update
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Aether
+        run: scripts/build-app.sh
+      - name: Publish the app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ditto -c -k --keepParent dist/Aether.app Aether.app.zip
+          tag="build-${GITHUB_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" Aether.app.zip --clobber
+          else
+            gh release create "$tag" Aether.app.zip --title "Aether" --notes "Update ${GITHUB_SHA}"
+          fi

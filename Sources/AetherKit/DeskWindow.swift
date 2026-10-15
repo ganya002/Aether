@@ -66,15 +66,30 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         glass.frame = window.contentView?.bounds ?? frame
         glass.style = .regular
         glass.cornerRadius = 20
-        if #available(macOS 27.0, *) {
-            glass.effectIsInteractive = true
-        }
+        glass.enableInteractiveGlass()
         canvas.frame = glass.bounds
         canvas.autoresizingMask = [.width, .height]
         glass.contentView = canvas
         window.contentView = glass
         highlight.isHidden = true
         canvas.addSubview(highlight)
+    }
+
+    func showUpdateGauge() -> Speedometer {
+        if let veil = canvas.subviews.compactMap({ $0 as? UpdateVeil }).first {
+            canvas.addSubview(veil)
+            return veil.gauge
+        }
+        let veil = UpdateVeil(frame: canvas.bounds)
+        veil.autoresizingMask = [.width, .height]
+        canvas.addSubview(veil)
+        return veil.gauge
+    }
+
+    func hideUpdateGauge() {
+        for case let veil as UpdateVeil in canvas.subviews {
+            veil.removeFromSuperview()
+        }
     }
 
     @available(*, unavailable)
@@ -478,6 +493,9 @@ final class DeskCanvas: NSView {
         }
         if veil.superview === self { addSubview(veil) }
         if hud.superview === self { addSubview(hud) }
+        for case let update as UpdateVeil in subviews {
+            addSubview(update)
+        }
     }
 
     func beginResizeDim(settings: Settings) {
@@ -662,4 +680,14 @@ final class LayoutHUD: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+extension NSGlassEffectView {
+    /// Interactive glass arrived in macOS 27. Setting it by key keeps this
+    /// source building against the macOS 26 SDK used to publish updates.
+    func enableInteractiveGlass() {
+        let setter = NSSelectorFromString("setEffectIsInteractive:")
+        guard responds(to: setter) else { return }
+        setValue(true, forKey: "effectIsInteractive")
+    }
 }

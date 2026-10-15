@@ -64,9 +64,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         glass.autoresizingMask = [.width, .height]
         glass.style = .regular
         glass.cornerRadius = 18
-        if #available(macOS 27.0, *) {
-            glass.effectIsInteractive = true
-        }
+        glass.enableInteractiveGlass()
         let host = NSView(frame: glass.bounds)
         host.autoresizingMask = [.width, .height]
         glass.contentView = host
