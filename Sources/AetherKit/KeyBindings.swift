@@ -1,0 +1,380 @@
+import AppKit
+import Carbon.HIToolbox
+
+public struct KeyChord: Codable, Equatable, Sendable {
+    public var key: String
+    public var modifiers: UInt
+    public var keyCode: UInt16
+
+    public init(key: String, modifiers: UInt, keyCode: UInt16) {
+        self.key = key
+        self.modifiers = modifiers
+        self.keyCode = keyCode
+    }
+
+    var flags: NSEvent.ModifierFlags {
+        NSEvent.ModifierFlags(rawValue: modifiers).intersection(.deviceIndependentFlagsMask)
+    }
+
+    var symbol: String {
+        var text = ""
+        let flags = self.flags
+        if flags.contains(.control) { text += "⌃" }
+        if flags.contains(.option) { text += "⌥" }
+        if flags.contains(.shift) { text += "⇧" }
+        if flags.contains(.command) { text += "⌘" }
+        text += Self.pretty(key)
+        return key.isEmpty ? "None" : text
+    }
+
+    static func pretty(_ key: String) -> String {
+        switch key {
+        case "\r": return "↩"
+        case "\t": return "⇥"
+        case " ": return "Space"
+        case String(UnicodeScalar(NSLeftArrowFunctionKey)!): return "←"
+        case String(UnicodeScalar(NSRightArrowFunctionKey)!): return "→"
+        case String(UnicodeScalar(NSUpArrowFunctionKey)!): return "↑"
+        case String(UnicodeScalar(NSDownArrowFunctionKey)!): return "↓"
+        default:
+            if key.unicodeScalars.count == 1, let scalar = key.unicodeScalars.first,
+               scalar.value >= UInt32(NSF1FunctionKey), scalar.value <= UInt32(NSF12FunctionKey) {
+                return "F\(scalar.value - UInt32(NSF1FunctionKey) + 1)"
+            }
+            return key.count == 1 ? key.uppercased() : key
+        }
+    }
+
+    /// A shortcut needs Command, Option, or Control, so a plain letter still reaches the shell.
+    static func capture(_ event: NSEvent) -> KeyChord? {
+        if event.keyCode == 53 { return nil }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let bare = flags.intersection([.command, .option, .control, .shift])
+        guard bare.contains(.command) || bare.contains(.control) || bare.contains(.option) else { return nil }
+        let key = equivalent(event)
+        guard !key.isEmpty else { return nil }
+        return KeyChord(key: key, modifiers: bare.rawValue, keyCode: event.keyCode)
+    }
+
+    static func equivalent(_ event: NSEvent) -> String {
+        if let special = event.specialKey {
+            switch special {
+            case .leftArrow: return String(UnicodeScalar(NSLeftArrowFunctionKey)!)
+            case .rightArrow: return String(UnicodeScalar(NSRightArrowFunctionKey)!)
+            case .upArrow: return String(UnicodeScalar(NSUpArrowFunctionKey)!)
+            case .downArrow: return String(UnicodeScalar(NSDownArrowFunctionKey)!)
+            case .carriageReturn, .newline: return "\r"
+            case .tab: return "\t"
+            case .delete, .backspace: return String(UnicodeScalar(NSBackspaceCharacter)!)
+            default: break
+            }
+        }
+        let raw = event.charactersIgnoringModifiers ?? ""
+        if raw.count == 1, let character = raw.first, character.isLetter {
+            return String(character).lowercased()
+        }
+        return raw
+    }
+
+    var carbonModifiers: UInt32 {
+        var mask: UInt32 = 0
+        let flags = self.flags
+        if flags.contains(.command) { mask |= UInt32(cmdKey) }
+        if flags.contains(.shift) { mask |= UInt32(shiftKey) }
+        if flags.contains(.option) { mask |= UInt32(optionKey) }
+        if flags.contains(.control) { mask |= UInt32(controlKey) }
+        return mask
+    }
+}
+
+public enum AppAction: String, CaseIterable, Codable, Sendable {
+    case newWindow
+    case newPane
+    case splitRight
+    case splitDown
+    case closePane
+    case closeWindow
+    case launch
+    case fill
+    case equalize
+    case nextLayout
+    case previousLayout
+    case focusLeft
+    case focusRight
+    case focusUp
+    case focusDown
+    case growLeft
+    case growRight
+    case growUp
+    case growDown
+    case broadcast
+    case fontUp
+    case fontDown
+    case fontReset
+    case find
+    case findNext
+    case findPrevious
+    case copy
+    case paste
+    case selectAll
+    case settings
+    case dropdown
+    case quit
+
+    var title: String {
+        switch self {
+        case .newWindow: "New window"
+        case .newPane: "New terminal"
+        case .splitRight: "Split right"
+        case .splitDown: "Split down"
+        case .closePane: "Close terminal"
+        case .closeWindow: "Close window"
+        case .launch: "Launch"
+        case .fill: "Fill window"
+        case .equalize: "Equalize splits"
+        case .nextLayout: "Next layout"
+        case .previousLayout: "Previous layout"
+        case .focusLeft: "Focus left"
+        case .focusRight: "Focus right"
+        case .focusUp: "Focus up"
+        case .focusDown: "Focus down"
+        case .growLeft: "Grow left"
+        case .growRight: "Grow right"
+        case .growUp: "Grow up"
+        case .growDown: "Grow down"
+        case .broadcast: "Broadcast keys"
+        case .fontUp: "Bigger text"
+        case .fontDown: "Smaller text"
+        case .fontReset: "Actual size"
+        case .find: "Find"
+        case .findNext: "Find next"
+        case .findPrevious: "Find previous"
+        case .copy: "Copy"
+        case .paste: "Paste"
+        case .selectAll: "Select all"
+        case .settings: "Settings"
+        case .dropdown: "Dropdown terminal"
+        case .quit: "Quit Aether"
+        }
+    }
+
+    var defaultChord: KeyChord {
+        func chord(_ key: String, _ flags: NSEvent.ModifierFlags, _ code: Int) -> KeyChord {
+            KeyChord(key: key, modifiers: flags.rawValue, keyCode: UInt16(code))
+        }
+        let command = NSEvent.ModifierFlags.command
+        switch self {
+        case .newWindow: return chord("n", command, kVK_ANSI_N)
+        case .newPane: return chord("t", command, kVK_ANSI_T)
+        case .splitRight: return chord("d", command, kVK_ANSI_D)
+        case .splitDown: return chord("d", [command, .shift], kVK_ANSI_D)
+        case .closePane: return chord("w", command, kVK_ANSI_W)
+        case .closeWindow: return chord("w", [command, .shift], kVK_ANSI_W)
+        case .launch: return chord("k", command, kVK_ANSI_K)
+        case .fill: return chord("\r", command, kVK_Return)
+        case .equalize: return chord("e", [command, .shift], kVK_ANSI_E)
+        case .nextLayout: return chord("l", [command, .shift], kVK_ANSI_L)
+        case .previousLayout: return chord("l", [command, .option, .shift], kVK_ANSI_L)
+        case .focusLeft: return chord(String(UnicodeScalar(NSLeftArrowFunctionKey)!), [command, .option], kVK_LeftArrow)
+        case .focusRight: return chord(String(UnicodeScalar(NSRightArrowFunctionKey)!), [command, .option], kVK_RightArrow)
+        case .focusUp: return chord(String(UnicodeScalar(NSUpArrowFunctionKey)!), [command, .option], kVK_UpArrow)
+        case .focusDown: return chord(String(UnicodeScalar(NSDownArrowFunctionKey)!), [command, .option], kVK_DownArrow)
+        case .growLeft: return chord(String(UnicodeScalar(NSLeftArrowFunctionKey)!), [command, .shift], kVK_LeftArrow)
+        case .growRight: return chord(String(UnicodeScalar(NSRightArrowFunctionKey)!), [command, .shift], kVK_RightArrow)
+        case .growUp: return chord(String(UnicodeScalar(NSUpArrowFunctionKey)!), [command, .shift], kVK_UpArrow)
+        case .growDown: return chord(String(UnicodeScalar(NSDownArrowFunctionKey)!), [command, .shift], kVK_DownArrow)
+        case .broadcast: return chord("b", command, kVK_ANSI_B)
+        case .fontUp: return chord("+", command, kVK_ANSI_Equal)
+        case .fontDown: return chord("-", command, kVK_ANSI_Minus)
+        case .fontReset: return chord("0", command, kVK_ANSI_0)
+        case .find: return chord("f", command, kVK_ANSI_F)
+        case .findNext: return chord("g", command, kVK_ANSI_G)
+        case .findPrevious: return chord("g", [command, .shift], kVK_ANSI_G)
+        case .copy: return chord("c", command, kVK_ANSI_C)
+        case .paste: return chord("v", command, kVK_ANSI_V)
+        case .selectAll: return chord("a", command, kVK_ANSI_A)
+        case .settings: return chord(",", command, kVK_ANSI_Comma)
+        case .dropdown: return chord("`", [command, .control], kVK_ANSI_Grave)
+        case .quit: return chord("q", command, kVK_ANSI_Q)
+        }
+    }
+}
+
+public struct KeyMap: Codable, Equatable, Sendable {
+    public var chords: [String: KeyChord]
+
+    public static var standard: KeyMap {
+        KeyMap(chords: Dictionary(uniqueKeysWithValues: AppAction.allCases.map { ($0.rawValue, $0.defaultChord) }))
+    }
+
+    func chord(_ action: AppAction) -> KeyChord {
+        chords[action.rawValue] ?? action.defaultChord
+    }
+
+    func symbol(_ action: AppAction) -> String {
+        chord(action).symbol
+    }
+
+    func filled() -> KeyMap {
+        var next = self
+        for action in AppAction.allCases where next.chords[action.rawValue] == nil {
+            next.chords[action.rawValue] = action.defaultChord
+        }
+        return next
+    }
+
+    /// The new shortcut wins. Another action that used it loses that shortcut.
+    func assigning(_ chord: KeyChord, to action: AppAction) -> KeyMap {
+        var next = filled()
+        let cleared = KeyChord(key: "", modifiers: 0, keyCode: 0)
+        for (key, existing) in next.chords where existing.key == chord.key && existing.modifiers == chord.modifiers && key != action.rawValue {
+            next.chords[key] = cleared
+        }
+        next.chords[action.rawValue] = chord
+        return next
+    }
+}
+
+enum ShellPath {
+    static func quote(_ path: String) -> String {
+        let safe = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._+-~")
+        if path.unicodeScalars.allSatisfy({ safe.contains($0) }) {
+            return path
+        }
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+extension Notification.Name {
+    static let aetherBindingsChanged = Notification.Name("aetherBindingsChanged")
+}
+
+@MainActor
+final class KeybindBoard: NSView {
+    private let stack = NSStackView()
+    private var cards: [AppAction: KeybindCard] = [:]
+    private var recording: AppAction?
+    private var monitor: Any?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        for action in AppAction.allCases {
+            let card = KeybindCard(action: action)
+            card.onClick = { [weak self] in self?.toggle(action) }
+            card.widthAnchor.constraint(equalToConstant: 400).isActive = true
+            card.heightAnchor.constraint(equalToConstant: 46).isActive = true
+            cards[action] = card
+            stack.addArrangedSubview(card)
+        }
+        reload()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    func reload() {
+        let map = AppModel.shared.settings.keys
+        for (action, card) in cards {
+            card.setChord(map.chord(action), recording: recording == action)
+        }
+    }
+
+    func stopRecording() {
+        recording = nil
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+        reload()
+    }
+
+    private func toggle(_ action: AppAction) {
+        if recording == action {
+            stopRecording()
+            return
+        }
+        stopRecording()
+        recording = action
+        reload()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.capture(event)
+            }
+            return nil
+        }
+    }
+
+    private func capture(_ event: NSEvent) {
+        guard let recording else { return }
+        if event.keyCode == 53 {
+            stopRecording()
+            return
+        }
+        guard let chord = KeyChord.capture(event) else { return }
+        AppModel.shared.updateSettings { settings in
+            settings.keys = settings.keys.assigning(chord, to: recording)
+        }
+        stopRecording()
+    }
+}
+
+@MainActor
+final class KeybindCard: NSView {
+    var onClick: (() -> Void)?
+    private let action: AppAction
+    private let title = NSTextField(labelWithString: "")
+    private let chord = NSButton()
+
+    init(action: AppAction) {
+        self.action = action
+        super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 46))
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.9).cgColor
+        title.stringValue = action.title
+        title.font = .systemFont(ofSize: 13, weight: .medium)
+        title.textColor = .labelColor
+        title.lineBreakMode = .byTruncatingTail
+        chord.isBordered = false
+        chord.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        chord.contentTintColor = .secondaryLabelColor
+        chord.target = self
+        chord.action = #selector(pressed)
+        chord.setButtonType(.momentaryChange)
+        addSubview(title)
+        addSubview(chord)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    func setChord(_ value: KeyChord, recording: Bool) {
+        chord.title = recording ? "Press a key" : value.symbol
+        chord.contentTintColor = recording ? .labelColor : .secondaryLabelColor
+        layer?.borderColor = (recording ? NSColor.labelColor.withAlphaComponent(0.7) : NSColor.separatorColor.withAlphaComponent(0.9)).cgColor
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let chordWidth = max(88, chord.intrinsicContentSize.width + 8)
+        chord.frame = NSRect(x: bounds.width - chordWidth - 12, y: 8, width: chordWidth, height: 30)
+        title.frame = NSRect(x: 14, y: 14, width: max(0, chord.frame.minX - 22), height: 18)
+    }
+
+    @objc private func pressed() {
+        onClick?()
+    }
+}

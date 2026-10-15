@@ -23,6 +23,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let dropdown = NSButton(checkboxWithTitle: "Dropdown terminal    ⌃⌘`", target: nil, action: nil)
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
     private let updateStatus = NSTextField(labelWithString: "")
+    private let keybinds = KeybindBoard()
     private var applying = false
     private var escMonitor: Any?
     private var vaporToken = 0
@@ -106,6 +107,11 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(notify)
         stack.addArrangedSubview(dropdown)
         stack.addArrangedSubview(dock)
+        stack.addArrangedSubview(section("Keys"))
+        stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Command, Option, or Control is required."))
+        keybinds.translatesAutoresizingMaskIntoConstraints = false
+        keybinds.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        stack.addArrangedSubview(keybinds)
         stack.addArrangedSubview(section("Updates"))
         let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
         check.bezelStyle = .rounded
@@ -173,6 +179,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     }
 
     func vaporize() {
+        keybinds.stopRecording()
         guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
         vaporToken += 1
         let token = vaporToken
@@ -225,6 +232,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         notify.state = settings.notifyOnFinish ? .on : .off
         dropdown.state = settings.dropdownEnabled ? .on : .off
         dock.state = settings.hideDockIcon ? .on : .off
+        dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
+        keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()
         applying = false

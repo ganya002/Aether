@@ -701,8 +701,9 @@ final class AppModel {
             controller.sync()
         }
         applyDock()
-        HotkeyCenter.setEnabled(settings.dropdownEnabled)
+        HotkeyCenter.apply(enabled: settings.dropdownEnabled, chord: settings.keys.chord(.dropdown))
         ConfigStore.save(settings)
+        NotificationCenter.default.post(name: .aetherBindingsChanged, object: nil)
         scheduleSave()
     }
 

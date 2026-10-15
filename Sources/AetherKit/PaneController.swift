@@ -7,6 +7,53 @@ final class AetherTerminal: LocalProcessTerminalView {
     var onFocus: (() -> Void)?
     var workingDirectory: () -> String = { System.home() }
 
+    override init(frame: CGRect, font: NSFont?, options: TerminalOptions) {
+        super.init(frame: frame, font: font, options: options)
+        registerForDraggedTypes([.fileURL, .png, .tiff])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dropPaths(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = dropPaths(from: sender.draggingPasteboard)
+        guard !paths.isEmpty else { return false }
+        window?.makeFirstResponder(self)
+        insertText(paths.map(ShellPath.quote).joined(separator: " "), replacementRange: NSRange(location: 0, length: 0))
+        return true
+    }
+
+    private func dropPaths(from pasteboard: NSPasteboard) -> [String] {
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            return urls.map(\.path)
+        }
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
+            return urls.map { $0.isFileURL ? $0.path : $0.absoluteString }
+        }
+        guard let image = NSImage(pasteboard: pasteboard), let path = Self.stash(image) else { return [] }
+        return [path]
+    }
+
+    private static func stash(_ image: NSImage) -> String? {
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Aether-drop-\(UUID().uuidString.prefix(8)).png")
+        do {
+            try png.write(to: url)
+            return url.path
+        } catch {
+            return nil
+        }
+    }
+
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         super.send(source: source, data: data)
         onUserInput?(data)
@@ -94,6 +141,8 @@ final class PaneChrome: NSView {
         options.scrollback = 10_000
         options.cursorStyle = .steadyBar
         options.termName = "xterm-256color"
+        options.enableSixelReported = true
+        options.kittyImageCacheLimitBytes = 320 * 1024 * 1024
         terminal = AetherTerminal(frame: .zero, font: font, options: options)
         terminal.scrollerStyle = .overlay
         super.init(frame: .zero)

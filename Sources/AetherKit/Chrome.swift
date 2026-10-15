@@ -224,7 +224,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
 
     static func rows(for rawQuery: String) -> [PaletteRow] {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let actions = Self.actions
+        let actions = Self.actions()
         let tools = System.installedTools()
         if query.isEmpty {
             var rows = actions
@@ -244,24 +244,27 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         return rows
     }
 
-    private static let actions: [PaletteRow] = [
-        PaletteRow(title: "New terminal", detail: "⌘T", kind: .action(.newPane)),
-        PaletteRow(title: "New window", detail: "⌘N", kind: .action(.newWindow)),
-        PaletteRow(title: "Split right", detail: "⌘D", kind: .action(.splitRight)),
-        PaletteRow(title: "Split down", detail: "⌘⇧D", kind: .action(.splitDown)),
-        PaletteRow(title: "Close terminal", detail: "⌘W", kind: .action(.close)),
-        PaletteRow(title: "Fill window", detail: "⌘↩", kind: .action(.maximize)),
-        PaletteRow(title: "Equalize splits", detail: "⌘⇧=", kind: .action(.equalize)),
-        PaletteRow(title: "Tile columns", detail: "Arrange the panes", kind: .action(.columns)),
-        PaletteRow(title: "Tile rows", detail: "Arrange the panes", kind: .action(.rows)),
-        PaletteRow(title: "Tile grid", detail: "Arrange the panes", kind: .action(.grid)),
-        PaletteRow(title: "Next layout", detail: "⌘⇧L", kind: .action(.nextLayout)),
-        PaletteRow(title: "Arrange windows", detail: "Grid the glass windows on this screen", kind: .action(.arrangeWindows)),
-        PaletteRow(title: "Broadcast keys", detail: "⌘B", kind: .action(.broadcast)),
-        PaletteRow(title: "Settings", detail: "⌘,", kind: .action(.settings)),
-        PaletteRow(title: "Find", detail: "⌘F", kind: .action(.find)),
-        PaletteRow(title: "Dropdown terminal", detail: "⌃⌘`", kind: .action(.dropdown)),
-    ]
+    private static func actions() -> [PaletteRow] {
+        let keys = AppModel.shared.settings.keys
+        return [
+            PaletteRow(title: "New terminal", detail: keys.symbol(.newPane), kind: .action(.newPane)),
+            PaletteRow(title: "New window", detail: keys.symbol(.newWindow), kind: .action(.newWindow)),
+            PaletteRow(title: "Split right", detail: keys.symbol(.splitRight), kind: .action(.splitRight)),
+            PaletteRow(title: "Split down", detail: keys.symbol(.splitDown), kind: .action(.splitDown)),
+            PaletteRow(title: "Close terminal", detail: keys.symbol(.closePane), kind: .action(.close)),
+            PaletteRow(title: "Fill window", detail: keys.symbol(.fill), kind: .action(.maximize)),
+            PaletteRow(title: "Equalize splits", detail: keys.symbol(.equalize), kind: .action(.equalize)),
+            PaletteRow(title: "Tile columns", detail: "Arrange the panes", kind: .action(.columns)),
+            PaletteRow(title: "Tile rows", detail: "Arrange the panes", kind: .action(.rows)),
+            PaletteRow(title: "Tile grid", detail: "Arrange the panes", kind: .action(.grid)),
+            PaletteRow(title: "Next layout", detail: keys.symbol(.nextLayout), kind: .action(.nextLayout)),
+            PaletteRow(title: "Arrange windows", detail: "Grid the glass windows on this screen", kind: .action(.arrangeWindows)),
+            PaletteRow(title: "Broadcast keys", detail: keys.symbol(.broadcast), kind: .action(.broadcast)),
+            PaletteRow(title: "Settings", detail: keys.symbol(.settings), kind: .action(.settings)),
+            PaletteRow(title: "Find", detail: keys.symbol(.find), kind: .action(.find)),
+            PaletteRow(title: "Dropdown terminal", detail: keys.symbol(.dropdown), kind: .action(.dropdown)),
+        ]
+    }
 }
 
 final class PaletteRowView: NSTableCellView {
@@ -301,6 +304,7 @@ final class PaletteRowView: NSTableCellView {
 @MainActor
 final class ShortcutController: NSWindowController, NSWindowDelegate {
     private var vaporToken = 0
+    private let text = NSTextView(frame: .zero)
     init() {
         let panel = VaporPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
@@ -320,37 +324,12 @@ final class ShortcutController: NSWindowController, NSWindowDelegate {
         effect.autoresizingMask = [.width, .height]
         effect.style = .regular
         effect.cornerRadius = 18
-        let text = NSTextView(frame: effect.bounds.insetBy(dx: 18, dy: 36))
+        text.frame = effect.bounds.insetBy(dx: 18, dy: 36)
         text.autoresizingMask = [.width, .height]
         text.isEditable = false
         text.drawsBackground = false
         text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        text.string = """
-        ⌘N          New window
-        ⌘T          New terminal
-        ⌘D          Split right
-        ⌘⇧D         Split down
-        ⌘W          Close terminal
-        ⌘⇧W         Close window
-        ⌘K          Launch a command
-        ⌘F          Find
-        ⌘↩          Fill the window with the focused terminal
-        ⌘⌥ arrows   Focus the neighbor
-        ⌘⇧ arrows   Resize the split
-        ⌘⇧E         Equalize splits
-        ⌘⇧L         Next layout
-        ⌘⌥⇧L        Previous layout
-        ⌘B          Broadcast keys to every terminal in the window
-        ⌃⌘`         Dropdown terminal, from any app
-        ⌘,          Settings
-        ⌘+  ⌘-     Font size
-
-        Drag the dots on a pane to drop it on an edge, swap it, or pull it out into its own window. Drag the pane’s title to move the window. Hold ⌥ while letting go to skip snapping.
-
-        ⌘-click a path to open it. A command that finishes while Aether is in the background posts a notification.
-
-        Ctrl still belongs to the shell.
-        """
+        text.string = Self.page()
         let host = NSView(frame: effect.bounds)
         host.autoresizingMask = [.width, .height]
         host.addSubview(text)
@@ -362,6 +341,7 @@ final class ShortcutController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { nil }
 
     func show() {
+        text.string = Self.page()
         vaporToken += 1
         window?.center()
         guard let window else { return }
@@ -373,6 +353,31 @@ final class ShortcutController: NSWindowController, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         vaporize()
+    }
+
+    private static func page() -> String {
+        let keys = AppModel.shared.settings.keys
+        return """
+        \(keys.symbol(.newWindow))    New window
+        \(keys.symbol(.newPane))    New terminal
+        \(keys.symbol(.splitRight))    Split right
+        \(keys.symbol(.splitDown))    Split down
+        \(keys.symbol(.closePane))    Close terminal
+        \(keys.symbol(.closeWindow))    Close window
+        \(keys.symbol(.launch))    Launch a command
+        \(keys.symbol(.find))    Find
+        \(keys.symbol(.fill))    Fill the window
+        \(keys.symbol(.equalize))    Equalize splits
+        \(keys.symbol(.nextLayout))    Next layout
+        \(keys.symbol(.previousLayout))    Previous layout
+        \(keys.symbol(.broadcast))    Broadcast keys
+        \(keys.symbol(.dropdown))    Dropdown terminal
+        \(keys.symbol(.settings))    Settings
+
+        Drag the dots on a pane to drop it on an edge, swap it, or pull it out into its own window. Drop a file on a terminal to paste its path. Command-click a path to open it.
+
+        Kitty, sixel, and iTerm images render in the pane. Ctrl still belongs to the shell.
+        """
     }
 
     func vaporize() {

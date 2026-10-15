@@ -18,12 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let settingsPanel = SettingsController()
     private let shortcuts = ShortcutController()
     private let model = AppModel.shared
+    private var boundMenus: [AppAction: NSMenuItem] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         palette.onPick = { [weak self] row in
             self?.perform(row)
         }
         buildMenus()
+        NotificationCenter.default.addObserver(forName: .aetherBindingsChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyKeyBindings()
+            }
+        }
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
             guard let content = event.window?.contentView else { return event }
             var view = content.hitTest(event.locationInWindow)
@@ -45,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.model.toggleDropdown()
         }
         HotkeyCenter.install()
-        HotkeyCenter.setEnabled(model.settings.dropdownEnabled)
+        applyKeyBindings()
         NSApp.activate(ignoringOtherApps: true)
         promptToMoveIntoApplications()
         UpdateCenter.shared.start()
@@ -192,64 +198,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let main = NSMenu()
         main.addItem(menu("Aether", items: [
             item("About Aether", #selector(showAbout), ""),
-            item("Settings…", #selector(showSettings), ",", [.command]),
+            bind(.settings, item("Settings…", #selector(showSettings), ",", [.command])),
             .separator(),
-            quitItem(),
+            bind(.quit, quitItem()),
         ]))
         main.addItem(menu("File", items: [
-            item("New Window", #selector(newWindow), "n"),
-            item("New Terminal", #selector(newPane), "t"),
-            item("Split Right", #selector(splitRight), "d"),
-            item("Split Down", #selector(splitDown), "d", [.command, .shift]),
+            bind(.newWindow, item("New Window", #selector(newWindow), "n")),
+            bind(.newPane, item("New Terminal", #selector(newPane), "t")),
+            bind(.splitRight, item("Split Right", #selector(splitRight), "d")),
+            bind(.splitDown, item("Split Down", #selector(splitDown), "d", [.command, .shift])),
             .separator(),
-            item("Close Terminal", #selector(closePane), "w"),
-            responderItem("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift]),
+            bind(.closePane, item("Close Terminal", #selector(closePane), "w")),
+            bind(.closeWindow, responderItem("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])),
         ]))
-        let find = item("Find…", #selector(NSResponder.performTextFinderAction(_:)), "f")
+        let find = bind(.find, item("Find…", #selector(NSResponder.performTextFinderAction(_:)), "f"))
         find.tag = NSTextFinder.Action.showFindInterface.rawValue
         find.target = nil
-        let findNext = item("Find Next", #selector(NSResponder.performTextFinderAction(_:)), "g")
+        let findNext = bind(.findNext, item("Find Next", #selector(NSResponder.performTextFinderAction(_:)), "g"))
         findNext.tag = NSTextFinder.Action.nextMatch.rawValue
         findNext.target = nil
-        let findPrev = item("Find Previous", #selector(NSResponder.performTextFinderAction(_:)), "g", [.command, .shift])
+        let findPrev = bind(.findPrevious, item("Find Previous", #selector(NSResponder.performTextFinderAction(_:)), "g", [.command, .shift]))
         findPrev.tag = NSTextFinder.Action.previousMatch.rawValue
         findPrev.target = nil
-        let copy = item("Copy", #selector(NSText.copy(_:)), "c")
+        let copy = bind(.copy, item("Copy", #selector(NSText.copy(_:)), "c"))
         copy.target = nil
-        let paste = item("Paste", #selector(NSText.paste(_:)), "v")
+        let paste = bind(.paste, item("Paste", #selector(NSText.paste(_:)), "v"))
         paste.target = nil
-        let selectAll = item("Select All", #selector(NSText.selectAll(_:)), "a")
+        let selectAll = bind(.selectAll, item("Select All", #selector(NSText.selectAll(_:)), "a"))
         selectAll.target = nil
         main.addItem(menu("Edit", items: [copy, paste, selectAll, .separator(), find, findNext, findPrev]))
         main.addItem(menu("View", items: [
-            arrowItem("Focus Left", #selector(focusDirectional(_:)), .left, [.command, .option], 1),
-            arrowItem("Focus Right", #selector(focusDirectional(_:)), .right, [.command, .option], 2),
-            arrowItem("Focus Up", #selector(focusDirectional(_:)), .up, [.command, .option], 3),
-            arrowItem("Focus Down", #selector(focusDirectional(_:)), .down, [.command, .option], 4),
+            bind(.focusLeft, arrowItem("Focus Left", #selector(focusDirectional(_:)), .left, [.command, .option], 1)),
+            bind(.focusRight, arrowItem("Focus Right", #selector(focusDirectional(_:)), .right, [.command, .option], 2)),
+            bind(.focusUp, arrowItem("Focus Up", #selector(focusDirectional(_:)), .up, [.command, .option], 3)),
+            bind(.focusDown, arrowItem("Focus Down", #selector(focusDirectional(_:)), .down, [.command, .option], 4)),
             .separator(),
-            arrowItem("Grow Left", #selector(resizeDirectional(_:)), .left, [.command, .shift], 1),
-            arrowItem("Grow Right", #selector(resizeDirectional(_:)), .right, [.command, .shift], 2),
-            arrowItem("Grow Up", #selector(resizeDirectional(_:)), .up, [.command, .shift], 3),
-            arrowItem("Grow Down", #selector(resizeDirectional(_:)), .down, [.command, .shift], 4),
+            bind(.growLeft, arrowItem("Grow Left", #selector(resizeDirectional(_:)), .left, [.command, .shift], 1)),
+            bind(.growRight, arrowItem("Grow Right", #selector(resizeDirectional(_:)), .right, [.command, .shift], 2)),
+            bind(.growUp, arrowItem("Grow Up", #selector(resizeDirectional(_:)), .up, [.command, .shift], 3)),
+            bind(.growDown, arrowItem("Grow Down", #selector(resizeDirectional(_:)), .down, [.command, .shift], 4)),
             .separator(),
-            item("Fill Window", #selector(toggleMaximize), "\r"),
-            item("Equalize Splits", #selector(equalizeSplits), "e", [.command, .shift]),
-            item("Next Layout", #selector(cycleLayoutForward), "l", [.command, .shift]),
-            item("Previous Layout", #selector(cycleLayoutBackward), "l", [.command, .option, .shift]),
+            bind(.fill, item("Fill Window", #selector(toggleMaximize), "\r")),
+            bind(.equalize, item("Equalize Splits", #selector(equalizeSplits), "e", [.command, .shift])),
+            bind(.nextLayout, item("Next Layout", #selector(cycleLayoutForward), "l", [.command, .shift])),
+            bind(.previousLayout, item("Previous Layout", #selector(cycleLayoutBackward), "l", [.command, .option, .shift])),
             item("Tile Columns", #selector(tileColumns), ""),
             item("Tile Rows", #selector(tileRows), ""),
             item("Tile Grid", #selector(tileGrid), ""),
             item("Arrange Windows", #selector(arrangeWindows), ""),
-            item("Broadcast Keys", #selector(toggleBroadcast), "b"),
+            bind(.broadcast, item("Broadcast Keys", #selector(toggleBroadcast), "b")),
             .separator(),
-            item("Bigger", #selector(fontUp), "+"),
-            item("Smaller", #selector(fontDown), "-"),
-            item("Actual Size", #selector(fontReset), "0"),
+            bind(.fontUp, item("Bigger", #selector(fontUp), "+")),
+            bind(.fontDown, item("Smaller", #selector(fontDown), "-")),
+            bind(.fontReset, item("Actual Size", #selector(fontReset), "0")),
         ]))
         main.addItem(menu("Window", items: [
             responderItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             responderItem("Zoom", #selector(NSWindow.performZoom(_:)), ""),
-            item("Launch…", #selector(showPalette), "k"),
+            bind(.launch, item("Launch…", #selector(showPalette), "k")),
             item("Dropdown Terminal", #selector(showDropdown), ""),
         ]))
         main.addItem(menu("Help", items: [
@@ -278,6 +284,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.submenu = menu
         return item
+    }
+
+    private func bind(_ action: AppAction, _ menuItem: NSMenuItem) -> NSMenuItem {
+        boundMenus[action] = menuItem
+        return menuItem
+    }
+
+    private func applyKeyBindings() {
+        let map = model.settings.keys
+        for (action, menuItem) in boundMenus {
+            let chord = map.chord(action)
+            menuItem.keyEquivalent = chord.key
+            menuItem.keyEquivalentModifierMask = chord.key.isEmpty ? [] : chord.flags
+        }
+        HotkeyCenter.apply(enabled: model.settings.dropdownEnabled, chord: map.chord(.dropdown))
     }
 
     private func quitItem() -> NSMenuItem {

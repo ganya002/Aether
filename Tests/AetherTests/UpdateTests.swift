@@ -26,6 +26,18 @@ import Testing
     #expect(ReleaseFeed.offer(from: json, localCommit: "") == nil)
 }
 
+@Test func takingAShortcutClearsTheOtherAction() {
+    let taken = KeyMap.standard.assigning(AppAction.newWindow.defaultChord, to: .newPane)
+    #expect(taken.chord(.newPane) == AppAction.newWindow.defaultChord)
+    #expect(taken.chord(.newWindow).key.isEmpty)
+}
+
+@Test func shellQuoteLeavesPlainPathsAlone() {
+    #expect(ShellPath.quote("/Users/gabbo/Photo.png") == "/Users/gabbo/Photo.png")
+    #expect(ShellPath.quote("/Users/gabbo/My Photos") == "'/Users/gabbo/My Photos'")
+    #expect(ShellPath.quote("/tmp/it's") == "'" + "/tmp/it" + "'\\''" + "s'")
+}
+
 @Test func releaseWithoutTheAppZipIsIgnored() throws {
     let json = """
     {"tag_name":"build-abc123","assets":[{"name":"notes.txt","browser_download_url":"https://example.com/notes.txt"}]}

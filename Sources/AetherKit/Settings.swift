@@ -51,6 +51,7 @@ public struct Settings: Codable, Equatable, Sendable {
     public var notifyOnFinish: Bool
     public var dropdownEnabled: Bool
     public var hideDockIcon: Bool
+    public var keys: KeyMap
 
     public static let currentVersion = 2
 
@@ -65,7 +66,8 @@ public struct Settings: Codable, Equatable, Sendable {
         focusRest: FocusRest = .dim,
         notifyOnFinish: Bool = true,
         dropdownEnabled: Bool = true,
-        hideDockIcon: Bool = false
+        hideDockIcon: Bool = false,
+        keys: KeyMap = .standard
     ) {
         self.shade = shade
         self.glass = glass
@@ -78,6 +80,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.notifyOnFinish = notifyOnFinish
         self.dropdownEnabled = dropdownEnabled
         self.hideDockIcon = hideDockIcon
+        self.keys = keys.filled()
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,6 +96,7 @@ public struct Settings: Codable, Equatable, Sendable {
         notifyOnFinish = try container.decodeIfPresent(Bool.self, forKey: .notifyOnFinish) ?? true
         dropdownEnabled = try container.decodeIfPresent(Bool.self, forKey: .dropdownEnabled) ?? true
         hideDockIcon = try container.decodeIfPresent(Bool.self, forKey: .hideDockIcon) ?? false
+        keys = (try container.decodeIfPresent(KeyMap.self, forKey: .keys) ?? .standard).filled()
         clamp()
     }
 

@@ -51,6 +51,8 @@ enum HotkeyCenter {
     private static var hotKey: EventHotKeyRef?
     private static var handler: EventHandlerRef?
     private static var installed = false
+    private static var installedChord: KeyChord?
+    private static var installedEnabled = false
 
     static func install() {
         guard !installed else { return }
@@ -66,19 +68,19 @@ enum HotkeyCenter {
         }, 1, &spec, nil, &handler)
     }
 
-    static func setEnabled(_ enabled: Bool) {
-        if !enabled {
-            if let hotKey {
-                UnregisterEventHotKey(hotKey)
-                self.hotKey = nil
-            }
-            return
+    static func apply(enabled: Bool, chord: KeyChord) {
+        if installedEnabled == enabled, installedChord == chord { return }
+        installedEnabled = enabled
+        installedChord = chord
+        if let hotKey {
+            UnregisterEventHotKey(hotKey)
+            self.hotKey = nil
         }
-        guard hotKey == nil else { return }
+        guard enabled, chord.keyCode != 0 else { return }
         let identity = EventHotKeyID(signature: OSType(0x4165_7468), id: 1)
         RegisterEventHotKey(
-            UInt32(kVK_ANSI_Grave),
-            UInt32(controlKey | cmdKey),
+            UInt32(chord.keyCode),
+            chord.carbonModifiers,
             identity,
             GetApplicationEventTarget(),
             0,
