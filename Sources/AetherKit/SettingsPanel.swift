@@ -90,7 +90,7 @@ final class SettingsController: NSWindowController {
         stack.addArrangedSubview(glass)
         stack.addArrangedSubview(section("Unfocused panes"))
         stack.addArrangedSubview(rest)
-        let restNote = note("Dim keeps the type readable. Blur frosts them. As is leaves them alone. The focused pane keeps its glow either way.")
+        let restNote = note("Dim keeps the type readable. Blur frosts them. As is leaves them alone. The focused pane gets a border either way.")
         stack.addArrangedSubview(restNote)
         stack.addArrangedSubview(section("Type"))
         stack.addArrangedSubview(labeled("Text", text))

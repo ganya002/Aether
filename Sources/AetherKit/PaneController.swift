@@ -99,10 +99,6 @@ final class PaneChrome: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
-        layer?.shadowColor = NSColor.white.cgColor
-        layer?.shadowOffset = .zero
-        layer?.shadowOpacity = 0
-        layer?.shadowRadius = 2
         clip.wantsLayer = true
         clip.layer?.masksToBounds = true
         clip.layer?.cornerRadius = 12
@@ -129,7 +125,6 @@ final class PaneChrome: NSView {
         let radius = layer?.cornerRadius ?? 12
         clip.frame = bounds
         clip.layer?.cornerRadius = radius
-        layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
         let headerHeight: CGFloat = 34
         header.frame = NSRect(x: 0, y: bounds.height - headerHeight, width: bounds.width, height: headerHeight)
         let bannerHeight: CGFloat = exitBanner.isHidden ? 0 : 36
@@ -137,8 +132,8 @@ final class PaneChrome: NSView {
         terminal.frame = NSRect(x: 0, y: bannerHeight, width: bounds.width, height: max(0, bounds.height - headerHeight - bannerHeight))
         rest.frame = bounds
         blur?.frame = bounds
-        outline.frame = bounds
-        outline.layer?.cornerRadius = radius
+        outline.frame = bounds.insetBy(dx: 1, dy: 1)
+        outline.layer?.cornerRadius = max(0, radius - 1)
     }
 
     func setFocused(_ focused: Bool, settings: Settings) {
@@ -156,16 +151,14 @@ final class PaneChrome: NSView {
             blur = view
         }
         let apply = {
-            self.outline.layer?.borderWidth = focused ? 1.8 : 0.5
-            self.outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.96 : 0.12).cgColor
-            self.layer?.shadowOpacity = focused ? 0.82 : 0
-            self.layer?.shadowRadius = focused ? 14 : 2
+            self.outline.layer?.borderWidth = focused ? 2 : 0
+            self.outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
             self.rest.alphaValue = dim
             self.blur?.alphaValue = showBlur ? 1 : 0
             self.header.setFindVisible(focused)
         }
         if animate {
-            bloom(focused)
+            animateBorder(focused)
             Motion.group(Motion.snap) { apply() }
         } else {
             CATransaction.begin()
@@ -182,20 +175,22 @@ final class PaneChrome: NSView {
         }
     }
 
-    private func bloom(_ focused: Bool) {
-        guard let layer else { return }
-        let opacity = CABasicAnimation(keyPath: "shadowOpacity")
-        opacity.fromValue = layer.presentation()?.shadowOpacity ?? layer.shadowOpacity
-        opacity.toValue = focused ? 0.82 : 0
-        opacity.duration = Motion.snap
-        opacity.timingFunction = Motion.ease()
-        layer.add(opacity, forKey: "shadowOpacity")
-        let radius = CABasicAnimation(keyPath: "shadowRadius")
-        radius.fromValue = layer.presentation()?.shadowRadius ?? layer.shadowRadius
-        radius.toValue = focused ? 14 : 2
-        radius.duration = Motion.snap
-        radius.timingFunction = Motion.ease()
-        layer.add(radius, forKey: "shadowRadius")
+    private func animateBorder(_ focused: Bool) {
+        guard let layer = outline.layer else { return }
+        let width: CGFloat = focused ? 2 : 0
+        let color = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
+        let widthAnim = CABasicAnimation(keyPath: "borderWidth")
+        widthAnim.fromValue = layer.presentation()?.borderWidth ?? layer.borderWidth
+        widthAnim.toValue = width
+        widthAnim.duration = Motion.snap
+        widthAnim.timingFunction = Motion.ease()
+        layer.add(widthAnim, forKey: "borderWidth")
+        let colorAnim = CABasicAnimation(keyPath: "borderColor")
+        colorAnim.fromValue = layer.presentation()?.borderColor ?? layer.borderColor
+        colorAnim.toValue = color
+        colorAnim.duration = Motion.snap
+        colorAnim.timingFunction = Motion.ease()
+        layer.add(colorAnim, forKey: "borderColor")
     }
 
     func showExit(code: Int32?) {

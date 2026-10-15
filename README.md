@@ -53,7 +53,7 @@ Drag the six dots on a pane to drop it on an edge, swap it with another pane, or
 
 Shade, glass style, type size, focus, and snap behavior live in Settings. The default glass is Regular. Clear is the window server bending whatever is actually behind Aether, with only enough shade to keep the type readable.
 
-Unfocused panes dim by default. Settings can blur them, or leave them as they are. The focused pane keeps a white rim either way. Switching focus eases the rim and the dim together.
+Unfocused panes dim by default. Settings can blur them, or leave them as they are. The focused pane has a border. Switching focus eases that border and the dim together.
 
 ⌃⌘` drops a terminal down from the top of the screen, from any app. ⌘-click a path to open it. A command that runs for a couple of seconds posts a notification if Aether is in the background. The scrollbar shows while you scroll, and the magnifying glass on the focused pane is Find.
 
