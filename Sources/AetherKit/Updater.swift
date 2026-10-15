@@ -16,12 +16,26 @@ enum ReleaseFeed {
               let tag = json["tag_name"] as? String,
               let assets = json["assets"] as? [[String: Any]] else { return nil }
         let commit = tag.hasPrefix("build-") ? String(tag.dropFirst("build-".count)) : tag
-        guard !commit.isEmpty else { return nil }
-        if !localCommit.isEmpty, localCommit.caseInsensitiveCompare(commit) == .orderedSame { return nil }
+        guard isCommit(commit) else { return nil }
+        // A copy built outside git is stamped "dev". Offering every release would nag forever.
+        guard isCommit(localCommit) else { return nil }
+        if sameCommit(localCommit, commit) { return nil }
         guard let asset = assets.first(where: { $0["name"] as? String == assetName }),
               let urlString = asset["browser_download_url"] as? String,
               let zip = URL(string: urlString) else { return nil }
         return Offer(commit: commit, zip: zip)
+    }
+
+    private static func isCommit(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (6...40).contains(trimmed.count) else { return false }
+        return trimmed.allSatisfy(\.isHexDigit)
+    }
+
+    private static func sameCommit(_ local: String, _ remote: String) -> Bool {
+        let left = local.lowercased()
+        let right = remote.lowercased()
+        return left == right || left.hasPrefix(right) || right.hasPrefix(left)
     }
 }
 

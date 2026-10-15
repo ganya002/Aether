@@ -25,7 +25,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Aether "$APP/Contents/MacOS/Aether"
 cp Info.plist "$APP/Contents/Info.plist"
-COMMIT="$(git rev-parse HEAD 2>/dev/null || echo dev)"
+# The GitHub tarball has no .git directory. The installer passes the commit it downloaded.
+if [[ -n "${AETHER_COMMIT:-}" ]]; then
+  COMMIT="$AETHER_COMMIT"
+else
+  COMMIT="$(git rev-parse HEAD 2>/dev/null || echo dev)"
+fi
 /usr/libexec/PlistBuddy -c "Delete :AetherCommit" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
 /usr/libexec/PlistBuddy -c "Add :AetherCommit string $COMMIT" "$APP/Contents/Info.plist"
 

@@ -56,6 +56,13 @@ final class Speedometer: NSView {
         needsDisplay = true
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window == nil else { return }
+        ticker?.invalidate()
+        ticker = nil
+    }
+
     override func layout() {
         super.layout()
         let face = Self.faceRect(in: bounds)
@@ -69,6 +76,7 @@ final class Speedometer: NSView {
         let arcRadius = side * 0.355
         let start = CGFloat(216)
         let sweep = CGFloat(252)
+        let displayed = min(1, max(0, shown))
 
         let faceColor = NSColor(srgbRed: 0.06, green: 0.05, blue: 0.08, alpha: 0.94)
         faceColor.setFill()
@@ -99,15 +107,15 @@ final class Speedometer: NSView {
         NSColor.white.withAlphaComponent(0.14).setStroke()
         track.stroke()
 
-        if shown > 0.001 {
-            let progress = arc(center: center, radius: arcRadius, start: start, sweep: sweep * CGFloat(shown))
+        if displayed > 0.001 {
+            let progress = arc(center: center, radius: arcRadius, start: start, sweep: sweep * CGFloat(displayed))
             progress.lineWidth = side * 0.045
             progress.lineCapStyle = .round
             NSColor.white.withAlphaComponent(0.94).setStroke()
             progress.stroke()
         }
 
-        let needleAngle = (start - sweep * CGFloat(shown)) * .pi / 180
+        let needleAngle = (start - sweep * CGFloat(displayed)) * .pi / 180
         let hubRadius = side * 0.17
         let needle = NSBezierPath()
         needle.move(to: CGPoint(x: center.x + cos(needleAngle) * hubRadius, y: center.y + sin(needleAngle) * hubRadius))
@@ -120,7 +128,7 @@ final class Speedometer: NSView {
         faceColor.setFill()
         NSBezierPath(ovalIn: NSRect(x: center.x - hubRadius, y: center.y - hubRadius, width: hubRadius * 2, height: hubRadius * 2)).fill()
 
-        let percent = "\(Int((shown * 100).rounded()))%"
+        let percent = "\(Int((displayed * 100).rounded()))%"
         let font = NSFont.monospacedDigitSystemFont(ofSize: side * 0.145, weight: .medium)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -195,6 +203,11 @@ final class UpdateVeil: NSView {
         spring.fillMode = .forwards
         spring.isRemovedOnCompletion = false
         cluster.layer?.add(spring, forKey: "reveal")
+        let settle = spring.settlingDuration
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
+            self?.cluster.layer?.removeAnimation(forKey: "reveal")
+            self?.cluster.layer?.transform = CATransform3DIdentity
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.45
             context.timingFunction = Motion.ease()

@@ -263,6 +263,14 @@ export PATH="$(dirname "$SWIFT"):/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin
 export AETHER_BUILD_LOG="$LOG"
 hash -r
 
+# Without this, a curl install is stamped "dev" and the app thinks every GitHub release is newer.
+commit="$(curl -fsSL --retry 2 --retry-delay 1 -H "Accept: application/vnd.github+json" -H "User-Agent: Aether" \
+  "https://api.github.com/repos/ganya002/Aether/commits/main" \
+  | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1 || true)"
+if [[ -n "$commit" ]]; then
+  export AETHER_COMMIT="$commit"
+fi
+
 set +e
 AETHER_BUILD_LOG="$LOG" "$SRC/scripts/build-app.sh" &
 build_pid=$!
