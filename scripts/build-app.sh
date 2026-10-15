@@ -3,7 +3,22 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SWIFT="${SWIFT:-swift}"
-"$SWIFT" build -c release
+
+# A log path means the installer is driving the build and drawing its own progress.
+# script keeps Swift's output in that file, including live [3/20] lines, and off the terminal.
+run_swift() {
+  if [[ -n "${AETHER_BUILD_LOG:-}" ]]; then
+    if [[ -s "$AETHER_BUILD_LOG" ]]; then
+      script -a -q "$AETHER_BUILD_LOG" "$SWIFT" "$@" >/dev/null
+    else
+      script -q "$AETHER_BUILD_LOG" "$SWIFT" "$@" >/dev/null
+    fi
+  else
+    "$SWIFT" "$@"
+  fi
+}
+
+run_swift build -c release
 
 APP="dist/Aether.app"
 rm -rf "$APP"
@@ -16,7 +31,9 @@ COMMIT="$(git rev-parse HEAD 2>/dev/null || echo dev)"
 
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
-"$SWIFT" scripts/make-icon.swift "$ICONSET"
+run_swift scripts/make-icon.swift "$ICONSET"
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
-echo "Built $APP"
+if [[ -z "${AETHER_BUILD_LOG:-}" ]]; then
+  echo "Built $APP"
+fi
