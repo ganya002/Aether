@@ -151,8 +151,6 @@ final class PaneChrome: NSView {
             blur = view
         }
         let apply = {
-            self.outline.layer?.borderWidth = focused ? 2 : 0
-            self.outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
             self.rest.alphaValue = dim
             self.blur?.alphaValue = showBlur ? 1 : 0
             self.header.setFindVisible(focused)
@@ -163,6 +161,8 @@ final class PaneChrome: NSView {
         } else {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            self.outline.layer?.borderWidth = focused ? 2 : 0
+            self.outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
             apply()
             CATransaction.commit()
         }
@@ -178,19 +178,20 @@ final class PaneChrome: NSView {
     private func animateBorder(_ focused: Bool) {
         guard let layer = outline.layer else { return }
         let width: CGFloat = focused ? 2 : 0
-        let color = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
+        // borderColor is a CGColor. Animating the presentation layer's color
+        // releases a pointer the window server still owns, which crashes in
+        // the next autorelease pool drain.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
+        CATransaction.commit()
         let widthAnim = CABasicAnimation(keyPath: "borderWidth")
         widthAnim.fromValue = layer.presentation()?.borderWidth ?? layer.borderWidth
         widthAnim.toValue = width
         widthAnim.duration = Motion.snap
         widthAnim.timingFunction = Motion.ease()
+        layer.borderWidth = width
         layer.add(widthAnim, forKey: "borderWidth")
-        let colorAnim = CABasicAnimation(keyPath: "borderColor")
-        colorAnim.fromValue = layer.presentation()?.borderColor ?? layer.borderColor
-        colorAnim.toValue = color
-        colorAnim.duration = Motion.snap
-        colorAnim.timingFunction = Motion.ease()
-        layer.add(colorAnim, forKey: "borderColor")
     }
 
     func showExit(code: Int32?) {
