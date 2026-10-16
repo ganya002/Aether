@@ -316,7 +316,7 @@ final class KeybindBoard: NSView {
                 }
                 self?.reload()
             }
-            card.widthAnchor.constraint(equalToConstant: 400).isActive = true
+            card.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             card.heightAnchor.constraint(equalToConstant: 46).isActive = true
             cards[action] = card
             stack.addArrangedSubview(card)

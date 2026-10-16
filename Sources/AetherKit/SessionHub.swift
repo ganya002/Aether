@@ -1,10 +1,46 @@
 import Foundation
 import Network
 
+enum CloudLink: Equatable {
+    case idle
+    case connecting
+    case connected
+    case unavailable(String)
+    case failed(String)
+
+    var title: String {
+        switch self {
+        case .idle: "Local"
+        case .connecting: "Connecting"
+        case .connected: "Connected"
+        case .unavailable(let message), .failed(let message): message
+        }
+    }
+}
+
 /// One connection to the session server. Panes share it. The server keeps the shells alive after this app quits.
 @MainActor
 final class SessionHub {
     static let shared = SessionHub()
+    var onLink: ((CloudLink) -> Void)?
+    private(set) var link: CloudLink = .idle {
+        didSet {
+            onLink?(link)
+            let note: String
+            switch link {
+            case .connected: note = "Cloud"
+            case .idle: note = ""
+            default: note = link.title
+            }
+            for pane in AppModel.shared.panes.values where pane.chrome.terminal.remoteSession != nil {
+                pane.chrome.header.setCloud(note)
+            }
+        }
+    }
+
+    func setLink(_ next: CloudLink) {
+        link = next
+    }
 
     private var connection: NWConnection?
     private var buffer = Data()
@@ -27,7 +63,10 @@ final class SessionHub {
         let host = settings.sessionHost.trimmingCharacters(in: .whitespacesAndNewlines)
         let token = settings.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty, !token.isEmpty else { throw SessionError.unconfigured }
-        if opened, connection != nil, connectedHost == host, connectedToken == token { return }
+        if opened, connection != nil, connectedHost == host, connectedToken == token {
+            link = .connected
+            return
+        }
         if connecting {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
                 waiters.append(cont)
@@ -123,6 +162,7 @@ final class SessionHub {
         connecting = false
         opened = false
         connection = nil
+        link = .failed(error.localizedDescription)
         let waiting = waiters
         waiters = []
         waiting.forEach { $0.resume(throwing: error) }
@@ -166,6 +206,7 @@ final class SessionHub {
             opened = true
             connecting = false
             failed = nil
+            link = .connected
             let waiting = waiters
             waiters = []
             waiting.forEach { $0.resume() }
@@ -194,6 +235,16 @@ final class SessionHub {
             let cont = pending[index].1
             pending.remove(at: index)
             cont.resume(returning: value)
+            return
+        }
+        if msg["type"] as? String == "agent" {
+            let requestID = msg["id"] as? String ?? ""
+            let path = msg["path"] as? String ?? ""
+            let body = msg["body"] as? [String: Any] ?? [:]
+            var result = AppModel.shared.agent(path: path, body: body)
+            result["type"] = "agentResult"
+            result["id"] = requestID
+            send(result)
             return
         }
         if msg["type"] as? String == "error", let message = msg["message"] as? String {

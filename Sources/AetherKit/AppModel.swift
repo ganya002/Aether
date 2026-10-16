@@ -910,3 +910,99 @@ enum SessionStore {
         try? data.write(to: url, options: .atomic)
     }
 }
+
+extension AppModel {
+    func agent(path: String, body: [String: Any]) -> [String: Any] {
+        switch path {
+        case "/tab":
+            let pane = openAgentPane(zone: nil, command: body["command"] as? String, focus: bool(body["focus"], false), share: share(body["ratio"]))
+            return ["ok": true, "pane": pane]
+        case "/split":
+            let zone = Zone(rawValue: body["direction"] as? String ?? "right") ?? .right
+            let pane = openAgentPane(zone: zone, command: body["command"] as? String, focus: bool(body["focus"], false), share: share(body["ratio"]))
+            return ["ok": true, "pane": pane]
+        case "/open":
+            let zone = Zone(rawValue: body["direction"] as? String ?? "right") ?? .right
+            let pane = openAgentPane(zone: zone, command: nil, focus: false, share: share(body["ratio"]))
+            let kind = body["kind"] as? String ?? "web"
+            let target = body["target"] as? String ?? ""
+            guard let controller = panes[pane], controller.chrome.showPreview(kind: kind, source: target) else {
+                return ["ok": false, "error": "Could not open that page."]
+            }
+            controller.holdsPreview = true
+            return ["ok": true, "pane": pane]
+        case "/font":
+            let delta = (body["delta"] as? Double) ?? Double(body["delta"] as? Int ?? 1)
+            changeFont(by: delta)
+            return ["ok": true, "size": settings.fontSize]
+        case "/zoom":
+            toggleMaximize()
+            return ["ok": true]
+        case "/read":
+            guard let deskID = keyDeskID, let focused = desks[deskID]?.focusedID, let text = panes[focused]?.screenText() else {
+                return ["ok": false, "error": "No terminal is focused."]
+            }
+            return ["ok": true, "pane": focused, "text": text]
+        case "/view":
+            let rows = desks.values.flatMap { desk in
+                desk.layout.panes.map { id in
+                    ["id": id, "desk": desk.id, "focused": desk.focusedID == id, "title": desk.panes[id]?.title ?? ""] as [String: Any]
+                }
+            }
+            return ["ok": true, "panes": rows]
+        default:
+            return ["ok": false, "error": "Unknown request."]
+        }
+    }
+
+    private func openAgentPane(zone: Zone?, command: String?, focus: Bool, share: Double?) -> String {
+        let before = keyDeskID.flatMap { desks[$0]?.focusedID }
+        if let zone {
+            splitFocused(zone, command: command)
+        } else {
+            newPane(command: command)
+        }
+        let created = keyDeskID.flatMap { desks[$0]?.focusedID } ?? ""
+        if let share, let deskID = keyDeskID {
+            tuneShare(deskID: deskID, paneID: created, share: min(max(share, 0.1), 0.8))
+        }
+        if !focus, let before, let deskID = keyDeskID, var desk = desks[deskID] {
+            desk.focusedID = before
+            desks[deskID] = desk
+            controllers[deskID]?.sync(animated: true)
+        }
+        return created
+    }
+
+    private func tuneShare(deskID: String, paneID: String, share: Double) {
+        guard var desk = desks[deskID], let found = Self.splitHolding(paneID, desk.layout) else { return }
+        let ratio = found.isA ? share : 1 - share
+        desk.layout = Layout.setRatio(desk.layout, splitID: found.split, ratio: ratio)
+        desks[deskID] = desk
+        controllers[deskID]?.sync()
+    }
+
+    private static func splitHolding(_ paneID: String, _ node: LayoutNode) -> (split: String, isA: Bool)? {
+        switch node {
+        case .pane:
+            return nil
+        case .split(let id, _, _, let a, let b):
+            if case .pane(let child) = a, child == paneID { return (id, true) }
+            if case .pane(let child) = b, child == paneID { return (id, false) }
+            return splitHolding(paneID, a) ?? splitHolding(paneID, b)
+        }
+    }
+
+    private func share(_ raw: Any?) -> Double? {
+        let number: Double?
+        if let value = raw as? Double { number = value }
+        else if let value = raw as? Int { number = Double(value) }
+        else { number = nil }
+        guard let number else { return nil }
+        return number > 1 ? number / 100 : number
+    }
+
+    private func bool(_ raw: Any?, _ fallback: Bool) -> Bool {
+        raw as? Bool ?? fallback
+    }
+}

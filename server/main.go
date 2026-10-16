@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -27,6 +28,7 @@ const (
 
 type session struct {
 	id     string
+	owner  string
 	cmd    *exec.Cmd
 	master *os.File
 	mu     sync.Mutex
@@ -43,12 +45,21 @@ type session struct {
 type hub struct {
 	mu       sync.Mutex
 	token    string
+	devices  map[string]struct{}
 	sessions map[string]*session
+	clients  map[string]*lockedConn
+	waiters  map[string]chan map[string]any
 }
 
 func main() {
 	token := loadToken()
-	h := &hub{token: token, sessions: map[string]*session{}}
+	h := &hub{
+		token:    token,
+		devices:  loadDevices(),
+		sessions: map[string]*session{},
+		clients:  map[string]*lockedConn{},
+		waiters:  map[string]chan map[string]any{},
+	}
 	go h.serveAPI()
 	ln, err := net.Listen("tcp", port)
 	if err != nil {
@@ -79,6 +90,45 @@ func loadToken() string {
 	return token
 }
 
+func loadDevices() map[string]struct{} {
+	out := map[string]struct{}{}
+	b, err := os.ReadFile("/var/lib/aether/devices")
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out[line] = struct{}{}
+		}
+	}
+	return out
+}
+
+func (h *hub) saveDevices() {
+	h.mu.Lock()
+	lines := make([]string, 0, len(h.devices))
+	for token := range h.devices {
+		lines = append(lines, token)
+	}
+	h.mu.Unlock()
+	_ = os.MkdirAll("/var/lib/aether", 0o700)
+	_ = os.WriteFile("/var/lib/aether/devices", []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+}
+
+func (h *hub) known(token string) bool {
+	if token == "" {
+		return false
+	}
+	if token == h.token {
+		return true
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.devices[token]
+	return ok
+}
+
 type lockedConn struct {
 	c  net.Conn
 	mu sync.Mutex
@@ -98,10 +148,21 @@ func (h *hub) handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
-	if hello["type"] != "hello" || hello["token"] != h.token {
+	owner := str(hello, "token")
+	if hello["type"] != "hello" || !h.known(owner) {
 		_ = link.write(map[string]any{"type": "error", "message": "unauthorized"})
 		return
 	}
+	h.mu.Lock()
+	h.clients[owner] = link
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		if h.clients[owner] == link {
+			delete(h.clients, owner)
+		}
+		h.mu.Unlock()
+	}()
 	_ = conn.SetDeadline(time.Time{})
 	_ = link.write(map[string]any{"type": "helloOk", "version": 1})
 	var subs []struct {
@@ -120,7 +181,7 @@ func (h *hub) handle(conn net.Conn) {
 		}
 		switch msg["type"] {
 		case "create":
-			s := h.create(str(msg, "cwd"), intNum(msg, "cols"), intNum(msg, "rows"), str(msg, "command"))
+			s := h.create(owner, str(msg, "cwd"), intNum(msg, "cols"), intNum(msg, "rows"), str(msg, "command"))
 			if s == nil {
 				_ = link.write(map[string]any{"type": "error", "message": "could not start a session"})
 				continue
@@ -135,7 +196,7 @@ func (h *hub) handle(conn net.Conn) {
 			s.sendScroll(link)
 		case "attach":
 			s := h.get(str(msg, "id"))
-			if s == nil {
+			if s == nil || !h.allows(owner, s) {
 				_ = link.write(map[string]any{"type": "error", "message": "no such session"})
 				continue
 			}
@@ -149,19 +210,23 @@ func (h *hub) handle(conn net.Conn) {
 			_ = link.write(map[string]any{"type": "attached", "id": s.id, "title": s.title, "state": s.state, "msg": s.msg})
 			s.sendScroll(link)
 		case "input":
-			if s := h.get(str(msg, "id")); s != nil {
+			if s := h.get(str(msg, "id")); s != nil && h.allows(owner, s) {
 				if raw, err := base64.StdEncoding.DecodeString(str(msg, "data")); err == nil {
 					s.write(raw)
 				}
 			}
 		case "resize":
-			if s := h.get(str(msg, "id")); s != nil {
+			if s := h.get(str(msg, "id")); s != nil && h.allows(owner, s) {
 				s.resize(intNum(msg, "cols"), intNum(msg, "rows"))
 			}
 		case "list":
-			_ = link.write(map[string]any{"type": "sessions", "items": h.list()})
+			_ = link.write(map[string]any{"type": "sessions", "items": h.listFor(owner)})
+		case "agentResult":
+			h.finish(str(msg, "id"), msg)
 		case "close":
-			h.close(str(msg, "id"))
+			if s := h.get(str(msg, "id")); s != nil && h.allows(owner, s) {
+				h.close(s.id)
+			}
 		case "detach":
 			// The connection close drops subscriptions. Nothing else to do.
 		default:
@@ -193,7 +258,11 @@ func pump(conn *lockedConn, id string, sub chan []byte) {
 	}
 }
 
-func (h *hub) create(cwd string, cols, rows int, command string) *session {
+func (h *hub) allows(owner string, s *session) bool {
+	return owner == h.token || s.owner == owner
+}
+
+func (h *hub) create(owner, cwd string, cols, rows int, command string) *session {
 	if cwd == "" {
 		cwd, _ = os.UserHomeDir()
 	}
@@ -212,14 +281,14 @@ func (h *hub) create(cwd string, cols, rows int, command string) *session {
 		cmd = exec.Command(shell, "-lc", command)
 	}
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "TERM_PROGRAM=Aether")
+	id := newID()
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "TERM_PROGRAM=Aether", "AETHER_SESSION="+id, "AETHER_TOKEN="+owner)
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		return nil
 	}
-	id := newID()
 	s := &session{
-		id: id, cmd: cmd, master: master, cols: cols, rows: rows, cwd: cwd,
+		id: id, owner: owner, cmd: cmd, master: master, cols: cols, rows: rows, cwd: cwd,
 		title: "shell", state: "idle", subs: map[chan []byte]struct{}{},
 	}
 	h.mu.Lock()
@@ -376,11 +445,14 @@ func (h *hub) close(id string) {
 	h.mu.Unlock()
 }
 
-func (h *hub) list() []map[string]any {
+func (h *hub) listFor(owner string) []map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	items := make([]map[string]any, 0, len(h.sessions))
 	for _, s := range h.sessions {
+		if owner != h.token && s.owner != owner {
+			continue
+		}
 		s.mu.Lock()
 		items = append(items, map[string]any{
 			"id": s.id, "title": s.title, "cwd": s.cwd, "state": s.state, "msg": s.msg,
@@ -530,13 +602,61 @@ func newID() string {
 
 func (h *hub) serveAPI() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		buf := make([]byte, 24)
+		_, _ = rand.Read(buf)
+		token := hex.EncodeToString(buf)
+		h.mu.Lock()
+		h.devices[token] = struct{}{}
+		h.mu.Unlock()
+		h.saveDevices()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+	})
+	mux.HandleFunc("/agent", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		owner := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !h.known(owner) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var body struct {
+			Path    string         `json:"path"`
+			Session string         `json:"session"`
+			Body    map[string]any `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		s := h.get(body.Session)
+		if s == nil || !h.allows(owner, s) {
+			http.Error(w, "missing", http.StatusNotFound)
+			return
+		}
+		res, err := h.ask(s.owner, body.Path, body.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	})
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if !h.authorized(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode(h.list())
+			owner := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			_ = json.NewEncoder(w).Encode(h.listFor(owner))
 			return
 		}
 		if r.Method == http.MethodPost {
@@ -545,7 +665,8 @@ func (h *hub) serveAPI() {
 				Command string `json:"command"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			s := h.create(body.Cwd, 80, 24, body.Command)
+			owner := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			s := h.create(owner, body.Cwd, 80, 24, body.Command)
 			if s == nil {
 				http.Error(w, "could not start", http.StatusInternalServerError)
 				return
@@ -568,7 +689,8 @@ func (h *hub) serveAPI() {
 			id = strings.TrimSuffix(path, "/input")
 		}
 		s := h.get(id)
-		if s == nil {
+		owner := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if s == nil || !h.allows(owner, s) {
 			http.Error(w, "missing", http.StatusNotFound)
 			return
 		}
@@ -591,5 +713,43 @@ func (h *hub) serveAPI() {
 }
 
 func (h *hub) authorized(r *http.Request) bool {
-	return r.Header.Get("Authorization") == "Bearer "+h.token
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return h.known(token)
+}
+
+func (h *hub) ask(owner, path string, body map[string]any) (map[string]any, error) {
+	id := newID()
+	ch := make(chan map[string]any, 1)
+	h.mu.Lock()
+	link := h.clients[owner]
+	h.waiters[id] = ch
+	h.mu.Unlock()
+	if link == nil {
+		h.mu.Lock()
+		delete(h.waiters, id)
+		h.mu.Unlock()
+		return nil, errors.New("the Mac that owns this session is not connected")
+	}
+	if err := link.write(map[string]any{"type": "agent", "id": id, "path": path, "body": body}); err != nil {
+		return nil, err
+	}
+	select {
+	case res := <-ch:
+		return res, nil
+	case <-time.After(8 * time.Second):
+		h.mu.Lock()
+		delete(h.waiters, id)
+		h.mu.Unlock()
+		return nil, errors.New("the Mac did not answer")
+	}
+}
+
+func (h *hub) finish(id string, msg map[string]any) {
+	h.mu.Lock()
+	ch := h.waiters[id]
+	delete(h.waiters, id)
+	h.mu.Unlock()
+	if ch != nil {
+		ch <- msg
+	}
 }

@@ -25,13 +25,15 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let updateStatus = NSTextField(labelWithString: "")
     private let keybinds = KeybindBoard()
     private let sessionWhere = NSSegmentedControl(labels: ["Local", "Cloud"], trackingMode: .selectOne, target: nil, action: nil)
+    private let cloudStatus = NSTextField(wrappingLabelWithString: "")
+    private var cloudChosen = false
     private var applying = false
     private var escMonitor: Any?
     private var vaporToken = 0
 
     init() {
         let panel = VaporPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 820),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -63,7 +65,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 11
+        stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -111,11 +113,16 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(section("Keys"))
         stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Reset puts that one shortcut back."))
         keybinds.translatesAutoresizingMaskIntoConstraints = false
-        keybinds.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        keybinds.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(keybinds)
+        stack.setCustomSpacing(28, after: keybinds)
         stack.addArrangedSubview(section("Sessions"))
         stack.addArrangedSubview(sessionWhere)
-        stack.addArrangedSubview(note("Cloud starts each new terminal on the Aether server. Quit the app and the shell is still there. Local keeps it on this Mac."))
+        cloudStatus.font = .systemFont(ofSize: 12)
+        cloudStatus.textColor = .secondaryLabelColor
+        cloudStatus.preferredMaxLayoutWidth = 480
+        stack.addArrangedSubview(cloudStatus)
+        stack.addArrangedSubview(note("Cloud asks the published Aether service for a session of your own. The shell stays up after you quit."))
         stack.addArrangedSubview(section("Updates"))
         let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
         check.bezelStyle = .rounded
@@ -137,7 +144,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             control.action = #selector(changed)
             control.segmentDistribution = .fillEqually
             control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         for box in [snap, notify, dropdown, dock] {
             box.target = self
@@ -166,6 +173,25 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         UpdateCenter.shared.onStatus = { [weak self] message in
             self?.updateStatus.stringValue = message
         }
+        SessionHub.shared.onLink = { [weak self] link in
+            self?.cloudStatus.stringValue = link.title
+            self?.cloudStatus.textColor = {
+                switch link {
+                case .failed, .unavailable: return .systemRed
+                case .connected: return .secondaryLabelColor
+                default: return .secondaryLabelColor
+                }
+            }()
+        }
+        cloudStatus.stringValue = SessionHub.shared.link.title
+        if cloudChosen {
+            switch SessionHub.shared.link {
+            case .idle, .unavailable:
+                Task { await self.connectCloud() }
+            default:
+                break
+            }
+        }
         window?.center()
         guard let window else { return }
         GlassMotion.present(window)
@@ -193,6 +219,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     @objc private func changed() {
         guard !applying else { return }
         paintValues()
+        let wantsCloud = sessionWhere.selectedSegment == 1
+        let switched = wantsCloud != cloudChosen
         AppModel.shared.updateSettings { settings in
             settings.shade = shade.doubleValue
             settings.cornerRadius = radius.doubleValue
@@ -205,15 +233,46 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             settings.notifyOnFinish = notify.state == .on
             settings.dropdownEnabled = dropdown.state == .on
             settings.hideDockIcon = dock.state == .on
-            if sessionWhere.selectedSegment == 1 {
-                settings.sessionHost = AetherCloud.host
-                settings.sessionToken = AetherCloud.token
-            } else {
+            if switched && !wantsCloud {
                 settings.sessionHost = ""
                 settings.sessionToken = ""
             }
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
+        guard switched else { return }
+        cloudChosen = wantsCloud
+        if wantsCloud {
+            Task { await self.connectCloud() }
+        } else {
+            SessionHub.shared.setLink(.idle)
+        }
+    }
+
+    private func connectCloud() async {
+        let saved = AppModel.shared.settings
+        if saved.sessionHost.isEmpty || saved.sessionToken.isEmpty {
+            SessionHub.shared.setLink(.connecting)
+            guard let endpoint = await CloudCatalog.published() else {
+                SessionHub.shared.setLink(.unavailable("Cloud isn't publicly available yet."))
+                return
+            }
+            do {
+                let creds = try await CloudCatalog.enroll(at: endpoint)
+                AppModel.shared.updateSettings { settings in
+                    settings.sessionHost = creds.host
+                    settings.sessionToken = creds.token
+                }
+            } catch {
+                SessionHub.shared.setLink(.failed(error.localizedDescription))
+                return
+            }
+        }
+        SessionHub.shared.setLink(.connecting)
+        do {
+            try await SessionHub.shared.open()
+        } catch {
+            SessionHub.shared.setLink(.failed(error.localizedDescription))
+        }
     }
 
     @objc private func checkForUpdates() {
@@ -245,6 +304,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         dock.state = settings.hideDockIcon ? .on : .off
         dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
         sessionWhere.selectedSegment = settings.sessionHost.isEmpty ? 0 : 1
+        cloudChosen = sessionWhere.selectedSegment == 1
         keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()

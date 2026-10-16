@@ -20,6 +20,10 @@ let package = Package(
             name: "AetherKit",
             dependencies: [
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ],
+            linkerSettings: [
+                .linkedFramework("WebKit"),
+                .linkedFramework("PDFKit"),
             ]
         ),
         .executableTarget(

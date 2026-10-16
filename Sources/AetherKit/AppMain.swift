@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             runSmoke()
             return
         }
+        AgentDesk.shared.start()
         model.restoreOrCreate()
         HotkeyCenter.onFire = { [weak self] in
             self?.model.toggleDropdown()

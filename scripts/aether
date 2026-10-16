@@ -1,0 +1,69 @@
+#!/bin/sh
+PLIST="$HOME/Library/Application Support/Aether/agent.plist"
+if [ -n "$AETHER_SESSION" ]; then
+  PORT=0
+  TOKEN=""
+elif [ ! -f "$PLIST" ]; then
+  echo "Aether is not running." >&2
+  exit 1
+else
+  PORT=$(plutil -extract port raw "$PLIST")
+  TOKEN=$(plutil -extract token raw "$PLIST")
+fi
+cmd="$1"
+shift
+python3 - "$cmd" "$PORT" "$TOKEN" "$@" << 'PY'
+import json, sys, urllib.request
+cmd, port, token, *args = sys.argv[1:]
+def flag(name, default=None):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return default
+body = {}
+path = "/split"
+if cmd == "tab":
+    path = "/tab"
+elif cmd == "font":
+    path = "/font"
+    body["delta"] = float(flag("--delta", args[0] if args else "1"))
+elif cmd == "zoom":
+    path = "/zoom"
+elif cmd == "read":
+    path = "/read"
+elif cmd == "view":
+    path = "/view"
+elif cmd == "open":
+    path = "/open"
+    body["kind"] = args[0] if args else "web"
+    body["target"] = args[1] if len(args) > 1 else ""
+elif cmd == "skill":
+    import os, shutil
+    home = os.path.expanduser("~")
+    candidates = [os.path.expanduser("~/Library/Application Support/Aether/skill/SKILL.md"), "/usr/local/share/aether/SKILL.md"]
+    src = next((path for path in candidates if os.path.exists(path)), "")
+    homes = [os.path.join(home, ".claude", "skills", "aether"), os.path.join(home, ".agents", "skills", "aether"), os.path.join(home, ".cursor", "skills", "aether")]
+    for dest in homes:
+        os.makedirs(dest, exist_ok=True)
+        if os.path.exists(src):
+            shutil.copy(src, os.path.join(dest, "SKILL.md"))
+            print(dest)
+    sys.exit(0)
+elif cmd != "split":
+    print("commands: split, tab, open, font, zoom, read, view, skill", file=sys.stderr)
+    sys.exit(2)
+body["direction"] = flag("--split", "right")
+body["ratio"] = float(flag("--ratio", "50"))
+if "--" in args:
+    body["command"] = " ".join(args[args.index("--") + 1:])
+import os
+session = os.environ.get("AETHER_SESSION", "")
+if session:
+    payload = {"path": path, "body": body, "session": session}
+    token = os.environ.get("AETHER_TOKEN", "")
+    req = urllib.request.Request("http://127.0.0.1:7392/agent", data=json.dumps(payload).encode(), headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+else:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(), headers={"Authorization": token, "Content-Type": "application/json"})
+print(urllib.request.urlopen(req, timeout=8).read().decode())
+PY

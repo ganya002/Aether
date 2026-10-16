@@ -25,6 +25,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Aether "$APP/Contents/MacOS/Aether"
 cp Info.plist "$APP/Contents/Info.plist"
+cp cloud.json "$APP/Contents/Resources/cloud.json"
 # The GitHub tarball has no .git directory. The installer passes the commit it downloaded.
 if [[ -n "${AETHER_COMMIT:-}" ]]; then
   COMMIT="$AETHER_COMMIT"

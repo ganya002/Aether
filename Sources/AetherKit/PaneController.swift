@@ -1,5 +1,7 @@
 import AppKit
+import PDFKit
 import SwiftTerm
+import WebKit
 
 @MainActor
 final class AetherTerminal: LocalProcessTerminalView {
@@ -169,6 +171,7 @@ final class PaneChrome: NSView {
     private let clip = NSView()
     private let outline = PassthroughView()
     private let rest = PassthroughView()
+    private var preview: NSView?
     private var blur: FrostView?
     private var appliedFocus: Bool?
     private var appliedRest: FocusRest?
@@ -218,10 +221,34 @@ final class PaneChrome: NSView {
         let bannerHeight: CGFloat = exitBanner.isHidden ? 0 : 36
         exitBanner.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: 28)
         terminal.frame = NSRect(x: 0, y: bannerHeight, width: bounds.width, height: max(0, bounds.height - headerHeight - bannerHeight))
+        preview?.frame = terminal.frame
         rest.frame = bounds
         blur?.frame = bounds
         outline.frame = bounds.insetBy(dx: 1, dy: 1)
         outline.layer?.cornerRadius = max(0, radius - 1)
+    }
+
+    func showPreview(kind: String, source: String) -> Bool {
+        preview?.removeFromSuperview()
+        let view: NSView
+        if kind == "pdf" {
+            guard let document = PDFDocument(url: URL(fileURLWithPath: source)) else { return false }
+            let pdf = PDFView()
+            pdf.document = document
+            pdf.autoScales = true
+            view = pdf
+        } else {
+            guard let url = URL(string: source), url.scheme == "http" || url.scheme == "https" else { return false }
+            let web = WKWebView()
+            web.load(URLRequest(url: url))
+            view = web
+        }
+        preview = view
+        view.translatesAutoresizingMaskIntoConstraints = true
+        terminal.isHidden = true
+        clip.addSubview(view, positioned: .below, relativeTo: header)
+        needsLayout = true
+        return true
     }
 
     func setFocused(_ focused: Bool, settings: Settings) {
@@ -303,6 +330,7 @@ final class PaneHeader: NSView {
     var onFind: (() -> Void)?
     private var activity = ""
     private var activityState = ""
+    private var cloudNote = ""
 
     private let titleField = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
@@ -357,6 +385,11 @@ final class PaneHeader: NSView {
         findButton.alphaValue = visible ? 1 : 0
     }
 
+    func setCloud(_ note: String) {
+        cloudNote = note
+        needsDisplay = true
+    }
+
     func setActivity(state: String, message: String) {
         activityState = state
         activity = message
@@ -389,16 +422,27 @@ final class PaneHeader: NSView {
                 NSBezierPath(ovalIn: dot).fill()
             }
         }
-        guard activityState == "working" || activityState == "blocked" || activityState == "done" || activityState == "error" else { return }
-        let color: NSColor
-        switch activityState {
-        case "blocked": color = NSColor(srgbRed: 0.96, green: 0.78, blue: 0.45, alpha: 0.95)
-        case "error": color = NSColor(srgbRed: 0.95, green: 0.45, blue: 0.42, alpha: 0.95)
-        case "done": color = NSColor(srgbRed: 0.55, green: 0.9, blue: 0.7, alpha: 0.95)
-        default: color = NSColor.white.withAlphaComponent(0.92)
+        if activityState == "working" || activityState == "blocked" || activityState == "done" || activityState == "error" {
+            let color: NSColor
+            switch activityState {
+            case "blocked": color = NSColor(srgbRed: 0.96, green: 0.78, blue: 0.45, alpha: 0.95)
+            case "error": color = NSColor(srgbRed: 0.95, green: 0.45, blue: 0.42, alpha: 0.95)
+            case "done": color = NSColor(srgbRed: 0.55, green: 0.9, blue: 0.7, alpha: 0.95)
+            default: color = NSColor.white.withAlphaComponent(0.92)
+            }
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
         }
-        color.setFill()
-        NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
+        guard !cloudNote.isEmpty else { return }
+        let style = NSMutableParagraphStyle()
+        style.alignment = .right
+        style.lineBreakMode = .byTruncatingTail
+        let caption = NSAttributedString(string: cloudNote, attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: ink.withAlphaComponent(0.78),
+            .paragraphStyle: style,
+        ])
+        caption.draw(in: NSRect(x: 72, y: 11, width: max(40, bounds.width - 162), height: 14))
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -582,7 +626,10 @@ final class PaneController {
         return "\(title)   \(path)"
     }
 
+    var holdsPreview = false
+
     func launch() {
+        if holdsPreview { return }
         if !AppModel.shared.settings.sessionHost.isEmpty, !AppModel.shared.settings.sessionToken.isEmpty {
             launchRemote()
             return
@@ -591,12 +638,14 @@ final class PaneController {
     }
 
     private func launchRemote() {
+        chrome.header.setCloud("Connecting")
         let cols = max(chrome.terminal.terminal.cols, 80)
         let rows = max(chrome.terminal.terminal.rows, 24)
         Task { @MainActor in
             do {
                 let id = try await SessionHub.shared.create(cwd: "", cols: cols, rows: rows, command: command)
                 chrome.terminal.remoteSession = id
+                chrome.header.setCloud(SessionHub.shared.link.title == "Connected" ? "Cloud" : SessionHub.shared.link.title)
                 SessionHub.shared.onOutput(id) { [weak self] data in
                     self?.chrome.terminal.terminal.feed(byteArray: [UInt8](data))
                 }
@@ -611,6 +660,12 @@ final class PaneController {
                 self.launchLocal()
             }
         }
+    }
+
+    func screenText() -> String {
+        let term: Terminal = chrome.terminal.terminal
+        let end = Position(col: max(term.cols - 1, 0), row: max(term.rows - 1, 0))
+        return term.getText(start: Position(col: 0, row: 0), end: end)
     }
 
     func endRemoteSession() {
@@ -628,12 +683,13 @@ final class PaneController {
             chrome.terminal.terminate()
         }
         let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let environment = PaneController.shellEnvironment()
+        let environment = PaneController.shellEnvironment(pane: id)
         if trimmed.isEmpty {
             chrome.terminal.startProcess(executable: shell, args: ["-l"], environment: environment, currentDirectory: directory)
         } else {
             chrome.terminal.startProcess(executable: shell, args: ["-lc", trimmed], environment: environment, currentDirectory: directory)
         }
+        chrome.header.setCloud("")
         chrome.hideExit()
     }
 
@@ -734,7 +790,7 @@ final class PaneController {
         chrome.window?.makeFirstResponder(chrome.terminal)
     }
 
-    static func shellEnvironment() -> [String] {
+    static func shellEnvironment(pane: String) -> [String] {
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color", trueColor: true)
         let current = ProcessInfo.processInfo.environment
         for key in ["PATH", "HOME", "SSH_AUTH_SOCK"] {
@@ -747,6 +803,8 @@ final class PaneController {
             env.append("LANG=\(lang)")
         }
         env.append("TERM_PROGRAM=Aether")
+        env.append("AETHER_PANE=\(pane)")
+        env.append("AETHER_CONTROL=127.0.0.1:17393")
         return env
     }
 
