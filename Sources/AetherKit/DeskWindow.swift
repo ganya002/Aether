@@ -70,7 +70,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         canvas.frame = glass.bounds
         canvas.autoresizingMask = [.width, .height]
         glass.contentView = canvas
-        window.contentView = glass
+        GlassPanel.mount(glass, on: window, radius: 20)
         highlight.isHidden = true
         canvas.addSubview(highlight)
     }
@@ -100,6 +100,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         guard let desk = AppModel.shared.desks[deskID] else { return }
         let settings = AppModel.shared.settings
         glass.cornerRadius = settings.cornerRadius
+        glass.layer?.cornerRadius = settings.cornerRadius
         let frosted = liveResizing || settlingResize || settings.glass == .regular
         glass.style = frosted ? .regular : .clear
         canvas.layOut(desk: desk, settings: settings, animated: animated && !liveResizing)
@@ -640,7 +641,7 @@ final class DragPreview: NSWindow {
         let host = NSView(frame: glass.bounds)
         host.addSubview(label)
         glass.contentView = host
-        contentView = glass
+        GlassPanel.mount(glass, on: self, radius: 12)
     }
 
     func place(at screenPoint: NSPoint) {

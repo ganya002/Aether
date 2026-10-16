@@ -44,6 +44,24 @@ final class VaporPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+enum GlassPanel {
+    /// Round the glass and clip it. A square black backing otherwise shows in the corners.
+    static func mount(_ glass: NSGlassEffectView, on window: NSWindow, radius: CGFloat) {
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        glass.cornerRadius = radius
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = radius
+        glass.layer?.masksToBounds = true
+        window.contentView = glass
+    }
+}
+
+enum AetherCloud {
+    static let host = "100.123.93.87"
+    static let token = "89392b28d0832ed81f08cda52f8f8fcc9e3cc975386853b7"
+}
+
 /// Control-Command-grave, swallowed by the system so it works from any app.
 @MainActor
 enum HotkeyCenter {

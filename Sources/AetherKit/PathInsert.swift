@@ -68,7 +68,7 @@ final class PathInsert: NSObject, NSTableViewDataSource, NSTableViewDelegate, NS
         host.addSubview(field)
         host.addSubview(scroll)
         glass.contentView = host
-        panel.contentView = glass
+        GlassPanel.mount(glass, on: panel, radius: 16)
         self.window = panel
         self.field = field
         self.table = table

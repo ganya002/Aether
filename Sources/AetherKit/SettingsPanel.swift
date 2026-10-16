@@ -5,7 +5,7 @@ private final class FlippedDocument: NSView {
 }
 
 @MainActor
-final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
+final class SettingsController: NSWindowController, NSWindowDelegate {
     private let glassView = NSGlassEffectView()
     private let shade = NSSlider()
     private let radius = NSSlider()
@@ -24,8 +24,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
     private let updateStatus = NSTextField(labelWithString: "")
     private let keybinds = KeybindBoard()
-    private let sessionHost = NSTextField()
-    private let sessionToken = NSTextField()
+    private let sessionWhere = NSSegmentedControl(labels: ["Local", "Cloud"], trackingMode: .selectOne, target: nil, action: nil)
     private var applying = false
     private var escMonitor: Any?
     private var vaporToken = 0
@@ -55,7 +54,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
         let host = NSView(frame: glassView.bounds)
         host.autoresizingMask = [.width, .height]
         glassView.contentView = host
-        panel.contentView = glassView
+        GlassPanel.mount(glassView, on: panel, radius: 22)
 
         let title = NSTextField(labelWithString: "Settings")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -115,19 +114,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
         keybinds.widthAnchor.constraint(equalToConstant: 400).isActive = true
         stack.addArrangedSubview(keybinds)
         stack.addArrangedSubview(section("Sessions"))
-        stack.addArrangedSubview(note("Leave the host empty to keep shells on this Mac. A host keeps them alive on the server after you quit."))
-        sessionHost.placeholderString = "100.x.x.x"
-        sessionHost.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        sessionHost.delegate = self
-        sessionHost.target = self
-        sessionHost.action = #selector(changed)
-        sessionToken.placeholderString = "Server token"
-        sessionToken.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        sessionToken.delegate = self
-        sessionToken.target = self
-        sessionToken.action = #selector(changed)
-        stack.addArrangedSubview(sessionHost)
-        stack.addArrangedSubview(sessionToken)
+        stack.addArrangedSubview(sessionWhere)
+        stack.addArrangedSubview(note("Cloud starts each new terminal on the Aether server. Quit the app and the shell is still there. Local keeps it on this Mac."))
         stack.addArrangedSubview(section("Updates"))
         let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
         check.bezelStyle = .rounded
@@ -144,7 +132,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
         stack.addArrangedSubview(reveal)
         stack.addArrangedSubview(note("That file is the one you can copy to another Mac. Changes apply immediately."))
 
-        for control in [glass, text, rest] {
+        for control in [glass, text, rest, sessionWhere] {
             control.target = self
             control.action = #selector(changed)
             control.segmentDistribution = .fillEqually
@@ -194,12 +182,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
         vaporize()
     }
 
-    func controlTextDidEndEditing(_ obj: Notification) {
-        changed()
-    }
-
     func vaporize() {
-        changed()
         keybinds.stopRecording()
         guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
         vaporToken += 1
@@ -222,8 +205,13 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
             settings.notifyOnFinish = notify.state == .on
             settings.dropdownEnabled = dropdown.state == .on
             settings.hideDockIcon = dock.state == .on
-            settings.sessionHost = sessionHost.stringValue
-            settings.sessionToken = sessionToken.stringValue
+            if sessionWhere.selectedSegment == 1 {
+                settings.sessionHost = AetherCloud.host
+                settings.sessionToken = AetherCloud.token
+            } else {
+                settings.sessionHost = ""
+                settings.sessionToken = ""
+            }
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
     }
@@ -256,8 +244,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFiel
         dropdown.state = settings.dropdownEnabled ? .on : .off
         dock.state = settings.hideDockIcon ? .on : .off
         dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
-        sessionHost.stringValue = settings.sessionHost
-        sessionToken.stringValue = settings.sessionToken
+        sessionWhere.selectedSegment = settings.sessionHost.isEmpty ? 0 : 1
         keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()

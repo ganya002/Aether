@@ -68,7 +68,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         let host = NSView(frame: glass.bounds)
         host.autoresizingMask = [.width, .height]
         glass.contentView = host
-        panel.contentView = glass
+        GlassPanel.mount(glass, on: panel, radius: 18)
 
         field.placeholderString = "Launch a command, or search"
         field.font = .systemFont(ofSize: 16, weight: .medium)
@@ -334,7 +334,7 @@ final class ShortcutController: NSWindowController, NSWindowDelegate {
         host.autoresizingMask = [.width, .height]
         host.addSubview(text)
         effect.contentView = host
-        panel.contentView = effect
+        GlassPanel.mount(effect, on: panel, radius: 18)
     }
 
     @available(*, unavailable)
