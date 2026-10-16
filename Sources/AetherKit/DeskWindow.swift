@@ -118,10 +118,12 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         window.setFrame(intro, display: false)
         window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
-        Motion.group(0.2) {
+        Motion.group(0.2, {
             window.animator().setFrame(target, display: true)
             window.animator().alphaValue = 1
-        }
+        }, done: { [weak self] in
+            self?.sync()
+        })
     }
 
     func presentDropdown() {
@@ -373,10 +375,16 @@ final class DeskCanvas: NSView {
     override var isFlipped: Bool { false }
 
     func contentArea() -> CGRect {
-        guard let window else { return bounds.insetBy(dx: 8, dy: 8) }
+        let fallback = bounds.insetBy(dx: 8, dy: 8)
+        guard let window, bounds.height > 120 else { return fallback }
         let layout = convert(window.contentLayoutRect, from: nil)
+        // Before the window is on screen this rect is empty. Using it pins the pane
+        // to a 40pt strip at the bottom, and the shell starts with no rows.
+        guard layout.height > 80, bounds.intersects(layout) else { return fallback }
         let top = max(8, bounds.maxY - layout.maxY + 4)
-        return CGRect(x: 8, y: 8, width: max(40, bounds.width - 16), height: max(40, bounds.height - top - 8))
+        let height = bounds.height - top - 8
+        guard height > 80 else { return fallback }
+        return CGRect(x: 8, y: 8, width: max(40, bounds.width - 16), height: height)
     }
 
     func layOut(desk: Desk, settings: Settings, animated: Bool) {

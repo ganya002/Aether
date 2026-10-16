@@ -686,6 +686,9 @@ final class AppModel {
             self.controllers.values.first { $0.window?.contentView?.window != nil }?
                 .window?.layoutIfNeeded()
             NSApp.windows.forEach { $0.layoutIfNeeded() }
+            if let deskID = self.deskID(containing: paneID) {
+                self.controllers[deskID]?.sync()
+            }
             pane.launch()
             if let deskID = self.deskID(containing: paneID), self.desks[deskID]?.focusedID == paneID {
                 self.controllers[deskID]?.window?.makeFirstResponder(pane.chrome.terminal)
