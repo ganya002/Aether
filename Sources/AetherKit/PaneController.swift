@@ -637,7 +637,7 @@ final class PaneController {
         launchLocal()
     }
 
-    private func launchRemote() {
+    private func launchRemote(attempt: Int = 0) {
         chrome.header.setCloud("Connecting")
         let cols = max(chrome.terminal.terminal.cols, 80)
         let rows = max(chrome.terminal.terminal.rows, 24)
@@ -646,6 +646,9 @@ final class PaneController {
                 let id = try await SessionHub.shared.create(cwd: "", cols: cols, rows: rows, command: command)
                 chrome.terminal.remoteSession = id
                 chrome.header.setCloud(SessionHub.shared.link.title == "Connected" ? "Cloud" : SessionHub.shared.link.title)
+                SessionHub.shared.onResync(id) { [weak self] in
+                    self?.chrome.terminal.terminal.resetToInitialState()
+                }
                 SessionHub.shared.onOutput(id) { [weak self] data in
                     self?.chrome.terminal.terminal.feed(byteArray: [UInt8](data))
                 }
@@ -657,7 +660,14 @@ final class PaneController {
                 }
                 chrome.hideExit()
             } catch {
-                self.launchLocal()
+                guard !self.didShutdown, attempt < 2 else {
+                    let text = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.chrome.header.setCloud(text)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 700_000_000)
+                guard !self.didShutdown else { return }
+                self.launchRemote(attempt: attempt + 1)
             }
         }
     }

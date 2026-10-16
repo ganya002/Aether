@@ -6,8 +6,9 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/local/bin/aether-sessiond
 Restart=on-failure
-User=aether
-WorkingDirectory=/home/aether
+User=root
+WorkingDirectory=/var/lib/aether
+EnvironmentFile=-/etc/aether/public.env
 NoNewPrivileges=true
 
 [Install]

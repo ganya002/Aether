@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#12181b">
+  <title>Aether</title>
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="frame" class="frame">
+    <main class="glass">
+      <section id="gate" class="gate">
+        <h1>Aether</h1>
+        <form id="enroll-form" method="post" action="#start">
+          <button type="submit" class="text-btn">Start</button>
+        </form>
+        <form id="claim-form" class="claim" method="post" action="#claim">
+          <input id="code" name="code" aria-label="Use a code" placeholder="Use a code" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+          <button type="submit" class="text-btn">Use a code</button>
+        </form>
+        <p id="gate-note" class="note" role="status"></p>
+        <noscript><p class="note">This page needs JavaScript to open a terminal.</p></noscript>
+      </section>
+
+      <section id="desk" class="desk" hidden>
+        <aside class="rail" aria-label="Open terminals">
+          <div id="sessions" class="sessions" role="list"></div>
+          <p id="link" class="link" role="status"></p>
+          <div class="rail-actions">
+            <button type="button" class="text-btn" id="new-terminal">New terminal</button>
+            <button type="button" class="text-btn" id="pair">Code for another device</button>
+            <button type="button" class="text-btn" id="sign-out">Sign out</button>
+          </div>
+        </aside>
+
+        <div id="pair-panel" class="pair" hidden>
+          <p id="pair-code" class="pair-code"></p>
+          <p class="pair-hint">Enter this code on the other device.</p>
+          <p id="pair-expires" class="pair-hint"></p>
+          <div class="pair-line">
+            <input id="pair-url" readonly spellcheck="false" aria-label="Link for the other device">
+            <button type="button" class="text-btn" id="pair-copy">Copy link</button>
+          </div>
+        </div>
+
+        <p id="desk-note" class="note" role="status"></p>
+
+        <div id="stage" class="stage">
+          <textarea id="keysink" class="keysink" tabindex="-1" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Terminal input" enterkeyhint="send"></textarea>
+        </div>
+
+        <div id="keybar" class="keybar" aria-label="Terminal keys">
+          <button type="button" data-key="esc">Esc</button>
+          <button type="button" data-key="tab">Tab</button>
+          <button type="button" data-key="ctrl" id="ctrl-key" aria-pressed="false">Ctrl</button>
+          <button type="button" data-key="/">/</button>
+          <button type="button" data-key="-">-</button>
+          <button type="button" data-key="left">Left</button>
+          <button type="button" data-key="right">Right</button>
+          <button type="button" data-key="up">Up</button>
+          <button type="button" data-key="down">Down</button>
+          <button type="button" data-key="ctrl-c">Ctrl-C</button>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="vendor/xterm.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>

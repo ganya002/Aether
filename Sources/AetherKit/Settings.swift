@@ -52,9 +52,11 @@ public struct Settings: Codable, Equatable, Sendable {
     public var dropdownEnabled: Bool
     public var hideDockIcon: Bool
     public var keys: KeyMap
-    /// Tailscale or LAN host of aether-sessiond. Empty keeps shells on this Mac.
+    /// Public host of aether-sessiond. Empty keeps shells on this Mac.
     public var sessionHost: String
     public var sessionToken: String
+    /// WebSocket URL for Cloud. Empty falls back to the older TCP port.
+    public var sessionWS: String
 
     public static let currentVersion = 2
 
@@ -72,7 +74,8 @@ public struct Settings: Codable, Equatable, Sendable {
         hideDockIcon: Bool = false,
         keys: KeyMap = .standard,
         sessionHost: String = "",
-        sessionToken: String = ""
+        sessionToken: String = "",
+        sessionWS: String = ""
     ) {
         self.shade = shade
         self.glass = glass
@@ -88,6 +91,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.keys = keys.filled()
         self.sessionHost = sessionHost
         self.sessionToken = sessionToken
+        self.sessionWS = sessionWS
     }
 
     public init(from decoder: Decoder) throws {
@@ -106,6 +110,7 @@ public struct Settings: Codable, Equatable, Sendable {
         keys = (try container.decodeIfPresent(KeyMap.self, forKey: .keys) ?? .standard).filled()
         sessionHost = try container.decodeIfPresent(String.self, forKey: .sessionHost) ?? ""
         sessionToken = try container.decodeIfPresent(String.self, forKey: .sessionToken) ?? ""
+        sessionWS = try container.decodeIfPresent(String.self, forKey: .sessionWS) ?? ""
         clamp()
     }
 

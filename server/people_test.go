@@ -1,0 +1,102 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+func TestJailKeepsPeopleApart(t *testing.T) {
+	p := &person{Home: "/var/lib/aether/homes/aeabcdef12"}
+	home, err := p.jail("")
+	if err != nil || home != p.Home {
+		t.Fatalf("empty cwd: %q %v", home, err)
+	}
+	got, err := p.jail("projects/app")
+	if err != nil || got != p.Home+"/projects/app" {
+		t.Fatalf("relative: %q %v", got, err)
+	}
+	if _, err := p.jail("/etc"); err == nil {
+		t.Fatal("escaped to /etc")
+	}
+	if _, err := p.jail("/var/lib/aether/homes/aeother/secret"); err == nil {
+		t.Fatal("read another home")
+	}
+	if _, err := p.jail("../../etc/passwd"); err == nil {
+		t.Fatal("dotdot escape")
+	}
+	if _, err := p.jail(p.Home + "/../aeother"); err == nil {
+		t.Fatal("cleaned escape")
+	}
+}
+
+func TestEnrollRateAndCaps(t *testing.T) {
+	h := &hub{people: map[string]*person{}, sessions: map[string]*session{}}
+	now := time.Now()
+	for i := 0; i < enrollPerIPHour; i++ {
+		if !h.allowEnroll("10.0.0.8", now) {
+			t.Fatalf("enroll %d should be allowed", i)
+		}
+	}
+	if h.allowEnroll("10.0.0.8", now) {
+		t.Fatal("same address kept enrolling")
+	}
+	if !h.allowEnroll("10.0.0.9", now) {
+		t.Fatal("a different address was blocked by the per-address cap")
+	}
+	s := &session{id: "s", owner: "alice"}
+	h.sessions[s.id] = s
+	other := &session{id: "o", owner: "bob"}
+	h.sessions[other.id] = other
+	if h.allows("bob", s) {
+		t.Fatal("bob can see alice")
+	}
+	if !h.allows("alice", s) {
+		t.Fatal("alice cannot see her own session")
+	}
+	if h.allows("shared-admin-token", s) {
+		t.Fatal("a shared token still opens every session")
+	}
+	own, all := h.sessionCounts("alice")
+	if own != 1 || all != 2 {
+		t.Fatalf("counts own=%d all=%d", own, all)
+	}
+}
+
+func TestPairCodeIsSingleUse(t *testing.T) {
+	h := &hub{
+		people:    map[string]*person{"tok": {Token: "tok"}},
+		pairs:     map[string]pairTicket{},
+		claimMiss: map[string][]time.Time{},
+	}
+	code, _, err := h.issuePair("tok")
+	if err != nil || len(code) != 9 || code[4] != '-' {
+		t.Fatalf("code %q err %v", code, err)
+	}
+	got, err := h.claimPair(code, "1.2.3.4")
+	if err != nil || got != "tok" {
+		t.Fatalf("claim %q %v", got, err)
+	}
+	if _, err := h.claimPair(code, "1.2.3.4"); err == nil {
+		t.Fatal("code worked twice")
+	}
+	if _, _, err := h.issuePair("nope"); err == nil {
+		t.Fatal("unknown token got a code")
+	}
+}
+
+func TestPublicEndpoint(t *testing.T) {
+	t.Setenv("AETHER_PUBLIC_URL", "https://cloud.example/")
+	web, ws, host := publicEndpoint()
+	if web != "https://cloud.example" || ws != "wss://cloud.example/ws" || host != "cloud.example" {
+		t.Fatalf("got %s %s %s", web, ws, host)
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	if got := clientIP("127.0.0.1:9", "198.51.100.4, 10.0.0.1", ""); got != "198.51.100.4" {
+		t.Fatal(got)
+	}
+	if got := clientIP("127.0.0.1:9", "10.0.0.1", "203.0.113.9"); got != "203.0.113.9" {
+		t.Fatal(got)
+	}
+}

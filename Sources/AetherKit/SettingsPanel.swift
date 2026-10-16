@@ -113,8 +113,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(section("Keys"))
         stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Reset puts that one shortcut back."))
         keybinds.translatesAutoresizingMaskIntoConstraints = false
-        keybinds.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(keybinds)
+        keybinds.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.setCustomSpacing(28, after: keybinds)
         stack.addArrangedSubview(section("Sessions"))
         stack.addArrangedSubview(sessionWhere)
@@ -122,7 +122,11 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         cloudStatus.textColor = .secondaryLabelColor
         cloudStatus.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(cloudStatus)
-        stack.addArrangedSubview(note("Cloud asks the published Aether service for a session of your own. The shell stays up after you quit."))
+        let pair = NSButton(title: "Code for another device", target: self, action: #selector(pairDevice))
+        pair.bezelStyle = .rounded
+        pair.font = .systemFont(ofSize: 12, weight: .medium)
+        stack.addArrangedSubview(pair)
+        stack.addArrangedSubview(note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer."))
         stack.addArrangedSubview(section("Updates"))
         let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
         check.bezelStyle = .rounded
@@ -236,6 +240,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             if switched && !wantsCloud {
                 settings.sessionHost = ""
                 settings.sessionToken = ""
+                settings.sessionWS = ""
             }
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
@@ -261,6 +266,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
                 AppModel.shared.updateSettings { settings in
                     settings.sessionHost = creds.host
                     settings.sessionToken = creds.token
+                    settings.sessionWS = creds.ws
                 }
             } catch {
                 SessionHub.shared.setLink(.failed(error.localizedDescription))
@@ -272,6 +278,25 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             try await SessionHub.shared.open()
         } catch {
             SessionHub.shared.setLink(.failed(error.localizedDescription))
+        }
+    }
+
+    @objc private func pairDevice() {
+        let settings = AppModel.shared.settings
+        cloudStatus.stringValue = "Making a code…"
+        Task {
+            do {
+                let result = try await CloudCatalog.pair(token: settings.sessionToken, ws: settings.sessionWS)
+                if !result.url.isEmpty {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(result.url, forType: .string)
+                    cloudStatus.stringValue = "Code \(result.code). The link is on the clipboard."
+                } else {
+                    cloudStatus.stringValue = "Code \(result.code)"
+                }
+            } catch {
+                cloudStatus.stringValue = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
     }
 
