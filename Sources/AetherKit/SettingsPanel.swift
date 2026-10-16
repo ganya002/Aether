@@ -108,7 +108,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(dropdown)
         stack.addArrangedSubview(dock)
         stack.addArrangedSubview(section("Keys"))
-        stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Command, Option, or Control is required."))
+        stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Reset puts that one shortcut back."))
         keybinds.translatesAutoresizingMaskIntoConstraints = false
         keybinds.widthAnchor.constraint(equalToConstant: 400).isActive = true
         stack.addArrangedSubview(keybinds)

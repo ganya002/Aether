@@ -233,6 +233,10 @@ public struct KeyMap: Codable, Equatable, Sendable {
         next.chords[action.rawValue] = chord
         return next
     }
+
+    func restoring(_ action: AppAction) -> KeyMap {
+        assigning(action.defaultChord, to: action)
+    }
 }
 
 enum ShellPath {
@@ -272,6 +276,7 @@ final class KeybindBoard: NSView {
         for action in AppAction.allCases {
             let card = KeybindCard(action: action)
             card.onClick = { [weak self] in self?.toggle(action) }
+            card.onReset = { [weak self] in self?.restore(action) }
             card.widthAnchor.constraint(equalToConstant: 400).isActive = true
             card.heightAnchor.constraint(equalToConstant: 46).isActive = true
             cards[action] = card
@@ -327,14 +332,23 @@ final class KeybindBoard: NSView {
         }
         stopRecording()
     }
+
+    private func restore(_ action: AppAction) {
+        stopRecording()
+        AppModel.shared.updateSettings { settings in
+            settings.keys = settings.keys.restoring(action)
+        }
+    }
 }
 
 @MainActor
 final class KeybindCard: NSView {
     var onClick: (() -> Void)?
+    var onReset: (() -> Void)?
     private let action: AppAction
     private let title = NSTextField(labelWithString: "")
     private let chord = NSButton()
+    private let reset = NSButton()
 
     init(action: AppAction) {
         self.action = action
@@ -353,7 +367,15 @@ final class KeybindCard: NSView {
         chord.target = self
         chord.action = #selector(pressed)
         chord.setButtonType(.momentaryChange)
+        reset.isBordered = false
+        reset.title = "Reset"
+        reset.font = .systemFont(ofSize: 11, weight: .medium)
+        reset.contentTintColor = .secondaryLabelColor
+        reset.target = self
+        reset.action = #selector(resetPressed)
+        reset.setButtonType(.momentaryChange)
         addSubview(title)
+        addSubview(reset)
         addSubview(chord)
     }
 
@@ -363,6 +385,9 @@ final class KeybindCard: NSView {
     func setChord(_ value: KeyChord, recording: Bool) {
         chord.title = recording ? "Press a key" : value.symbol
         chord.contentTintColor = recording ? .labelColor : .secondaryLabelColor
+        let stock = value == action.defaultChord
+        reset.isEnabled = !stock && !recording
+        reset.alphaValue = reset.isEnabled ? 1 : 0.35
         layer?.borderColor = (recording ? NSColor.labelColor.withAlphaComponent(0.7) : NSColor.separatorColor.withAlphaComponent(0.9)).cgColor
         needsLayout = true
     }
@@ -370,11 +395,17 @@ final class KeybindCard: NSView {
     override func layout() {
         super.layout()
         let chordWidth = max(88, chord.intrinsicContentSize.width + 8)
+        let resetWidth: CGFloat = 48
         chord.frame = NSRect(x: bounds.width - chordWidth - 12, y: 8, width: chordWidth, height: 30)
-        title.frame = NSRect(x: 14, y: 14, width: max(0, chord.frame.minX - 22), height: 18)
+        reset.frame = NSRect(x: chord.frame.minX - resetWidth - 4, y: 8, width: resetWidth, height: 30)
+        title.frame = NSRect(x: 14, y: 14, width: max(0, reset.frame.minX - 22), height: 18)
     }
 
     @objc private func pressed() {
         onClick?()
+    }
+
+    @objc private func resetPressed() {
+        onReset?()
     }
 }

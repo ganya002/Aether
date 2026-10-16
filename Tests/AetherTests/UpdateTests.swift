@@ -26,6 +26,13 @@ import Testing
     #expect(ReleaseFeed.offer(from: json, localCommit: "") == nil)
 }
 
+@Test func resetRestoresTheOriginalShortcut() {
+    let changed = KeyMap.standard.assigning(AppAction.newWindow.defaultChord, to: .newPane)
+    let restored = changed.restoring(.newWindow)
+    #expect(restored.chord(.newWindow) == AppAction.newWindow.defaultChord)
+    #expect(restored.chord(.newPane).key.isEmpty)
+}
+
 @Test func takingAShortcutClearsTheOtherAction() {
     let taken = KeyMap.standard.assigning(AppAction.newWindow.defaultChord, to: .newPane)
     #expect(taken.chord(.newPane) == AppAction.newWindow.defaultChord)
