@@ -1,0 +1,14 @@
+[Unit]
+Description=Aether session server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/aether-sessiond
+Restart=on-failure
+User=aether
+WorkingDirectory=/home/aether
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -5,11 +5,33 @@ public struct KeyChord: Codable, Equatable, Sendable {
     public var key: String
     public var modifiers: UInt
     public var keyCode: UInt16
+    public var follow: String?
 
-    public init(key: String, modifiers: UInt, keyCode: UInt16) {
+    public init(key: String, modifiers: UInt, keyCode: UInt16, follow: String? = nil) {
         self.key = key
         self.modifiers = modifiers
         self.keyCode = keyCode
+        self.follow = follow
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(String.self, forKey: .key)
+        modifiers = try container.decode(UInt.self, forKey: .modifiers)
+        keyCode = try container.decode(UInt16.self, forKey: .keyCode)
+        follow = try container.decodeIfPresent(String.self, forKey: .follow)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(key, forKey: .key)
+        try container.encode(modifiers, forKey: .modifiers)
+        try container.encode(keyCode, forKey: .keyCode)
+        try container.encodeIfPresent(follow, forKey: .follow)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, modifiers, keyCode, follow
     }
 
     var flags: NSEvent.ModifierFlags {
@@ -120,6 +142,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case settings
     case dropdown
     case quit
+    case insertPath
 
     var title: String {
         switch self {
@@ -155,6 +178,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .settings: "Settings"
         case .dropdown: "Dropdown terminal"
         case .quit: "Quit Aether"
+        case .insertPath: "Insert a path"
         }
     }
 
@@ -196,6 +220,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .settings: return chord(",", command, kVK_ANSI_Comma)
         case .dropdown: return chord("`", [command, .control], kVK_ANSI_Grave)
         case .quit: return chord("q", command, kVK_ANSI_Q)
+        case .insertPath: return chord("p", [command, .shift], kVK_ANSI_P)
         }
     }
 }
@@ -230,6 +255,14 @@ public struct KeyMap: Codable, Equatable, Sendable {
         for (key, existing) in next.chords where existing.key == chord.key && existing.modifiers == chord.modifiers && key != action.rawValue {
             next.chords[key] = cleared
         }
+        next.chords[action.rawValue] = chord
+        return next
+    }
+
+    func settingFollow(_ action: AppAction, to follow: AppAction?) -> KeyMap {
+        var next = filled()
+        var chord = next.chord(action)
+        chord.follow = follow?.rawValue
         next.chords[action.rawValue] = chord
         return next
     }
@@ -277,6 +310,12 @@ final class KeybindBoard: NSView {
             let card = KeybindCard(action: action)
             card.onClick = { [weak self] in self?.toggle(action) }
             card.onReset = { [weak self] in self?.restore(action) }
+            card.onFollow = { [weak self] follow in
+                AppModel.shared.updateSettings { settings in
+                    settings.keys = settings.keys.settingFollow(action, to: follow)
+                }
+                self?.reload()
+            }
             card.widthAnchor.constraint(equalToConstant: 400).isActive = true
             card.heightAnchor.constraint(equalToConstant: 46).isActive = true
             cards[action] = card
@@ -291,7 +330,8 @@ final class KeybindBoard: NSView {
     func reload() {
         let map = AppModel.shared.settings.keys
         for (action, card) in cards {
-            card.setChord(map.chord(action), recording: recording == action)
+            let chord = map.chord(action)
+            card.setChord(chord, recording: recording == action, follow: chord.follow.flatMap(AppAction.init(rawValue:)))
         }
     }
 
@@ -326,7 +366,8 @@ final class KeybindBoard: NSView {
             stopRecording()
             return
         }
-        guard let chord = KeyChord.capture(event) else { return }
+        guard var chord = KeyChord.capture(event) else { return }
+        chord.follow = AppModel.shared.settings.keys.chord(recording).follow
         AppModel.shared.updateSettings { settings in
             settings.keys = settings.keys.assigning(chord, to: recording)
         }
@@ -334,10 +375,15 @@ final class KeybindBoard: NSView {
     }
 
     private func restore(_ action: AppAction) {
-        stopRecording()
+        recording = nil
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
         AppModel.shared.updateSettings { settings in
             settings.keys = settings.keys.restoring(action)
         }
+        reload()
     }
 }
 
@@ -345,10 +391,12 @@ final class KeybindBoard: NSView {
 final class KeybindCard: NSView {
     var onClick: (() -> Void)?
     var onReset: (() -> Void)?
+    var onFollow: ((AppAction?) -> Void)?
     private let action: AppAction
     private let title = NSTextField(labelWithString: "")
     private let chord = NSButton()
     private let reset = NSButton()
+    private let then = NSButton()
 
     init(action: AppAction) {
         self.action = action
@@ -374,7 +422,15 @@ final class KeybindCard: NSView {
         reset.target = self
         reset.action = #selector(resetPressed)
         reset.setButtonType(.momentaryChange)
+        then.isBordered = false
+        then.title = "Then"
+        then.font = .systemFont(ofSize: 11, weight: .medium)
+        then.contentTintColor = .tertiaryLabelColor
+        then.target = self
+        then.action = #selector(thenPressed)
+        then.setButtonType(.momentaryChange)
         addSubview(title)
+        addSubview(then)
         addSubview(reset)
         addSubview(chord)
     }
@@ -382,10 +438,11 @@ final class KeybindCard: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    func setChord(_ value: KeyChord, recording: Bool) {
+    func setChord(_ value: KeyChord, recording: Bool, follow: AppAction?) {
         chord.title = recording ? "Press a key" : value.symbol
+        then.title = follow.map { "then \($0.title)" } ?? "Then"
         chord.contentTintColor = recording ? .labelColor : .secondaryLabelColor
-        let stock = value == action.defaultChord
+        let stock = value.key == action.defaultChord.key && value.modifiers == action.defaultChord.modifiers && follow == nil
         reset.isEnabled = !stock && !recording
         reset.alphaValue = reset.isEnabled ? 1 : 0.35
         layer?.borderColor = (recording ? NSColor.labelColor.withAlphaComponent(0.7) : NSColor.separatorColor.withAlphaComponent(0.9)).cgColor
@@ -396,9 +453,11 @@ final class KeybindCard: NSView {
         super.layout()
         let chordWidth = max(88, chord.intrinsicContentSize.width + 8)
         let resetWidth: CGFloat = 48
+        let thenWidth = max(52, then.intrinsicContentSize.width + 6)
         chord.frame = NSRect(x: bounds.width - chordWidth - 12, y: 8, width: chordWidth, height: 30)
         reset.frame = NSRect(x: chord.frame.minX - resetWidth - 4, y: 8, width: resetWidth, height: 30)
-        title.frame = NSRect(x: 14, y: 14, width: max(0, reset.frame.minX - 22), height: 18)
+        then.frame = NSRect(x: reset.frame.minX - thenWidth - 2, y: 8, width: thenWidth, height: 30)
+        title.frame = NSRect(x: 14, y: 14, width: max(0, then.frame.minX - 22), height: 18)
     }
 
     @objc private func pressed() {
@@ -407,5 +466,24 @@ final class KeybindCard: NSView {
 
     @objc private func resetPressed() {
         onReset?()
+    }
+
+    @objc private func thenPressed() {
+        let menu = NSMenu()
+        let none = NSMenuItem(title: "Nothing after", action: #selector(chooseFollow(_:)), keyEquivalent: "")
+        none.target = self
+        menu.addItem(none)
+        for action in [AppAction.equalize, .fill, .newPane, .splitRight, .insertPath] {
+            let item = NSMenuItem(title: action.title, action: #selector(chooseFollow(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: then.bounds.height), in: then)
+    }
+
+    @objc private func chooseFollow(_ sender: NSMenuItem) {
+        let follow = (sender.representedObject as? String).flatMap(AppAction.init(rawValue:))
+        onFollow?(follow)
     }
 }

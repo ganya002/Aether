@@ -5,18 +5,52 @@ import SwiftTerm
 final class AetherTerminal: LocalProcessTerminalView {
     var onUserInput: ((ArraySlice<UInt8>) -> Void)?
     var onFocus: (() -> Void)?
+    var onStatus: ((String, String) -> Void)?
+    var remoteSession: String?
     var workingDirectory: () -> String = { System.home() }
 
     override init(frame: CGRect, font: NSFont?, options: TerminalOptions) {
         super.init(frame: frame, font: font, options: options)
         registerForDraggedTypes([.fileURL, .png, .tiff])
+        terminal.registerOscHandler(code: 7501) { [weak self] data in
+            let body = String(bytes: data, encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.handleStatus(body)
+                }
+            }
+        }
+    }
+
+    private func handleStatus(_ body: String) {
+        if body == "?" || body.hasPrefix("?:") {
+            guard remoteSession == nil else { return }
+            let reply = "\u{1b}]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\u{1b}\\"
+            send(source: self, data: ArraySlice(Array(reply.utf8)))
+            return
+        }
+        var state = ""
+        var message = ""
+        for part in body.split(separator: ":") {
+            let bits = part.split(separator: "=", maxSplits: 1)
+            guard bits.count == 2 else { continue }
+            if bits[0] == "state" { state = String(bits[1]) }
+            if bits[0] == "msg", let data = Data(base64Encoded: String(bits[1])), let text = String(data: data, encoding: .utf8) {
+                message = text
+            }
+        }
+        guard !state.isEmpty else { return }
+        onStatus?(state, message)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        dropPaths(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+        let board = sender.draggingPasteboard
+        let hasFile = board.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        let hasImage = board.canReadObject(forClasses: [NSImage.self])
+        return (hasFile || hasImage) ? .copy : []
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -55,6 +89,11 @@ final class AetherTerminal: LocalProcessTerminalView {
     }
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        if let remoteSession {
+            SessionHub.shared.input(remoteSession, data: Data(data))
+            onUserInput?(data)
+            return
+        }
         super.send(source: source, data: data)
         onUserInput?(data)
     }
@@ -262,6 +301,8 @@ final class PaneHeader: NSView {
     var onWindowDrag: ((NSEvent) -> Void)?
     var onClose: (() -> Void)?
     var onFind: (() -> Void)?
+    private var activity = ""
+    private var activityState = ""
 
     private let titleField = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
@@ -316,6 +357,12 @@ final class PaneHeader: NSView {
         findButton.alphaValue = visible ? 1 : 0
     }
 
+    func setActivity(state: String, message: String) {
+        activityState = state
+        activity = message
+        needsDisplay = true
+    }
+
     func setScrim(_ color: NSColor) {
         scrim = color
         needsDisplay = true
@@ -342,6 +389,16 @@ final class PaneHeader: NSView {
                 NSBezierPath(ovalIn: dot).fill()
             }
         }
+        guard activityState == "working" || activityState == "blocked" || activityState == "done" || activityState == "error" else { return }
+        let color: NSColor
+        switch activityState {
+        case "blocked": color = NSColor(srgbRed: 0.96, green: 0.78, blue: 0.45, alpha: 0.95)
+        case "error": color = NSColor(srgbRed: 0.95, green: 0.45, blue: 0.42, alpha: 0.95)
+        case "done": color = NSColor(srgbRed: 0.55, green: 0.9, blue: 0.7, alpha: 0.95)
+        default: color = NSColor.white.withAlphaComponent(0.92)
+        }
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -526,6 +583,44 @@ final class PaneController {
     }
 
     func launch() {
+        if !AppModel.shared.settings.sessionHost.isEmpty, !AppModel.shared.settings.sessionToken.isEmpty {
+            launchRemote()
+            return
+        }
+        launchLocal()
+    }
+
+    private func launchRemote() {
+        let cols = max(chrome.terminal.terminal.cols, 80)
+        let rows = max(chrome.terminal.terminal.rows, 24)
+        Task { @MainActor in
+            do {
+                let id = try await SessionHub.shared.create(cwd: "", cols: cols, rows: rows, command: command)
+                chrome.terminal.remoteSession = id
+                SessionHub.shared.onOutput(id) { [weak self] data in
+                    self?.chrome.terminal.terminal.feed(byteArray: [UInt8](data))
+                }
+                SessionHub.shared.onStatus(id) { [weak self] state, message in
+                    self?.chrome.header.setActivity(state: state, message: message)
+                    if state == "done", message == "exited" {
+                        self?.noteExit(0)
+                    }
+                }
+                chrome.hideExit()
+            } catch {
+                self.launchLocal()
+            }
+        }
+    }
+
+    func endRemoteSession() {
+        if let id = chrome.terminal.remoteSession {
+            SessionHub.shared.close(id)
+            chrome.terminal.remoteSession = nil
+        }
+    }
+
+    private func launchLocal() {
         let shell = System.userShell()
         let directory = FileManager.default.fileExists(atPath: cwd) ? cwd : System.home()
         cwd = directory
@@ -563,6 +658,9 @@ final class PaneController {
         chrome.terminal.selectedTextBackgroundColor = foreground.withAlphaComponent(0.22)
         chrome.terminal.appearance = NSAppearance(named: settings.text == .light ? .darkAqua : .aqua)
         chrome.terminal.workingDirectory = { [weak self] in self?.cwd ?? System.home() }
+        chrome.terminal.onStatus = { [weak self] state, message in
+            self?.chrome.header.setActivity(state: state, message: message)
+        }
         chrome.header.setScrim(veil.withAlphaComponent(max(settings.shade, 0.55)))
         chrome.header.setCaption(caption, tone: settings.text)
         chrome.layer?.cornerRadius = min(14, settings.cornerRadius - 4)
@@ -680,7 +778,14 @@ final class DelegateBridge: NSObject, LocalProcessTerminalViewDelegate {
         panes.values.first { $0.chrome.terminal === terminal }
     }
 
-    nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+    nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard let terminal = source as? AetherTerminal, let id = terminal.remoteSession else { return }
+                SessionHub.shared.resize(id, cols: newCols, rows: newRows)
+            }
+        }
+    }
 
     nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
         DispatchQueue.main.async {

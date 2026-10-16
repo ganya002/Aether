@@ -78,10 +78,10 @@ final class Speedometer: NSView {
         let sweep = CGFloat(252)
         let displayed = min(1, max(0, shown))
 
-        let faceColor = NSColor(srgbRed: 0.06, green: 0.05, blue: 0.08, alpha: 0.94)
+        let faceColor = NSColor.white.withAlphaComponent(0.1)
         faceColor.setFill()
         NSBezierPath(ovalIn: face).fill()
-        NSColor.white.withAlphaComponent(0.16).setStroke()
+        NSColor.white.withAlphaComponent(0.28).setStroke()
         let rim = NSBezierPath(ovalIn: face.insetBy(dx: 0.6, dy: 0.6))
         rim.lineWidth = 1
         rim.stroke()
@@ -125,7 +125,7 @@ final class Speedometer: NSView {
         NSColor.white.setStroke()
         needle.stroke()
 
-        faceColor.setFill()
+        NSColor.white.withAlphaComponent(0.14).setFill()
         NSBezierPath(ovalIn: NSRect(x: center.x - hubRadius, y: center.y - hubRadius, width: hubRadius * 2, height: hubRadius * 2)).fill()
 
         let percent = "\(Int((displayed * 100).rounded()))%"

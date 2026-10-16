@@ -5,7 +5,7 @@ private final class FlippedDocument: NSView {
 }
 
 @MainActor
-final class SettingsController: NSWindowController, NSWindowDelegate {
+final class SettingsController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let glassView = NSGlassEffectView()
     private let shade = NSSlider()
     private let radius = NSSlider()
@@ -24,6 +24,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
     private let updateStatus = NSTextField(labelWithString: "")
     private let keybinds = KeybindBoard()
+    private let sessionHost = NSTextField()
+    private let sessionToken = NSTextField()
     private var applying = false
     private var escMonitor: Any?
     private var vaporToken = 0
@@ -112,6 +114,20 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         keybinds.translatesAutoresizingMaskIntoConstraints = false
         keybinds.widthAnchor.constraint(equalToConstant: 400).isActive = true
         stack.addArrangedSubview(keybinds)
+        stack.addArrangedSubview(section("Sessions"))
+        stack.addArrangedSubview(note("Leave the host empty to keep shells on this Mac. A host keeps them alive on the server after you quit."))
+        sessionHost.placeholderString = "100.x.x.x"
+        sessionHost.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        sessionHost.delegate = self
+        sessionHost.target = self
+        sessionHost.action = #selector(changed)
+        sessionToken.placeholderString = "Server token"
+        sessionToken.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        sessionToken.delegate = self
+        sessionToken.target = self
+        sessionToken.action = #selector(changed)
+        stack.addArrangedSubview(sessionHost)
+        stack.addArrangedSubview(sessionToken)
         stack.addArrangedSubview(section("Updates"))
         let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
         check.bezelStyle = .rounded
@@ -178,7 +194,12 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         vaporize()
     }
 
+    func controlTextDidEndEditing(_ obj: Notification) {
+        changed()
+    }
+
     func vaporize() {
+        changed()
         keybinds.stopRecording()
         guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
         vaporToken += 1
@@ -201,6 +222,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             settings.notifyOnFinish = notify.state == .on
             settings.dropdownEnabled = dropdown.state == .on
             settings.hideDockIcon = dock.state == .on
+            settings.sessionHost = sessionHost.stringValue
+            settings.sessionToken = sessionToken.stringValue
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
     }
@@ -233,6 +256,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         dropdown.state = settings.dropdownEnabled ? .on : .off
         dock.state = settings.hideDockIcon ? .on : .off
         dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
+        sessionHost.stringValue = settings.sessionHost
+        sessionToken.stringValue = settings.sessionToken
         keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()

@@ -256,6 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             responderItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             responderItem("Zoom", #selector(NSWindow.performZoom(_:)), ""),
             bind(.launch, item("Launch…", #selector(showPalette), "k")),
+            bind(.insertPath, item("Insert Path…", #selector(insertPath), "p", [.command, .shift])),
             item("Dropdown Terminal", #selector(showDropdown), ""),
         ]))
         main.addItem(menu("Help", items: [
@@ -346,12 +347,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showSettings() { settingsPanel.show() }
     @objc private func showShortcuts() { shortcuts.show() }
-    @objc private func showPalette() { palette.show() }
+    @objc private func showPalette() { palette.show(); finish(.launch) }
+    @objc private func insertPath() { PathInsert.show(); finish(.insertPath) }
     @objc private func showDropdown() { model.toggleDropdown() }
-    @objc private func newWindow() { model.newWindow() }
-    @objc private func newPane() { model.newPane() }
-    @objc private func splitRight() { model.splitFocused(.right) }
-    @objc private func splitDown() { model.splitFocused(.bottom) }
+    @objc private func newWindow() { model.newWindow(); finish(.newWindow) }
+    @objc private func newPane() { model.newPane(); finish(.newPane) }
+    @objc private func splitRight() { model.splitFocused(.right); finish(.splitRight) }
+    @objc private func splitDown() { model.splitFocused(.bottom); finish(.splitDown) }
     @objc private func closePane() {
         if NSApp.keyWindow === palette.window {
             palette.vaporize()
@@ -367,8 +369,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         closeFocusedPane()
     }
-    @objc private func toggleMaximize() { model.toggleMaximize() }
-    @objc private func equalizeSplits() { model.equalize() }
+    @objc private func toggleMaximize() { model.toggleMaximize(); finish(.fill) }
+    @objc private func equalizeSplits() { model.equalize(); finish(.equalize) }
+
+    private func finish(_ action: AppAction) {
+        guard let raw = model.settings.keys.chord(action).follow, let next = AppAction(rawValue: raw), next != action else { return }
+        switch next {
+        case .newWindow: model.newWindow()
+        case .newPane: model.newPane()
+        case .splitRight: model.splitFocused(.right)
+        case .splitDown: model.splitFocused(.bottom)
+        case .equalize: model.equalize()
+        case .fill: model.toggleMaximize()
+        case .nextLayout: model.cycleLayout(by: 1)
+        case .insertPath: PathInsert.show()
+        default: break
+        }
+    }
     @objc private func cycleLayoutForward() { model.cycleLayout(by: 1) }
     @objc private func cycleLayoutBackward() { model.cycleLayout(by: -1) }
     @objc private func tileColumns() { model.arrange(.columns) }

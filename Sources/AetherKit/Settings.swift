@@ -52,6 +52,9 @@ public struct Settings: Codable, Equatable, Sendable {
     public var dropdownEnabled: Bool
     public var hideDockIcon: Bool
     public var keys: KeyMap
+    /// Tailscale or LAN host of aether-sessiond. Empty keeps shells on this Mac.
+    public var sessionHost: String
+    public var sessionToken: String
 
     public static let currentVersion = 2
 
@@ -67,7 +70,9 @@ public struct Settings: Codable, Equatable, Sendable {
         notifyOnFinish: Bool = true,
         dropdownEnabled: Bool = true,
         hideDockIcon: Bool = false,
-        keys: KeyMap = .standard
+        keys: KeyMap = .standard,
+        sessionHost: String = "",
+        sessionToken: String = ""
     ) {
         self.shade = shade
         self.glass = glass
@@ -81,6 +86,8 @@ public struct Settings: Codable, Equatable, Sendable {
         self.dropdownEnabled = dropdownEnabled
         self.hideDockIcon = hideDockIcon
         self.keys = keys.filled()
+        self.sessionHost = sessionHost
+        self.sessionToken = sessionToken
     }
 
     public init(from decoder: Decoder) throws {
@@ -97,6 +104,8 @@ public struct Settings: Codable, Equatable, Sendable {
         dropdownEnabled = try container.decodeIfPresent(Bool.self, forKey: .dropdownEnabled) ?? true
         hideDockIcon = try container.decodeIfPresent(Bool.self, forKey: .hideDockIcon) ?? false
         keys = (try container.decodeIfPresent(KeyMap.self, forKey: .keys) ?? .standard).filled()
+        sessionHost = try container.decodeIfPresent(String.self, forKey: .sessionHost) ?? ""
+        sessionToken = try container.decodeIfPresent(String.self, forKey: .sessionToken) ?? ""
         clamp()
     }
 

@@ -205,6 +205,7 @@ final class AppModel {
 
     func closePane(_ paneID: String) {
         guard let deskID = deskID(containing: paneID), var desk = desks[deskID] else { return }
+        panes[paneID]?.endRemoteSession()
         panes[paneID]?.shutdown()
         panes[paneID] = nil
         desk.panes[paneID] = nil
