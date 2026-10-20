@@ -196,10 +196,10 @@ final class UpdateVeil: NSView {
         let spring = CASpringAnimation(keyPath: "transform.scale")
         spring.fromValue = 0.78
         spring.toValue = 1
-        spring.mass = 0.7
-        spring.stiffness = 220
-        spring.damping = 15
-        spring.duration = spring.settlingDuration
+        spring.mass = 0.6
+        spring.stiffness = 280
+        spring.damping = 24
+        spring.duration = min(spring.settlingDuration, 0.55)
         spring.fillMode = .forwards
         spring.isRemovedOnCompletion = false
         cluster.layer?.add(spring, forKey: "reveal")
@@ -209,7 +209,7 @@ final class UpdateVeil: NSView {
             self?.cluster.layer?.transform = CATransform3DIdentity
         }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.45
+            context.duration = Motion.reveal
             context.timingFunction = Motion.ease()
             cluster.animator().alphaValue = 1
         }

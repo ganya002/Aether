@@ -2,14 +2,16 @@ import AppKit
 import QuartzCore
 
 enum Motion {
+    /// Fast out, soft landing. Used for presses and focus.
     static func ease() -> CAMediaTimingFunction {
-        CAMediaTimingFunction(controlPoints: 0.16, 0.84, 0.2, 1)
+        CAMediaTimingFunction(controlPoints: 0.16, 0.84, 0.28, 1)
     }
 
-    static let snap: TimeInterval = 0.18
-    static let close: TimeInterval = 0.14
-    static let frostIn: TimeInterval = 0.12
-    static let frostOut: TimeInterval = 0.22
+    static let snap: TimeInterval = 0.34
+    static let close: TimeInterval = 0.22
+    static let frostIn: TimeInterval = 0.32
+    static let frostOut: TimeInterval = 0.36
+    static let reveal: TimeInterval = 0.42
 
     static func group(_ duration: TimeInterval, _ changes: () -> Void, done: (() -> Void)? = nil) {
         NSAnimationContext.runAnimationGroup({ context in
@@ -18,6 +20,23 @@ enum Motion {
             context.allowsImplicitAnimation = true
             changes()
         }, completionHandler: done)
+    }
+
+    static func fade(_ layer: CALayer?, to opacity: Float, key: String) {
+        guard let layer else { return }
+        let spring = CASpringAnimation(keyPath: "opacity")
+        spring.fromValue = layer.presentation()?.opacity ?? layer.opacity
+        spring.toValue = opacity
+        spring.mass = 0.55
+        spring.stiffness = 340
+        spring.damping = 28
+        spring.duration = min(max(spring.settlingDuration, 0.28), 0.5)
+        spring.timingFunction = ease()
+        layer.add(spring, forKey: key)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.opacity = opacity
+        CATransaction.commit()
     }
 }
 
@@ -115,11 +134,11 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     func presentAnimated() {
         guard let window else { return }
         let target = window.frame
-        let intro = target.insetBy(dx: target.width * 0.045, dy: target.height * 0.045)
+        let intro = target.insetBy(dx: target.width * 0.022, dy: target.height * 0.028)
         window.setFrame(intro, display: false)
         window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
-        Motion.group(0.2, {
+        Motion.group(Motion.reveal, {
             window.animator().setFrame(target, display: true)
             window.animator().alphaValue = 1
         }, done: { [weak self] in
@@ -139,9 +158,9 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         dropdownRest = target
         dropdownGeneration += 1
         window.alphaValue = 0
-        window.setFrame(target.offsetBy(dx: 0, dy: 36), display: false)
+        window.setFrame(target.offsetBy(dx: 0, dy: 14), display: false)
         window.makeKeyAndOrderFront(nil)
-        Motion.group(0.2) {
+        Motion.group(Motion.snap) {
             window.animator().setFrame(target, display: true)
             window.animator().alphaValue = 1
         }
@@ -153,9 +172,9 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         let generation = dropdownGeneration
         dropdownRest = window.frame
         let frame = window.frame
-        Motion.group(0.16, {
+        Motion.group(Motion.close, {
             window.animator().alphaValue = 0
-            window.animator().setFrame(frame.offsetBy(dx: 0, dy: 28), display: true)
+            window.animator().setFrame(frame.offsetBy(dx: 0, dy: 12), display: true)
         }, done: { [weak self] in
             guard let self, let window = self.window, self.dropdownGeneration == generation else { return }
             window.orderOut(nil)
@@ -541,12 +560,12 @@ final class DeskCanvas: NSView {
         hud.frame = CGRect(x: (bounds.width - width) / 2, y: bounds.height - 58, width: width, height: 32)
         hud.alphaValue = 0
         addSubview(hud)
-        Motion.group(0.1) {
+        Motion.group(Motion.close) {
             self.hud.animator().alphaValue = 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) { [weak self] in
             guard let self, self.hudToken == token else { return }
-            Motion.group(0.18, {
+            Motion.group(Motion.close, {
                 self.hud.animator().alphaValue = 0
             }, done: {
                 guard self.hudToken == token else { return }
@@ -583,6 +602,9 @@ final class DeskCanvas: NSView {
     private func wire(_ pane: PaneController) {
         let id = pane.id
         pane.onFocus = {
+            AppModel.shared.focus(pane: id)
+        }
+        pane.chrome.onSelect = {
             AppModel.shared.focus(pane: id)
         }
         pane.onClose = {

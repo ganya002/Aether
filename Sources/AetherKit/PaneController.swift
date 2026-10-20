@@ -1,5 +1,7 @@
 import AppKit
+import CoreImage
 import PDFKit
+import QuartzCore
 import SwiftTerm
 import WebKit
 
@@ -102,6 +104,11 @@ final class AetherTerminal: LocalProcessTerminalView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    override func mouseDown(with event: NSEvent) {
+        onFocus?()
+        super.mouseDown(with: event)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         matchScreenScale()
@@ -165,17 +172,19 @@ final class AetherTerminal: LocalProcessTerminalView {
 @MainActor
 final class PaneChrome: NSView {
     let paneID: String
+    var onSelect: (() -> Void)?
     let header = PaneHeader()
     let terminal: AetherTerminal
     let exitBanner = ExitBanner()
     private let clip = NSView()
+    private let stage = StageHost()
     private let outline = PassthroughView()
     private let rest = PassthroughView()
     private var preview: NSView?
-    private var blur: FrostView?
     private var appliedFocus: Bool?
     private var appliedRest: FocusRest?
     private var appliedTone: TextTone?
+    private var appliedBlur: Double = -1
 
     init(paneID: String, font: NSFont) {
         self.paneID = paneID
@@ -192,15 +201,18 @@ final class PaneChrome: NSView {
         layer?.masksToBounds = false
         clip.wantsLayer = true
         clip.layer?.masksToBounds = true
-        clip.layer?.cornerRadius = 12
+        clip.layer?.cornerRadius = 20
+        stage.wantsLayer = true
+        stage.layerUsesCoreImageFilters = true
         rest.wantsLayer = true
         rest.layer?.backgroundColor = NSColor.black.cgColor
         rest.alphaValue = 0
-        for view in [clip, terminal, header, exitBanner, rest, outline] as [NSView] {
+        for view in [clip, stage, terminal, header, exitBanner, rest, outline] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = true
         }
         addSubview(clip)
-        clip.addSubview(terminal)
+        clip.addSubview(stage)
+        stage.addSubview(terminal)
         clip.addSubview(header)
         clip.addSubview(exitBanner)
         clip.addSubview(rest)
@@ -213,19 +225,36 @@ final class PaneChrome: NSView {
 
     override func layout() {
         super.layout()
-        let radius = layer?.cornerRadius ?? 12
+        let radius = layer?.cornerRadius ?? 16
         clip.frame = bounds
         clip.layer?.cornerRadius = radius
+        clip.layer?.masksToBounds = true
+        clip.layer?.mask = nil
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.16
+        layer?.shadowRadius = 10
+        layer?.shadowOffset = CGSize(width: 0, height: 4)
         let headerHeight: CGFloat = 34
         header.frame = NSRect(x: 0, y: bounds.height - headerHeight, width: bounds.width, height: headerHeight)
+        stage.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - headerHeight))
         let bannerHeight: CGFloat = exitBanner.isHidden ? 0 : 36
         exitBanner.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: 28)
-        terminal.frame = NSRect(x: 0, y: bannerHeight, width: bounds.width, height: max(0, bounds.height - headerHeight - bannerHeight))
+        let insetX: CGFloat = 18
+        let insetBottom: CGFloat = 14
+        terminal.frame = NSRect(
+            x: insetX,
+            y: bannerHeight + insetBottom,
+            width: max(0, stage.bounds.width - insetX * 2),
+            height: max(0, stage.bounds.height - bannerHeight - insetBottom)
+        )
         preview?.frame = terminal.frame
         rest.frame = bounds
-        blur?.frame = bounds
-        outline.frame = bounds.insetBy(dx: 1, dy: 1)
-        outline.layer?.cornerRadius = max(0, radius - 1)
+        outline.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
+        outline.layer?.cornerRadius = max(0, radius - 0.5)
+        if outline.layer?.borderWidth ?? 0 < 1 {
+            outline.layer?.borderWidth = 1
+            outline.layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        }
     }
 
     func showPreview(kind: String, source: String) -> Bool {
@@ -246,67 +275,128 @@ final class PaneChrome: NSView {
         preview = view
         view.translatesAutoresizingMaskIntoConstraints = true
         terminal.isHidden = true
-        clip.addSubview(view, positioned: .below, relativeTo: header)
+        stage.addSubview(view)
         needsLayout = true
         return true
     }
 
     func setFocused(_ focused: Bool, settings: Settings) {
-        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text { return }
+        let nextBlur = (!focused && settings.focusRest == .blur) ? settings.blurAmount : 0
+        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text, abs(appliedBlur - nextBlur) < 0.01 {
+            return
+        }
         let animate = appliedFocus != nil
         appliedFocus = focused
         appliedRest = settings.focusRest
         appliedTone = settings.text
+        appliedBlur = nextBlur
         let dim: CGFloat = focused || settings.focusRest != .dim ? 0 : (settings.text == .light ? 0.22 : 0.12)
-        let showBlur = !focused && settings.focusRest == .blur
-        if showBlur, blur == nil {
-            let view = FrostView(frame: bounds)
-            view.alphaValue = 0
-            clip.addSubview(view, positioned: .below, relativeTo: outline)
-            blur = view
-        }
-        let apply = {
-            self.rest.alphaValue = dim
-            self.blur?.alphaValue = showBlur ? 1 : 0
-            self.header.setFindVisible(focused)
-        }
+        // Enough smear that glyphs and pictures stop being readable, even toward the low end of the slider.
+        let radius = nextBlur > 0.01 ? CGFloat(16 + nextBlur * 26) : 0
+        header.setFindVisible(focused)
+        applyContentBlur(radius: radius, animated: animate, blurMode: settings.focusRest == .blur)
         if animate {
             animateBorder(focused)
-            Motion.group(Motion.snap) { apply() }
+            Motion.fade(rest.layer, to: Float(dim), key: "dim")
         } else {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            self.outline.layer?.borderWidth = focused ? 2 : 0
-            self.outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
-            apply()
+            outline.layer?.borderWidth = focused ? 1.5 : 0
+            outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.62 : 0).cgColor
+            rest.alphaValue = dim
             CATransaction.commit()
         }
-        if !showBlur, let blur {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Motion.snap) { [weak self] in
-                guard let self, self.appliedRest != .blur || self.appliedFocus == true else { return }
-                blur.removeFromSuperview()
-                if self.blur === blur { self.blur = nil }
+    }
+
+    /// Blurs the terminal's own pixels. The filter stays attached while Blur is the setting,
+    /// so focusing a pane only changes the radius and does not blank the window.
+    private func applyContentBlur(radius: CGFloat, animated: Bool, blurMode: Bool) {
+        guard let layer = stage.layer else { return }
+        let name = "aetherBlur"
+        if !blurMode {
+            if layer.filters != nil || layer.shouldRasterize {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                layer.filters = nil
+                layer.shouldRasterize = false
+                CATransaction.commit()
             }
+            return
         }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if !layer.shouldRasterize {
+            layer.rasterizationScale = stage.window?.backingScaleFactor ?? 2
+            layer.shouldRasterize = true
+        }
+        let filters = (layer.filters as? [CIFilter]) ?? []
+        let filter: CIFilter
+        if let existing = filters.first(where: { $0.name == name }) {
+            filter = existing
+        } else if let created = CIFilter(name: "CIGaussianBlur") {
+            created.name = name
+            created.setDefaults()
+            created.setValue(radius, forKey: kCIInputRadiusKey)
+            layer.filters = [created]
+            filter = created
+        } else {
+            CATransaction.commit()
+            return
+        }
+        CATransaction.commit()
+        let current = (filter.value(forKey: kCIInputRadiusKey) as? NSNumber)?.doubleValue ?? 0
+        if animated, abs(current - Double(radius)) > 0.4 {
+            let spring = CASpringAnimation(keyPath: "filters.\(name).inputRadius")
+            spring.fromValue = current
+            spring.toValue = radius
+            spring.mass = 0.6
+            spring.stiffness = 280
+            spring.damping = 24
+            spring.duration = min(max(spring.settlingDuration, 0.22), 0.4)
+            spring.timingFunction = Motion.ease()
+            layer.add(spring, forKey: "aetherBlurRadius")
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        filter.setValue(radius, forKey: kCIInputRadiusKey)
+        CATransaction.commit()
     }
 
     private func animateBorder(_ focused: Bool) {
         guard let layer = outline.layer else { return }
-        let width: CGFloat = focused ? 2 : 0
+        let width: CGFloat = focused ? 1.5 : 1
         // borderColor is a CGColor. Animating the presentation layer's color
         // releases a pointer the window server still owns, which crashes in
         // the next autorelease pool drain.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.borderColor = NSColor.white.withAlphaComponent(focused ? 0.72 : 0).cgColor
+        layer.borderColor = NSColor.white.withAlphaComponent(focused ? 0.55 : 0.2).cgColor
         CATransaction.commit()
         let widthAnim = CABasicAnimation(keyPath: "borderWidth")
         widthAnim.fromValue = layer.presentation()?.borderWidth ?? layer.borderWidth
         widthAnim.toValue = width
-        widthAnim.duration = Motion.snap
+        widthAnim.duration = Motion.close
         widthAnim.timingFunction = Motion.ease()
         layer.borderWidth = width
         layer.add(widthAnim, forKey: "borderWidth")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        if let hit = super.hitTest(point), hit === self || hit.isDescendant(of: self) {
+            return hit
+        }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onSelect?()
+        window?.makeFirstResponder(terminal)
+    }
+
+    func setBodyShade(_ color: NSColor) {
+        stage.layer?.backgroundColor = color.cgColor
     }
 
     func showExit(code: Int32?) {
@@ -403,9 +493,9 @@ final class PaneHeader: NSView {
 
     override func layout() {
         super.layout()
-        closeButton.frame = NSRect(x: bounds.width - 30, y: 5, width: 24, height: 24)
-        findButton.frame = NSRect(x: bounds.width - 56, y: 5, width: 24, height: 24)
-        titleField.frame = NSRect(x: 28, y: 7, width: max(0, bounds.width - 92), height: 20)
+        closeButton.frame = NSRect(x: bounds.width - 36, y: 5, width: 24, height: 24)
+        findButton.frame = NSRect(x: bounds.width - 62, y: 5, width: 24, height: 24)
+        titleField.frame = NSRect(x: 34, y: 7, width: max(0, bounds.width - 108), height: 20)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -418,7 +508,7 @@ final class PaneHeader: NSView {
         grip.setFill()
         for column in 0..<2 {
             for row in 0..<3 {
-                let dot = NSRect(x: 10 + CGFloat(column) * 5, y: 11 + CGFloat(row) * 5, width: 2.4, height: 2.4)
+                let dot = NSRect(x: 16 + CGFloat(column) * 5, y: 11 + CGFloat(row) * 5, width: 2.4, height: 2.4)
                 NSBezierPath(ovalIn: dot).fill()
             }
         }
@@ -525,20 +615,19 @@ final class ExitBanner: NSView {
     }
 }
 
-@MainActor
-final class FrostView: NSVisualEffectView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        blendingMode = .withinWindow
-        material = .hudWindow
-        state = .active
-        wantsLayer = true
+/// Hosts the terminal. Rasterized blur would otherwise refuse the click and
+/// leave focus on the pane that was active before.
+final class StageHost: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        for subview in subviews.reversed() where !subview.isHidden && subview.alphaValue > 0.01 {
+            if let hit = subview.hitTest(local) { return hit }
+            let inside = subview.convert(local, from: self)
+            if subview.bounds.contains(inside) { return subview }
+        }
+        return self
     }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { nil }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 final class PassthroughView: NSView {
@@ -720,7 +809,8 @@ final class PaneController {
         chrome.terminal.font = PaneController.font(size: settings.fontSize)
         chrome.terminal.nativeForegroundColor = foreground
         chrome.terminal.caretColor = foreground
-        chrome.terminal.nativeBackgroundColor = veil.withAlphaComponent(settings.shade)
+        chrome.terminal.nativeBackgroundColor = .clear
+        chrome.setBodyShade(veil.withAlphaComponent(settings.shade))
         chrome.terminal.selectedTextBackgroundColor = foreground.withAlphaComponent(0.22)
         chrome.terminal.appearance = NSAppearance(named: settings.text == .light ? .darkAqua : .aqua)
         chrome.terminal.workingDirectory = { [weak self] in self?.cwd ?? System.home() }
@@ -729,12 +819,13 @@ final class PaneController {
         }
         chrome.header.setScrim(veil.withAlphaComponent(max(settings.shade, 0.55)))
         chrome.header.setCaption(caption, tone: settings.text)
-        chrome.layer?.cornerRadius = min(14, settings.cornerRadius - 4)
+        chrome.layer?.cornerRadius = settings.cornerRadius
     }
 
     func applyShade(_ shade: Double, settings: Settings) {
         let veil: NSColor = settings.text == .light ? .black : .white
-        chrome.terminal.nativeBackgroundColor = veil.withAlphaComponent(shade)
+        chrome.terminal.nativeBackgroundColor = .clear
+        chrome.setBodyShade(veil.withAlphaComponent(shade))
         chrome.header.setScrim(veil.withAlphaComponent(max(shade, 0.55)))
     }
 

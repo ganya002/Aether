@@ -32,13 +32,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
             guard let content = event.window?.contentView else { return event }
-            var view = content.hitTest(event.locationInWindow)
-            while let current = view {
-                if let chrome = current as? PaneChrome {
-                    AppModel.shared.focus(pane: chrome.paneID)
-                    break
+            // Frame test, not hitTest. A blurred pane is rasterized, and hitTest
+            // then lands on the pane that was focused before.
+            func pane(in view: NSView) -> PaneChrome? {
+                for subview in view.subviews.reversed() {
+                    if let found = pane(in: subview) { return found }
+                    guard let chrome = subview as? PaneChrome, !chrome.isHidden else { continue }
+                    let local = view.convert(event.locationInWindow, from: nil)
+                    if chrome.frame.contains(local) { return chrome }
                 }
-                view = current.superview
+                return nil
+            }
+            if let chrome = pane(in: content) {
+                AppModel.shared.focus(pane: chrome.paneID)
             }
             return event
         }

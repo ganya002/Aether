@@ -208,7 +208,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .growUp: return chord(String(UnicodeScalar(NSUpArrowFunctionKey)!), [command, .shift], kVK_UpArrow)
         case .growDown: return chord(String(UnicodeScalar(NSDownArrowFunctionKey)!), [command, .shift], kVK_DownArrow)
         case .broadcast: return chord("b", command, kVK_ANSI_B)
-        case .fontUp: return chord("+", command, kVK_ANSI_Equal)
+        case .fontUp: return chord("=", command, kVK_ANSI_Equal)
         case .fontDown: return chord("-", command, kVK_ANSI_Minus)
         case .fontReset: return chord("0", command, kVK_ANSI_0)
         case .find: return chord("f", command, kVK_ANSI_F)
@@ -244,6 +244,15 @@ public struct KeyMap: Codable, Equatable, Sendable {
         var next = self
         for action in AppAction.allCases where next.chords[action.rawValue] == nil {
             next.chords[action.rawValue] = action.defaultChord
+        }
+        // The old default stored "+" for the equals key. Menus match "=" for Command-equals, so "+" never fired.
+        let command = NSEvent.ModifierFlags.command.rawValue
+        if var bigger = next.chords[AppAction.fontUp.rawValue],
+           bigger.key == "+",
+           bigger.keyCode == UInt16(kVK_ANSI_Equal),
+           bigger.modifiers == command {
+            bigger.key = "="
+            next.chords[AppAction.fontUp.rawValue] = bigger
         }
         return next
     }
@@ -353,25 +362,28 @@ final class KeybindBoard: NSView {
         recording = action
         reload()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                self?.capture(event)
+            let taken = MainActor.assumeIsolated {
+                self?.capture(event) ?? false
             }
-            return nil
+            return taken ? nil : event
         }
     }
 
-    private func capture(_ event: NSEvent) {
-        guard let recording else { return }
+    /// True when this board ate the key. Keys for any other window are left alone,
+    /// so recording a shortcut cannot rebind itself from a key meant for a terminal.
+    private func capture(_ event: NSEvent) -> Bool {
+        guard let recording, event.window === window else { return false }
         if event.keyCode == 53 {
             stopRecording()
-            return
+            return true
         }
-        guard var chord = KeyChord.capture(event) else { return }
+        guard var chord = KeyChord.capture(event) else { return true }
         chord.follow = AppModel.shared.settings.keys.chord(recording).follow
         AppModel.shared.updateSettings { settings in
             settings.keys = settings.keys.assigning(chord, to: recording)
         }
         stopRecording()
+        return true
     }
 
     private func restore(_ action: AppAction) {
@@ -402,9 +414,9 @@ final class KeybindCard: NSView {
         self.action = action
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 46))
         wantsLayer = true
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = 10
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.9).cgColor
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
         title.stringValue = action.title
         title.font = .systemFont(ofSize: 13, weight: .medium)
         title.textColor = .labelColor
@@ -445,7 +457,7 @@ final class KeybindCard: NSView {
         let stock = value.key == action.defaultChord.key && value.modifiers == action.defaultChord.modifiers && follow == nil
         reset.isEnabled = !stock && !recording
         reset.alphaValue = reset.isEnabled ? 1 : 0.35
-        layer?.borderColor = (recording ? NSColor.labelColor.withAlphaComponent(0.7) : NSColor.separatorColor.withAlphaComponent(0.9)).cgColor
+        layer?.borderColor = (recording ? NSColor.labelColor.withAlphaComponent(0.55) : NSColor.separatorColor.withAlphaComponent(0.45)).cgColor
         needsLayout = true
     }
 

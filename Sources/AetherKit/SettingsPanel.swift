@@ -1,9 +1,5 @@
 import AppKit
 
-private final class FlippedDocument: NSView {
-    override var isFlipped: Bool { true }
-}
-
 @MainActor
 final class SettingsController: NSWindowController, NSWindowDelegate {
     private let glassView = NSGlassEffectView()
@@ -11,10 +7,12 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let radius = NSSlider()
     private let gap = NSSlider()
     private let font = NSSlider()
+    private let blur = NSSlider()
     private let shadeValue = NSTextField(labelWithString: "")
     private let radiusValue = NSTextField(labelWithString: "")
     private let gapValue = NSTextField(labelWithString: "")
     private let fontValue = NSTextField(labelWithString: "")
+    private let blurValue = NSTextField(labelWithString: "")
     private let glass = NSSegmentedControl(labels: GlassStyle.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
     private let text = NSSegmentedControl(labels: TextTone.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
     private let rest = NSSegmentedControl(labels: FocusRest.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
@@ -22,6 +20,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let notify = NSButton(checkboxWithTitle: "Notify when a command finishes in the background", target: nil, action: nil)
     private let dropdown = NSButton(checkboxWithTitle: "Dropdown terminal    ⌃⌘`", target: nil, action: nil)
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
+    private let updates = NSButton(checkboxWithTitle: "Look for updates in the background", target: nil, action: nil)
+    private let tabs = NSSegmentedControl(labels: ["Look", "Window", "Terminal", "Cloud", "Updates"], trackingMode: .selectOne, target: nil, action: nil)
+    private var pages: [NSStackView] = []
     private let updateStatus = NSTextField(labelWithString: "")
     private let keybinds = KeybindBoard()
     private let sessionWhere = NSSegmentedControl(labels: ["Local", "Cloud"], trackingMode: .selectOne, target: nil, action: nil)
@@ -33,7 +34,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
 
     init() {
         let panel = VaporPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 820),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 740),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -65,107 +66,163 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 18
+        stack.spacing = 14
+        stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        host.addSubview(scroll)
+        host.addSubview(stack)
 
-        let document = FlippedDocument()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = document
-        document.addSubview(stack)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: host.topAnchor, constant: 18),
-            scroll.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -12),
-            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 26),
-            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -26),
-            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -18),
-        ])
+        let look = page()
+        add(labeled("Glass", glass), to: look)
+        add(labeled("Text", text), to: look)
+        add(sliderRow("Shade", shade, shadeValue, min: 0, max: 0.82), to: look)
+        add(sliderRow("Font", font, fontValue, min: 10, max: 24), to: look)
+        add(labeled("Unfocused", rest), to: look)
+        add(note("Dim softens them. Blur frosts them by the amount below. As is leaves them alone."), to: look)
+        add(sliderRow("Blur", blur, blurValue, min: 0, max: 1), to: look)
 
-        stack.addArrangedSubview(title)
-        stack.addArrangedSubview(section("Glass"))
-        stack.addArrangedSubview(glass)
-        stack.addArrangedSubview(section("Unfocused panes"))
-        stack.addArrangedSubview(rest)
-        let restNote = note("Dim keeps the type readable. Blur frosts them. As is leaves them alone. The focused pane gets a border either way.")
-        stack.addArrangedSubview(restNote)
-        stack.addArrangedSubview(section("Type"))
-        stack.addArrangedSubview(labeled("Text", text))
-        stack.addArrangedSubview(sliderRow("Shade", shade, shadeValue, min: 0, max: 0.82))
-        stack.addArrangedSubview(sliderRow("Font", font, fontValue, min: 10, max: 24))
-        stack.addArrangedSubview(section("Window"))
-        stack.addArrangedSubview(sliderRow("Corners", radius, radiusValue, min: 8, max: 32))
-        stack.addArrangedSubview(sliderRow("Gap", gap, gapValue, min: 4, max: 22))
-        stack.addArrangedSubview(snap)
-        stack.addArrangedSubview(section("Terminal"))
-        stack.addArrangedSubview(notify)
-        stack.addArrangedSubview(dropdown)
-        stack.addArrangedSubview(dock)
-        stack.addArrangedSubview(section("Keys"))
-        stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Reset puts that one shortcut back."))
-        keybinds.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(keybinds)
-        keybinds.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        stack.setCustomSpacing(28, after: keybinds)
-        stack.addArrangedSubview(section("Sessions"))
-        stack.addArrangedSubview(sessionWhere)
+        let windowPage = page()
+        add(sliderRow("Corners", radius, radiusValue, min: 8, max: 32), to: windowPage)
+        add(sliderRow("Gap", gap, gapValue, min: 4, max: 22), to: windowPage)
+        add(snap, to: windowPage)
+        add(dropdown, to: windowPage)
+        add(dock, to: windowPage)
+
+        let terminalPage = page()
+        add(notify, to: terminalPage)
+        add(note("A finished command in a pane you are not looking at can post a notification."), to: terminalPage)
+
+        let cloudPage = page()
+        add(sessionWhere, to: cloudPage)
         cloudStatus.font = .systemFont(ofSize: 12)
         cloudStatus.textColor = .secondaryLabelColor
-        cloudStatus.preferredMaxLayoutWidth = 480
-        stack.addArrangedSubview(cloudStatus)
+        cloudStatus.preferredMaxLayoutWidth = 560
+        add(cloudStatus, to: cloudPage)
         let pair = NSButton(title: "Code for another device", target: self, action: #selector(pairDevice))
         pair.bezelStyle = .rounded
         pair.font = .systemFont(ofSize: 12, weight: .medium)
-        stack.addArrangedSubview(pair)
-        stack.addArrangedSubview(note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer."))
-        stack.addArrangedSubview(section("Updates"))
-        let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
-        check.bezelStyle = .rounded
-        check.font = .systemFont(ofSize: 12, weight: .medium)
-        stack.addArrangedSubview(check)
-        updateStatus.font = .systemFont(ofSize: 11)
-        updateStatus.textColor = .tertiaryLabelColor
-        updateStatus.stringValue = ""
-        stack.addArrangedSubview(updateStatus)
-
+        add(pair, to: cloudPage)
+        add(note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer."), to: cloudPage)
         let reveal = NSButton(title: "Show Config in Finder", target: self, action: #selector(revealConfig))
         reveal.bezelStyle = .rounded
         reveal.font = .systemFont(ofSize: 12, weight: .medium)
-        stack.addArrangedSubview(reveal)
-        stack.addArrangedSubview(note("That file is the one you can copy to another Mac. Changes apply immediately."))
+        add(reveal, to: cloudPage)
+
+        let updatePage = page()
+        add(updates, to: updatePage)
+        add(note("Off, Aether does not look unless you ask. A download still waits for Install now."), to: updatePage)
+        let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
+        check.bezelStyle = .rounded
+        check.font = .systemFont(ofSize: 12, weight: .medium)
+        add(check, to: updatePage)
+        updateStatus.font = .systemFont(ofSize: 11)
+        updateStatus.textColor = .tertiaryLabelColor
+        updateStatus.stringValue = ""
+        add(updateStatus, to: updatePage)
+
+        pages = [look, windowPage, terminalPage, cloudPage, updatePage]
+        tabs.selectedSegment = 0
+        tabs.target = self
+        tabs.action = #selector(selectTab)
+        tabs.segmentDistribution = .fillEqually
+
+        let keysLabel = NSTextField(labelWithString: "Keys")
+        keysLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        keysLabel.textColor = .labelColor
+        let keyScroll = NSScrollView()
+        keyScroll.translatesAutoresizingMaskIntoConstraints = false
+        keyScroll.drawsBackground = false
+        keyScroll.borderType = .noBorder
+        keyScroll.hasVerticalScroller = true
+        keyScroll.autohidesScrollers = true
+        keybinds.translatesAutoresizingMaskIntoConstraints = false
+        keyScroll.documentView = keybinds
+
+        stack.addArrangedSubview(title)
+        stack.addArrangedSubview(tabs)
+        for page in pages {
+            stack.addArrangedSubview(page)
+        }
+        stack.addArrangedSubview(keysLabel)
+        stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Reset puts that one shortcut back."))
+        stack.addArrangedSubview(keyScroll)
+        showPage(0)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 26),
+            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -26),
+            stack.topAnchor.constraint(equalTo: host.topAnchor, constant: 22),
+            stack.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -16),
+            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            keyScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            keyScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
+            keybinds.leadingAnchor.constraint(equalTo: keyScroll.contentView.leadingAnchor),
+            keybinds.trailingAnchor.constraint(equalTo: keyScroll.contentView.trailingAnchor),
+            keybinds.topAnchor.constraint(equalTo: keyScroll.contentView.topAnchor),
+        ])
+        for page in pages {
+            page.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        keyScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        keyScroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
         for control in [glass, text, rest, sessionWhere] {
             control.target = self
             control.action = #selector(changed)
             control.segmentDistribution = .fillEqually
-            control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
-        for box in [snap, notify, dropdown, dock] {
+        for box in [snap, notify, dropdown, dock, updates] {
             box.target = self
             box.action = #selector(changed)
             box.font = .systemFont(ofSize: 13)
         }
-        for slider in [shade, radius, gap, font] {
+        for slider in [shade, radius, gap, font, blur] {
             slider.target = self
             slider.action = #selector(changed)
             slider.isContinuous = true
         }
-        for value in [shadeValue, radiusValue, gapValue, fontValue] {
+        for value in [shadeValue, radiusValue, gapValue, fontValue, blurValue] {
             value.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
             value.textColor = .secondaryLabelColor
             value.alignment = .right
             value.widthAnchor.constraint(equalToConstant: 36).isActive = true
         }
+    }
+
+    @objc private func selectTab() {
+        showPage(tabs.selectedSegment)
+    }
+
+    private func showPage(_ index: Int) {
+        let animate = window?.isVisible == true
+        for (item, page) in pages.enumerated() {
+            let show = item == index
+            guard show != !page.isHidden else { continue }
+            if show {
+                page.alphaValue = animate ? 0 : 1
+                page.isHidden = false
+                if animate {
+                    Motion.group(Motion.close) { page.animator().alphaValue = 1 }
+                }
+            } else {
+                page.isHidden = true
+                page.alphaValue = 1
+            }
+        }
+    }
+
+    private func page() -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    private func add(_ row: NSView, to page: NSStackView) {
+        row.translatesAutoresizingMaskIntoConstraints = false
+        page.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
     }
 
     @available(*, unavailable)
@@ -233,8 +290,10 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             settings.glass = GlassStyle.allCases[glass.selectedSegment]
             settings.text = TextTone.allCases[text.selectedSegment]
             settings.focusRest = FocusRest.allCases[rest.selectedSegment]
+            settings.blurAmount = blur.doubleValue
             settings.snapWindows = snap.state == .on
             settings.notifyOnFinish = notify.state == .on
+            settings.checkForUpdates = updates.state == .on
             settings.dropdownEnabled = dropdown.state == .on
             settings.hideDockIcon = dock.state == .on
             if switched && !wantsCloud {
@@ -323,7 +382,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         glass.selectedSegment = GlassStyle.allCases.firstIndex(of: settings.glass) ?? 0
         text.selectedSegment = TextTone.allCases.firstIndex(of: settings.text) ?? 0
         rest.selectedSegment = FocusRest.allCases.firstIndex(of: settings.focusRest) ?? 0
+        blur.doubleValue = settings.blurAmount
         snap.state = settings.snapWindows ? .on : .off
+        updates.state = settings.checkForUpdates ? .on : .off
         notify.state = settings.notifyOnFinish ? .on : .off
         dropdown.state = settings.dropdownEnabled ? .on : .off
         dock.state = settings.hideDockIcon ? .on : .off
@@ -338,48 +399,80 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
 
     private func paintValues() {
         shadeValue.stringValue = String(format: "%.2f", shade.doubleValue)
+        blurValue.stringValue = String(format: "%.2f", blur.doubleValue)
         radiusValue.stringValue = String(Int(radius.doubleValue.rounded()))
         gapValue.stringValue = String(Int(gap.doubleValue.rounded()))
         fontValue.stringValue = String(Int(font.doubleValue.rounded()))
     }
 
-    private func section(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title.uppercased())
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        return label
-    }
-
     private func note(_ text: String) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .tertiaryLabelColor
-        label.preferredMaxLayoutWidth = 400
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.preferredMaxLayoutWidth = 560
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return label
     }
 
     private func labeled(_ title: String, _ control: NSView) -> NSView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        label.alignment = .left
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        control.translatesAutoresizingMaskIntoConstraints = false
         let line = NSStackView(views: [label, control])
         line.orientation = .horizontal
         line.alignment = .centerY
-        line.spacing = 12
+        line.spacing = 16
+        line.distribution = .fill
         return line
     }
 
     private func sliderRow(_ title: String, _ slider: NSSlider, _ value: NSTextField, min: Double, max: Double) -> NSView {
+        slider.cell = GlassSliderCell()
         slider.minValue = min
         slider.maxValue = max
-        slider.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        slider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        slider.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
         let line = NSStackView(views: [label, slider, value])
         line.orientation = .horizontal
         line.alignment = .centerY
-        line.spacing = 10
+        line.spacing = 16
+        line.distribution = .fill
         return line
+    }
+}
+
+private final class GlassSliderCell: NSSliderCell {
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        let track = NSRect(x: rect.minX, y: rect.midY - 2, width: rect.width, height: 4)
+        let ink = NSColor.labelColor
+        ink.withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
+        let span = max(maxValue - minValue, 0.0001)
+        let t = CGFloat((doubleValue - minValue) / span)
+        let fill = NSRect(x: rect.minX, y: track.minY, width: max(4, rect.width * t), height: 4)
+        ink.withAlphaComponent(0.82).setFill()
+        NSBezierPath(roundedRect: fill, xRadius: 2, yRadius: 2).fill()
+    }
+
+    override func drawKnob(_ knobRect: NSRect) {
+        let knob = NSRect(x: knobRect.midX - 7, y: knobRect.midY - 7, width: 14, height: 14)
+        NSColor.labelColor.withAlphaComponent(0.94).setFill()
+        NSBezierPath(ovalIn: knob).fill()
+        NSColor.controlBackgroundColor.withAlphaComponent(0.35).setStroke()
+        let ring = NSBezierPath(ovalIn: knob.insetBy(dx: 0.5, dy: 0.5))
+        ring.lineWidth = 1
+        ring.stroke()
     }
 }

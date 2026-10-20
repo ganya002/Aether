@@ -56,6 +56,7 @@
   let fitQueued = false;
   let ctrlSticky = false;
   let sinkSent = false;
+  let composing = false;
   const pendingCreates = [];
 
   function fontSize() {
@@ -145,12 +146,13 @@
   }
 
   function libraryReady() {
-    return window.AetherXterm && typeof AetherXterm.Terminal === "function" && typeof AetherXterm.FitAddon === "function";
+    const lib = window.AetherXterm;
+    return !!(lib && typeof lib.Terminal === "function" && typeof lib.FitAddon === "function");
   }
 
   function openTerm(host) {
-    const term = new AetherXterm.Terminal(termOptions());
-    const fit = new AetherXterm.FitAddon();
+    const term = new window.AetherXterm.Terminal(termOptions());
+    const fit = new window.AetherXterm.FitAddon();
     term.loadAddon(fit);
     term.open(host);
     tuneTextarea(term.textarea);
@@ -402,6 +404,9 @@
         if (list.length && list[0] && list[0].id != null) attach(list[0].id, true);
         else createSession();
       }
+    } else if (!visibleId && list.length) {
+      const live = list.find((item) => item && item.id != null && !locallyClosed.has(String(item.id)));
+      if (live) attach(live.id, true);
     }
     renderRail();
   }
@@ -438,7 +443,8 @@
     if (typeof msg.state === "string" && msg.state) session.state = msg.state;
     if (typeof msg.msg === "string") session.msg = msg.msg;
     remember(id);
-    show(id);
+    if (!visibleId || visibleId === id) show(id);
+    else renderRail();
   }
 
   function onOutput(msg) {
@@ -608,6 +614,7 @@
       if (gen !== generation) return;
       if (socket === ws) socket = null;
       ready = false;
+      pendingCreates.length = 0;
       for (const session of sessions.values()) session.attached = false;
       const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
       attempt += 1;
@@ -705,7 +712,7 @@
   function onSinkKey(event) {
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Control" || event.key === "Shift" || event.key === "Alt" || event.key === "Meta") return;
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.length === 1) {
+    if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
       const byte = controlByte(event.key);
       if (byte) {
         event.preventDefault();
@@ -750,7 +757,7 @@
   }
 
   function onSinkBefore(event) {
-    if (event.isComposing) return;
+    if (composing || event.isComposing) return;
     if (sinkSent) {
       event.preventDefault();
       return;
@@ -954,9 +961,17 @@
     }
     if (keysink.value) emitSink(takeCtrl(keysink.value));
   });
+  keysink.addEventListener("compositionstart", () => {
+    composing = true;
+  });
   keysink.addEventListener("compositionend", (event) => {
+    composing = false;
     if (event.data) sendInput(visibleId, event.data);
     keysink.value = "";
+    sinkSent = true;
+    queueMicrotask(() => {
+      sinkSent = false;
+    });
   });
   keysink.addEventListener("focus", stopScroll);
 

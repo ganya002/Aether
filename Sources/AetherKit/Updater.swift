@@ -48,6 +48,7 @@ final class UpdateCenter {
     private var quitting = false
     private var lastCheck = Date.distantPast
     private var timer: Timer?
+    private var watchingUpdates = false
     private var transfer: Transfer?
     private var stagedApp: URL?
     private var phase: Phase = .idle
@@ -62,8 +63,17 @@ final class UpdateCenter {
     private init() {}
 
     func start() {
-        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
-        guard timer == nil else { return }
+        applyPreference()
+    }
+
+    /// Background checks run only when Settings asks for them. A manual check still works either way.
+    func applyPreference() {
+        let enabled = AppModel.shared.settings.checkForUpdates && Bundle.main.bundleURL.pathExtension == "app"
+        if enabled == watchingUpdates { return }
+        watchingUpdates = enabled
+        timer?.invalidate()
+        timer = nil
+        guard enabled else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { _ in
             Task { @MainActor in
                 await UpdateCenter.shared.check()
@@ -73,6 +83,7 @@ final class UpdateCenter {
     }
 
     func checkSoon() {
+        guard AppModel.shared.settings.checkForUpdates else { return }
         guard Date().timeIntervalSince(lastCheck) > 120 else { return }
         Task { await check() }
     }
@@ -92,10 +103,22 @@ final class UpdateCenter {
         }
     }
 
+    /// Background checks stop as soon as the setting is off. A check the user just asked for still runs.
+    private func mayLook(_ manual: Bool) -> Bool {
+        manual || AppModel.shared.settings.checkForUpdates
+    }
+
     @discardableResult
     func check(manual: Bool = false) async -> String {
+        guard mayLook(manual) else { return "" }
         if phase == .ready {
-            presentReady()
+            // Activate and the timer call check() again while an update is already staged.
+            // presentReady() inserts the gauge at the front of the key window, so a click
+            // that wakes the app covers the pane that was just focused. Show it only when
+            // the user asked, or when no window still has the gauge.
+            if !quitting, manual || !gaugeIsShowing() {
+                presentReady()
+            }
             return "Update found"
         }
         if phase == .downloading {
@@ -131,9 +154,10 @@ final class UpdateCenter {
                 report("You're up to date")
                 return "You're up to date"
             }
+            guard mayLook(manual) else { return "" }
             report("Update found")
-            try await download(offer)
-            return "Update found"
+            try await download(offer, manual: manual)
+            return phase == .ready ? "Update found" : ""
         } catch {
             hideGauge()
             phase = .idle
@@ -144,7 +168,12 @@ final class UpdateCenter {
         }
     }
 
-    private func download(_ offer: ReleaseFeed.Offer) async throws {
+    private func download(_ offer: ReleaseFeed.Offer, manual: Bool) async throws {
+        guard mayLook(manual) else {
+            phase = .idle
+            busy = false
+            return
+        }
         guard let veil = presentGauge() else {
             phase = .idle
             busy = false
@@ -157,10 +186,22 @@ final class UpdateCenter {
         let zip = try await fetch(offer.zip) { fraction in
             veil.gauge.fraction = fraction
         }
+        guard mayLook(manual) else {
+            hideGauge()
+            phase = .idle
+            busy = false
+            return
+        }
         veil.gauge.fraction = 1
         let staged = try await Task.detached {
             try UpdateInstaller.unarchive(zip)
         }.value
+        guard mayLook(manual) else {
+            hideGauge()
+            phase = .idle
+            busy = false
+            return
+        }
         stagedApp = staged
         phase = .ready
         busy = false
@@ -178,6 +219,26 @@ final class UpdateCenter {
         guard let veil = presentGauge() else { return }
         veil.gauge.fraction = 1
         veil.setInstallEnabled(true)
+    }
+
+    private func gaugeIsShowing() -> Bool {
+        for controller in AppModel.shared.controllers.values {
+            guard let root = controller.window?.contentView else { continue }
+            if Self.containsUpdateVeil(root) { return true }
+        }
+        return false
+    }
+
+    private static func containsUpdateVeil(_ view: NSView) -> Bool {
+        if view is UpdateVeil { return true }
+        if let glass = view as? NSGlassEffectView, let content = glass.contentView, content !== view,
+           containsUpdateVeil(content) {
+            return true
+        }
+        for subview in view.subviews where containsUpdateVeil(subview) {
+            return true
+        }
+        return false
     }
 
     private func report(_ message: String) {

@@ -295,7 +295,7 @@ button:disabled {
   margin: 0;
   font-family: var(--font-mono);
   font-size: 26px;
-  font-weight: 560;
+  font-weight: 600;
   letter-spacing: 0.04em;
   font-variant-ligatures: none;
   user-select: text;
@@ -353,6 +353,7 @@ button:disabled {
 
 .term-host.is-on {
   display: block;
+  overflow: hidden;
 }
 
 .term-host.is-probe {
@@ -439,11 +440,6 @@ button:disabled {
 :focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
-}
-
-.stage:focus-within {
-  outline: 1px solid rgba(242, 247, 248, 0.28);
-  outline-offset: -1px;
 }
 
 @media (max-width: 720px) {

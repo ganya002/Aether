@@ -10,11 +10,11 @@ enum GlassMotion {
             return
         }
         let target = window.frame
-        let intro = target.insetBy(dx: target.width * 0.045, dy: target.height * 0.045)
+        let intro = target.insetBy(dx: target.width * 0.022, dy: target.height * 0.028)
         window.alphaValue = 0
         window.setFrame(intro, display: false)
         window.makeKeyAndOrderFront(nil)
-        Motion.group(0.2) {
+        Motion.group(Motion.reveal) {
             window.animator().setFrame(target, display: true)
             window.animator().alphaValue = 1
         }
@@ -25,9 +25,9 @@ enum GlassMotion {
     static func vaporize(_ window: NSWindow, finish: @escaping () -> Bool = { true }) {
         guard window.isVisible else { return }
         let home = window.frame
-        var gone = home.insetBy(dx: home.width * 0.08, dy: home.height * 0.1)
-        gone.origin.y += 18
-        Motion.group(0.22, {
+        var gone = home.insetBy(dx: home.width * 0.04, dy: home.height * 0.05)
+        gone.origin.y += 10
+        Motion.group(Motion.close, {
             window.animator().alphaValue = 0
             window.animator().setFrame(gone, display: true)
         }, done: {

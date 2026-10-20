@@ -6,6 +6,8 @@ import Testing
     let settings = try JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
     #expect(settings.glass == .regular)
     #expect(settings.focusRest == .dim)
+    #expect(settings.blurAmount == 0.55)
+    #expect(settings.checkForUpdates == false)
     #expect(settings.notifyOnFinish)
 }
 
