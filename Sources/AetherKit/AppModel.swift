@@ -47,10 +47,20 @@ final class AppModel {
     /// Set when the person already agreed to stop running terminals, such as Restart to Update.
     var quitConfirmed = false
 
+    private var appearanceObservation: NSKeyValueObservation?
+
     private init() {
         directoryTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { _ in
             Task { @MainActor in
                 AppModel.shared.refreshDirectories()
+            }
+        }
+        // Automatic text follows Light and Dark Mode as the system switches.
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
+            Task { @MainActor in
+                let model = AppModel.shared
+                guard model.settings.text == .automatic else { return }
+                model.applySettings()
             }
         }
     }
