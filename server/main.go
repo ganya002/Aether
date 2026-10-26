@@ -224,6 +224,8 @@ func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs 
 		if s := h.get(str(msg, "id")); s != nil && h.allows(owner, s) {
 			h.close(s.id)
 		}
+	case "ping":
+		_ = link.write(map[string]any{"type": "pong"})
 	case "detach":
 	default:
 		_ = link.write(map[string]any{"type": "error", "message": "unknown message"})

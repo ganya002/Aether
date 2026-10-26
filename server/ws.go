@@ -69,8 +69,11 @@ func (h *hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			item.s.unsubscribe(item.sub)
 		}
 	}()
+	alive, stop := context.WithCancel(r.Context())
+	defer stop()
+	go keepAlive(alive, conn)
 	for {
-		_, data, err := conn.Read(context.Background())
+		_, data, err := conn.Read(alive)
 		if err != nil {
 			return
 		}
@@ -79,6 +82,29 @@ func (h *hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.dispatch(owner, link, msg, &subs)
+	}
+}
+
+// keepAlive pings the peer so a socket whose other end vanished (a laptop
+// lid closing, a phone dropping off Wi-Fi) is noticed and its viewers freed.
+func keepAlive(ctx context.Context, conn *websocket.Conn) {
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := conn.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				conn.CloseNow()
+			}
+			return
+		}
 	}
 }
 

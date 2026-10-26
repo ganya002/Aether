@@ -66,3 +66,36 @@ func TestPageSecurityHeaders(t *testing.T) {
 		t.Fatal("host header leaked into the policy")
 	}
 }
+
+func TestSocketAnswersPing(t *testing.T) {
+	usePublicFiles(t)
+	t.Setenv("AETHER_PUBLIC_URL", "")
+	h := &hub{
+		people:   map[string]*person{"tok": {Token: "tok"}},
+		sessions: map[string]*session{},
+		macLinks: map[string][]frameWriter{},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(h.serveWS))
+	defer srv.Close()
+	ctx := context.Background()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	read := func() string {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","token":"tok","client":"web"}`))
+	if got := read(); !strings.Contains(got, "helloOk") {
+		t.Fatalf("hello: %s", got)
+	}
+	_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`))
+	if got := read(); got != `{"type":"pong"}` {
+		t.Fatalf("ping: %s", got)
+	}
+}
