@@ -349,7 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Aether",
-            .applicationVersion: "2.0.0",
+            .applicationVersion: BuildStamp.current.version,
+            .version: BuildStamp.current.shortCommit,
             .credits: NSAttributedString(string: "A native macOS terminal. Each pane is a real shell, and the glass refracts whatever is behind the window."),
         ])
     }
