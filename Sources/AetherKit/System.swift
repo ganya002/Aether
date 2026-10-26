@@ -2,6 +2,13 @@ import Darwin
 import Foundation
 
 enum System {
+    /// The side-by-side development build. It keeps its own settings, sessions, and control port,
+    /// and never updates itself or claims the global hotkey, so it can run next to the real Aether.
+    static let isDev: Bool = {
+        if Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true { return true }
+        return ProcessInfo.processInfo.environment["AETHER_DEV"] == "1"
+    }()
+
     static func userShell() -> String {
         if let password = getpwuid(getuid()), let shell = password.pointee.pw_shell {
             let path = String(cString: shell)
@@ -84,7 +91,7 @@ enum System {
 
     static func supportDirectory() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let directory = base.appendingPathComponent("Aether", isDirectory: true)
+        let directory = base.appendingPathComponent(isDev ? "Aether Dev" : "Aether", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }

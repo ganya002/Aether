@@ -8,6 +8,7 @@ final class AgentDesk {
     static let shared = AgentDesk()
     private var listener: NWListener?
     private let token: String
+    static let port: UInt16 = System.isDev ? 17394 : 17393
 
     private init() {
         let url = System.supportDirectory().appendingPathComponent("agent.plist")
@@ -23,7 +24,7 @@ final class AgentDesk {
     func start() {
         guard listener == nil else { return }
         do {
-            let listener = try NWListener(using: .tcp, on: 17393)
+            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: AgentDesk.port)!)
             listener.newConnectionHandler = { connection in
                 connection.start(queue: .global(qos: .userInitiated))
                 Task { @MainActor in
@@ -41,7 +42,7 @@ final class AgentDesk {
 
     private func writeCredentials() {
         let url = System.supportDirectory().appendingPathComponent("agent.plist")
-        let body: [String: Any] = ["port": 17393, "token": token]
+        let body: [String: Any] = ["port": Int(AgentDesk.port), "token": token]
         if let data = try? PropertyListSerialization.data(fromPropertyList: body, format: .xml, options: 0) {
             try? data.write(to: url, options: .atomic)
         }
@@ -96,7 +97,7 @@ final class AgentDesk {
 enum AgentCLI {
     static let source = """
     #!/bin/sh
-    PLIST="$HOME/Library/Application Support/Aether/agent.plist"
+    PLIST="${AETHER_AGENT_PLIST:-$HOME/Library/Application Support/Aether/agent.plist}"
     if [ -n "$AETHER_SESSION" ]; then
       PORT=0
       TOKEN=""

@@ -1,5 +1,5 @@
 #!/bin/sh
-PLIST="$HOME/Library/Application Support/Aether/agent.plist"
+PLIST="${AETHER_AGENT_PLIST:-$HOME/Library/Application Support/Aether/agent.plist}"
 if [ -n "$AETHER_SESSION" ]; then
   PORT=0
   TOKEN=""

@@ -60,11 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         HotkeyCenter.install()
         applyKeyBindings()
         NSApp.activate(ignoringOtherApps: true)
+        guard !System.isDev else { return }
         promptToMoveIntoApplications()
         UpdateCenter.shared.start()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard !System.isDev else { return }
         UpdateCenter.shared.checkSoon()
     }
 
@@ -306,7 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             menuItem.keyEquivalent = chord.key
             menuItem.keyEquivalentModifierMask = chord.key.isEmpty ? [] : chord.flags
         }
-        HotkeyCenter.apply(enabled: model.settings.dropdownEnabled, chord: map.chord(.dropdown))
+        HotkeyCenter.apply(enabled: model.settings.dropdownEnabled && !System.isDev, chord: map.chord(.dropdown))
     }
 
     private func quitItem() -> NSMenuItem {

@@ -905,7 +905,8 @@ final class PaneController {
         }
         env.append("TERM_PROGRAM=Aether")
         env.append("AETHER_PANE=\(pane)")
-        env.append("AETHER_CONTROL=127.0.0.1:17393")
+        env.append("AETHER_CONTROL=127.0.0.1:\(AgentDesk.port)")
+        env.append("AETHER_AGENT_PLIST=\(System.supportDirectory().appendingPathComponent("agent.plist").path)")
         return env
     }
 

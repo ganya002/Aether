@@ -6,3 +6,4 @@ dist
 .vite
 coverage
 .aether-dev
+dist-dev/
