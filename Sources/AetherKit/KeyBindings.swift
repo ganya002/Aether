@@ -117,6 +117,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case closePane
     case closeWindow
     case launch
+    case clearBuffer
     case fill
     case equalize
     case nextLayout
@@ -153,6 +154,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .closePane: "Close terminal"
         case .closeWindow: "Close window"
         case .launch: "Launch"
+        case .clearBuffer: "Clear scrollback"
         case .fill: "Fill window"
         case .equalize: "Equalize splits"
         case .nextLayout: "Next layout"
@@ -194,7 +196,8 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .splitDown: return chord("d", [command, .shift], kVK_ANSI_D)
         case .closePane: return chord("w", command, kVK_ANSI_W)
         case .closeWindow: return chord("w", [command, .shift], kVK_ANSI_W)
-        case .launch: return chord("k", command, kVK_ANSI_K)
+        case .launch: return chord("p", command, kVK_ANSI_P)
+        case .clearBuffer: return chord("k", command, kVK_ANSI_K)
         case .fill: return chord("\r", command, kVK_Return)
         case .equalize: return chord("e", [command, .shift], kVK_ANSI_E)
         case .nextLayout: return chord("l", [command, .shift], kVK_ANSI_L)
@@ -228,6 +231,35 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
 public struct KeyMap: Codable, Equatable, Sendable {
     public var chords: [String: KeyChord]
 
+    public init(chords: [String: KeyChord]) {
+        self.chords = chords
+    }
+
+    /// A chord that fails to decode is dropped on its own. `filled()` puts the default back.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var chords: [String: KeyChord] = [:]
+        if let nested = try? container.nestedContainer(keyedBy: AnyKey.self, forKey: .chords) {
+            for key in nested.allKeys {
+                if let chord = try? nested.decode(KeyChord.self, forKey: key) {
+                    chords[key.stringValue] = chord
+                }
+            }
+        }
+        self.chords = chords
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chords
+    }
+
+    private struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
     public static var standard: KeyMap {
         KeyMap(chords: Dictionary(uniqueKeysWithValues: AppAction.allCases.map { ($0.rawValue, $0.defaultChord) }))
     }
@@ -241,9 +273,11 @@ public struct KeyMap: Codable, Equatable, Sendable {
     }
 
     func filled() -> KeyMap {
-        var next = self
+        var next = self.movingLauncherOffCommandK()
         for action in AppAction.allCases where next.chords[action.rawValue] == nil {
-            next.chords[action.rawValue] = action.defaultChord
+            let chord = action.defaultChord
+            let taken = next.chords.contains { $0.key != action.rawValue && $0.value.key == chord.key && $0.value.modifiers == chord.modifiers }
+            next.chords[action.rawValue] = taken ? KeyChord(key: "", modifiers: 0, keyCode: 0) : chord
         }
         // The old default stored "+" for the equals key. Menus match "=" for Command-equals, so "+" never fired.
         let command = NSEvent.ModifierFlags.command.rawValue
@@ -254,6 +288,23 @@ public struct KeyMap: Codable, Equatable, Sendable {
             bigger.key = "="
             next.chords[AppAction.fontUp.rawValue] = bigger
         }
+        return next
+    }
+
+    /// ⌘K used to open the launcher. It clears the terminal now, as in Terminal.app, and the launcher moves to ⌘P.
+    /// A map saved before Clear existed still has the launcher on ⌘K. Only that untouched shortcut moves.
+    private func movingLauncherOffCommandK() -> KeyMap {
+        guard chords[AppAction.clearBuffer.rawValue] == nil,
+              var launch = chords[AppAction.launch.rawValue] else { return self }
+        let command = NSEvent.ModifierFlags.command.rawValue
+        guard launch.key == "k", launch.modifiers == command else { return self }
+        let target = AppAction.launch.defaultChord
+        let busy = chords.contains { $0.key != AppAction.launch.rawValue && $0.value.key == target.key && $0.value.modifiers == target.modifiers }
+        guard !busy else { return self }
+        var next = self
+        launch.key = target.key
+        launch.keyCode = target.keyCode
+        next.chords[AppAction.launch.rawValue] = launch
         return next
     }
 
@@ -278,6 +329,52 @@ public struct KeyMap: Codable, Equatable, Sendable {
 
     func restoring(_ action: AppAction) -> KeyMap {
         assigning(action.defaultChord, to: action)
+    }
+}
+
+/// Text-editing keys that macOS turns into Cocoa commands SwiftTerm does not send to the shell.
+/// These match what Terminal.app and iTerm2 send, so readline and zle move by word and line.
+enum EditingKeys {
+    static func sequence(keyCode: UInt16, flags: NSEvent.ModifierFlags, optionIsMeta: Bool) -> [UInt8]? {
+        let held = flags.intersection([.command, .option, .control, .shift])
+        if held == .option, !optionIsMeta {
+            switch Int(keyCode) {
+            case kVK_LeftArrow: return [0x1b, 0x62]
+            case kVK_RightArrow: return [0x1b, 0x66]
+            case kVK_Delete: return [0x1b, 0x7f]
+            default: return nil
+            }
+        }
+        if held == .command {
+            switch Int(keyCode) {
+            case kVK_LeftArrow: return [0x01]
+            case kVK_RightArrow: return [0x05]
+            case kVK_Delete: return [0x15]
+            default: return nil
+            }
+        }
+        return nil
+    }
+}
+
+/// Whether a paste should stop and ask. A shell without bracketed paste runs every line as it arrives.
+enum PasteGuard {
+    static func shouldWarn(_ text: String, bracketed: Bool, enabled: Bool) -> Bool {
+        guard enabled, !bracketed else { return false }
+        return text.contains { $0.isNewline }
+    }
+
+    static func lineCount(_ text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .newlines)
+        return trimmed.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+    }
+
+    static func oneLine(_ text: String) -> String {
+        text.trimmingCharacters(in: .newlines)
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 

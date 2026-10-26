@@ -343,6 +343,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if acceptingClose { return true }
+        guard AppModel.shared.allowClose(deskID: deskID, window: sender) else { return false }
         acceptingClose = true
         AppModel.shared.noteClosing(deskID)
         Motion.group(Motion.close, {

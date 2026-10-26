@@ -39,6 +39,49 @@ public enum FocusRest: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// When closing a terminal, a window, or Aether itself should ask first.
+public enum ConfirmClose: String, Codable, CaseIterable, Sendable {
+    case whenBusy
+    case always
+    case never
+
+    public var title: String {
+        switch self {
+        case .whenBusy: "When something is running"
+        case .always: "Always"
+        case .never: "Never"
+        }
+    }
+}
+
+/// What the Option key sends to the shell.
+public enum OptionKey: String, Codable, CaseIterable, Sendable {
+    case characters
+    case meta
+    case leftMeta
+
+    public var title: String {
+        switch self {
+        case .characters: "Types characters"
+        case .meta: "Acts as Meta"
+        case .leftMeta: "Left Option is Meta"
+        }
+    }
+}
+
+/// What happens to a terminal once its shell exits.
+public enum ShellExit: String, Codable, CaseIterable, Sendable {
+    case close
+    case keep
+
+    public var title: String {
+        switch self {
+        case .close: "Close the terminal"
+        case .keep: "Keep it open"
+        }
+    }
+}
+
 public struct Settings: Codable, Equatable, Sendable {
     public var shade: Double
     public var glass: GlassStyle
@@ -61,6 +104,15 @@ public struct Settings: Codable, Equatable, Sendable {
     public var sessionToken: String
     /// WebSocket URL for Cloud. Empty falls back to the older TCP port.
     public var sessionWS: String
+    public var confirmClose: ConfirmClose
+    public var optionKey: OptionKey
+    public var shellExit: ShellExit
+    /// Ask before pasting several lines into a shell that would run each one.
+    public var warnMultilinePaste: Bool
+    /// The size ⌘0 goes back to. The Font slider sets it.
+    public var baseFontSize: Double
+    /// A command has to run at least this long before it posts a notification.
+    public var notifyAfterSeconds: Double
 
     public static let currentVersion = 2
 
@@ -81,7 +133,13 @@ public struct Settings: Codable, Equatable, Sendable {
         keys: KeyMap = .standard,
         sessionHost: String = "",
         sessionToken: String = "",
-        sessionWS: String = ""
+        sessionWS: String = "",
+        confirmClose: ConfirmClose = .whenBusy,
+        optionKey: OptionKey = .characters,
+        shellExit: ShellExit = .close,
+        warnMultilinePaste: Bool = true,
+        baseFontSize: Double = 13,
+        notifyAfterSeconds: Double = 10
     ) {
         self.shade = shade
         self.glass = glass
@@ -100,27 +158,43 @@ public struct Settings: Codable, Equatable, Sendable {
         self.sessionHost = sessionHost
         self.sessionToken = sessionToken
         self.sessionWS = sessionWS
+        self.confirmClose = confirmClose
+        self.optionKey = optionKey
+        self.shellExit = shellExit
+        self.warnMultilinePaste = warnMultilinePaste
+        self.baseFontSize = baseFontSize
+        self.notifyAfterSeconds = notifyAfterSeconds
     }
 
+    /// Each field falls back on its own, so one bad value in config.json does not throw away the rest.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        shade = try container.decodeIfPresent(Double.self, forKey: .shade) ?? 0.24
-        glass = try container.decodeIfPresent(GlassStyle.self, forKey: .glass) ?? .regular
-        text = try container.decodeIfPresent(TextTone.self, forKey: .text) ?? .light
-        fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize) ?? 13
-        cornerRadius = try container.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 20
-        gap = try container.decodeIfPresent(Double.self, forKey: .gap) ?? 10
-        snapWindows = try container.decodeIfPresent(Bool.self, forKey: .snapWindows) ?? true
-        focusRest = try container.decodeIfPresent(FocusRest.self, forKey: .focusRest) ?? .dim
-        blurAmount = try container.decodeIfPresent(Double.self, forKey: .blurAmount) ?? 0.55
-        notifyOnFinish = try container.decodeIfPresent(Bool.self, forKey: .notifyOnFinish) ?? true
-        checkForUpdates = try container.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? false
-        dropdownEnabled = try container.decodeIfPresent(Bool.self, forKey: .dropdownEnabled) ?? true
-        hideDockIcon = try container.decodeIfPresent(Bool.self, forKey: .hideDockIcon) ?? false
-        keys = (try container.decodeIfPresent(KeyMap.self, forKey: .keys) ?? .standard).filled()
-        sessionHost = try container.decodeIfPresent(String.self, forKey: .sessionHost) ?? ""
-        sessionToken = try container.decodeIfPresent(String.self, forKey: .sessionToken) ?? ""
-        sessionWS = try container.decodeIfPresent(String.self, forKey: .sessionWS) ?? ""
+        func field<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            ((try? container.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+        }
+        shade = field(.shade, 0.24)
+        glass = field(.glass, GlassStyle.regular)
+        text = field(.text, TextTone.light)
+        fontSize = field(.fontSize, 13.0)
+        cornerRadius = field(.cornerRadius, 20.0)
+        gap = field(.gap, 10.0)
+        snapWindows = field(.snapWindows, true)
+        focusRest = field(.focusRest, FocusRest.dim)
+        blurAmount = field(.blurAmount, 0.55)
+        notifyOnFinish = field(.notifyOnFinish, true)
+        checkForUpdates = field(.checkForUpdates, false)
+        dropdownEnabled = field(.dropdownEnabled, true)
+        hideDockIcon = field(.hideDockIcon, false)
+        keys = field(.keys, KeyMap.standard).filled()
+        sessionHost = field(.sessionHost, "")
+        sessionToken = field(.sessionToken, "")
+        sessionWS = field(.sessionWS, "")
+        confirmClose = field(.confirmClose, ConfirmClose.whenBusy)
+        optionKey = field(.optionKey, OptionKey.characters)
+        shellExit = field(.shellExit, ShellExit.close)
+        warnMultilinePaste = field(.warnMultilinePaste, true)
+        baseFontSize = field(.baseFontSize, 13.0)
+        notifyAfterSeconds = field(.notifyAfterSeconds, 10.0)
         clamp()
     }
 
@@ -128,6 +202,8 @@ public struct Settings: Codable, Equatable, Sendable {
         shade = Layout.clamp(shade, 0, 0.82)
         blurAmount = Layout.clamp(blurAmount, 0, 1)
         fontSize = Layout.clamp(fontSize, 10, 24)
+        baseFontSize = Layout.clamp(baseFontSize, 10, 24)
+        notifyAfterSeconds = max(0, notifyAfterSeconds.isFinite ? notifyAfterSeconds : 10)
         cornerRadius = Layout.clamp(cornerRadius, 8, 32)
         gap = Layout.clamp(gap, 4, 22)
     }

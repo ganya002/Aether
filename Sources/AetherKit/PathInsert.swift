@@ -12,6 +12,15 @@ final class PathInsert: NSObject, NSTableViewDataSource, NSTableViewDelegate, NS
 
     static func show() { shared.present() }
 
+    static var isKey: Bool {
+        guard let window = shared.window else { return false }
+        return NSApp.keyWindow === window
+    }
+
+    static func dismiss() {
+        shared.window?.orderOut(nil)
+    }
+
     private func present() {
         guard let pane = focusedPane() else { return }
         files = (try? FileManager.default.contentsOfDirectory(atPath: pane.cwd))?.sorted() ?? []
@@ -90,6 +99,14 @@ final class PathInsert: NSObject, NSTableViewDataSource, NSTableViewDelegate, NS
             window?.orderOut(nil)
             return true
         }
+        if commandSelector == #selector(NSResponder.moveUp(_:)) {
+            step(-1)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.moveDown(_:)) {
+            step(1)
+            return true
+        }
         return false
     }
 
@@ -105,8 +122,16 @@ final class PathInsert: NSObject, NSTableViewDataSource, NSTableViewDelegate, NS
         let row = table?.selectedRow ?? 0
         guard shown.indices.contains(row), let pane = focusedPane() else { return }
         let path = (pane.cwd as NSString).appendingPathComponent(shown[row])
-        pane.chrome.terminal.insertText(ShellPath.quote(path), replacementRange: NSRange(location: 0, length: 0))
+        pane.chrome.terminal.insertPasted(ShellPath.quote(path) + " ")
         window?.orderOut(nil)
+    }
+
+    private func step(_ delta: Int) {
+        guard let table, !shown.isEmpty else { return }
+        let current = table.selectedRow < 0 ? (delta > 0 ? -1 : shown.count) : table.selectedRow
+        let next = min(max(current + delta, 0), shown.count - 1)
+        table.selectRowIndexes([next], byExtendingSelection: false)
+        table.scrollRowToVisible(next)
     }
 
     private func reload() {

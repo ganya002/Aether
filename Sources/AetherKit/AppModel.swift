@@ -38,7 +38,10 @@ final class AppModel {
     private var dropdownID: String?
     private var dropdownReturnApp: NSRunningApplication?
     private var focusHistory: [String: [String]] = [:]
-    private var busySince: [String: Date] = [:]
+    private var busySince: [String: (date: Date, command: String)] = [:]
+    private var lazySaveItem: DispatchWorkItem?
+    private var confirmedDeskClose: Set<String> = []
+    private var asking: Set<String> = []
 
     private init() {
         directoryTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { _ in
@@ -109,6 +112,21 @@ final class AppModel {
         }
         ConfigStore.save(settings)
         applyDock()
+        if settings.notifyOnFinish {
+            FinishNotifier.requestQuietPermissionIfUndecided()
+        }
+        if let moved = ConfigStore.quarantined {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                let alert = NSAlert()
+                alert.messageText = "Aether couldn't read its settings"
+                alert.informativeText = "config.json wasn't valid JSON, so Aether started with default settings. The old file is saved as \(moved.lastPathComponent) in the same folder."
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Show in Finder")
+                if alert.runModal() == .alertSecondButtonReturn {
+                    NSWorkspace.shared.activateFileViewerSelecting([moved])
+                }
+            }
+        }
     }
 
     func newWindow(command: String? = nil, cwd: String? = nil, frame: CGRect? = nil) {
@@ -276,7 +294,14 @@ final class AppModel {
         focusHistory = focusHistory.filter { desks[$0.key] != nil }
     }
 
-    func closePane(_ paneID: String) {
+    func closePane(_ paneID: String, confirm: Bool = true) {
+        if confirm, let pane = panes[paneID], let question = closeQuestion(for: [pane]) {
+            let window = deskID(containing: paneID).flatMap { controllers[$0]?.window }
+            ask(question, confirmTitle: "Close", key: "pane-\(paneID)", window: window) { [weak self] in
+                self?.closePane(paneID, confirm: false)
+            }
+            return
+        }
         guard let deskID = deskID(containing: paneID), var desk = desks[deskID] else { return }
         panes[paneID]?.endRemoteSession()
         panes[paneID]?.shutdown()
@@ -300,6 +325,86 @@ final class AppModel {
         desks[deskID] = desk
         controllers[deskID]?.sync(animated: true)
         scheduleSave()
+    }
+
+    /// Called from windowShouldClose. True when the window may close now. Otherwise a sheet asks,
+    /// and the window closes again once the user agrees.
+    func allowClose(deskID: String, window: NSWindow) -> Bool {
+        if confirmedDeskClose.remove(deskID) != nil { return true }
+        let ids = desks[deskID]?.layout.panes ?? []
+        guard let question = closeQuestion(for: ids.compactMap { panes[$0] }, window: true) else { return true }
+        ask(question, confirmTitle: "Close", key: "desk-\(deskID)", window: window) { [weak self, weak window] in
+            self?.confirmedDeskClose.insert(deskID)
+            window?.performClose(nil)
+        }
+        return false
+    }
+
+    /// The question to ask before quitting, or nil to quit right away.
+    func quitQuestion() -> (title: String, detail: String)? {
+        let running = panes.values.filter { $0.runningCommand() != nil }
+        switch settings.confirmClose {
+        case .never:
+            return nil
+        case .whenBusy where running.isEmpty:
+            return nil
+        default:
+            break
+        }
+        if running.isEmpty {
+            return ("Quit Aether?", "Every terminal closes.")
+        }
+        if running.count == 1, let name = running.first?.runningCommand()?.name {
+            return ("Quit Aether?", "`\(name)` is still running.")
+        }
+        return ("Quit Aether?", "\(running.count) terminals are running commands.")
+    }
+
+    var keyWindowForSheets: NSWindow? {
+        keyDeskID.flatMap { controllers[$0]?.window }
+    }
+
+    private func closeQuestion(for panes: [PaneController], window: Bool = false) -> (title: String, detail: String)? {
+        let live = panes.filter { !$0.exited }
+        let running = live.compactMap { $0.runningCommand() }
+        let noun = window ? "window" : "terminal"
+        switch settings.confirmClose {
+        case .never:
+            return nil
+        case .whenBusy where running.isEmpty:
+            return nil
+        case .always where live.isEmpty:
+            return nil
+        default:
+            break
+        }
+        if running.isEmpty {
+            return ("Close \(noun)?", "The shell will end.")
+        }
+        if running.count == 1, let name = running.first?.name {
+            return ("Close \(noun)?", "`\(name)` is still running.")
+        }
+        return ("Close \(noun)?", "\(running.count) terminals are running commands.")
+    }
+
+    private func ask(_ question: (title: String, detail: String), confirmTitle: String, key: String, window: NSWindow?, then: @escaping () -> Void) {
+        guard !asking.contains(key) else { return }
+        if let window, window.attachedSheet != nil { return }
+        asking.insert(key)
+        let alert = NSAlert()
+        alert.messageText = question.title
+        alert.informativeText = question.detail
+        alert.addButton(withTitle: confirmTitle)
+        alert.addButton(withTitle: "Cancel")
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            self?.asking.remove(key)
+            if response == .alertFirstButtonReturn { then() }
+        }
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
+        }
     }
 
     func closeDesk(_ deskID: String) {
@@ -445,6 +550,30 @@ final class AppModel {
         guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
         desk.broadcast.toggle()
         desks[deskID] = desk
+        controllers[deskID]?.canvas.refreshFocus()
+        controllers[deskID]?.flashLayout(desk.broadcast ? "Broadcast on" : "Broadcast off")
+    }
+
+    func isBroadcasting(pane paneID: String) -> Bool {
+        guard let deskID = deskID(containing: paneID) else { return false }
+        return desks[deskID]?.broadcast ?? false
+    }
+
+    func clearBuffer() {
+        guard let deskID = keyDeskID, let focused = desks[deskID]?.focusedID else { return }
+        panes[focused]?.clearBuffer()
+    }
+
+    /// Brings a pane forward, for a click on its notification.
+    func reveal(pane paneID: String) {
+        guard let deskID = deskID(containing: paneID), let controller = controllers[deskID] else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        if desks[deskID]?.dropdown == true {
+            controller.presentDropdown()
+        } else {
+            controller.window?.makeKeyAndOrderFront(nil)
+        }
+        focus(pane: paneID)
     }
 
     var keyBroadcast: Bool {
@@ -454,7 +583,7 @@ final class AppModel {
 
     func changeFont(by delta: Double) {
         if delta == 0 {
-            settings.fontSize = 13
+            settings.fontSize = settings.baseFontSize
         } else {
             settings.fontSize = Layout.clamp(settings.fontSize + delta, 10, 24)
         }
@@ -480,10 +609,20 @@ final class AppModel {
         guard let deskID = deskID(containing: paneID), var desk = desks[deskID] else { return }
         desk.panes[paneID]?.exitCode = code
         desks[deskID] = desk
+        if let pane = panes[paneID], let started = busySince.removeValue(forKey: paneID) {
+            notifyFinished(pane, command: started.command, since: started.date, exitCode: code)
+        }
+        if PaneController.closesOnExit(code: code, command: panes[paneID]?.command, settings: settings) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.panes[paneID]?.exited == true else { return }
+                self.closePane(paneID, confirm: false)
+            }
+        }
     }
 
     func refreshChrome(for paneID: String) {
         guard let pane = panes[paneID], let deskID = deskID(containing: paneID), var desk = desks[deskID] else { return }
+        let moved = desk.panes[paneID]?.cwd != pane.cwd
         desk.panes[paneID]?.title = pane.title
         desk.panes[paneID]?.cwd = pane.cwd
         desks[deskID] = desk
@@ -491,14 +630,21 @@ final class AppModel {
         if desk.focusedID == paneID {
             controllers[deskID]?.window?.title = "\(pane.title) — Aether"
         }
-        scheduleSave()
+        // Programs retitle the window constantly. Only a new directory is worth saving right away.
+        if moved {
+            scheduleSave()
+        } else {
+            scheduleLazySave()
+        }
     }
 
     func broadcast(from paneID: String, data: ArraySlice<UInt8>) {
         guard let deskID = deskID(containing: paneID), desks[deskID]?.broadcast == true else { return }
         for other in desks[deskID]?.layout.panes ?? [] where other != paneID {
-            guard let pane = panes[other], pane.chrome.terminal.process.running else { continue }
-            pane.chrome.terminal.process.send(data: data)
+            guard let pane = panes[other], !pane.exited else { continue }
+            let terminal = pane.chrome.terminal
+            guard terminal.remoteSession != nil || terminal.process.running else { continue }
+            terminal.deliver(data)
         }
     }
 
@@ -760,8 +906,23 @@ final class AppModel {
         desks[saved.id] = desk
         order.append(saved.id)
         let controller = makeController(desk)
+        // A restored pane never runs its old command again on its own. It opens a shell where it was
+        // and offers the command instead, so a `make deploy` from yesterday does not fire at launch.
         for pane in panes.values {
-            makePane(pane, settings: settings)
+            var plain = pane
+            plain.command = nil
+            if pane.command != nil {
+                plain.title = Self.initialTitle(command: nil, cwd: pane.cwd)
+            }
+            makePane(plain, settings: settings)
+            let last = pane.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !last.isEmpty {
+                self.panes[pane.id]?.offerRerun(last)
+            }
+        }
+        for (id, pane) in panes where pane.command != nil {
+            desks[saved.id]?.panes[id]?.command = nil
+            desks[saved.id]?.panes[id]?.title = Self.initialTitle(command: nil, cwd: pane.cwd)
         }
         controller.sync()
         controller.showWindow(nil)
@@ -806,7 +967,7 @@ final class AppModel {
             controller.sync()
         }
         applyDock()
-        HotkeyCenter.apply(enabled: settings.dropdownEnabled, chord: settings.keys.chord(.dropdown))
+        HotkeyCenter.apply(enabled: settings.dropdownEnabled && !System.isDev, chord: settings.keys.chord(.dropdown))
         UpdateCenter.shared.applyPreference()
         ConfigStore.save(settings)
         NotificationCenter.default.post(name: .aetherBindingsChanged, object: nil)
@@ -822,7 +983,7 @@ final class AppModel {
     private func refreshDirectories() {
         for (_, pane) in panes {
             let pid = pane.chrome.terminal.process.shellPid
-            guard pane.chrome.terminal.process.running, let cwd = System.currentDirectory(pid: pid) else { continue }
+            guard !pane.reportsDirectory, pane.chrome.terminal.process.running, let cwd = System.currentDirectory(pid: pid) else { continue }
             if !System.sameDirectory(cwd, pane.cwd) {
                 pane.noteDirectory(cwd)
             }
@@ -839,33 +1000,31 @@ final class AppModel {
         var live: Set<String> = []
         for (id, pane) in panes {
             live.insert(id)
-            guard let process = pane.chrome.terminal.process, process.running, process.childfd >= 0, process.shellPid > 0 else {
-                busySince[id] = nil
+            if let running = pane.runningCommand() {
+                if busySince[id] == nil { busySince[id] = (now, running.line) }
                 continue
             }
-            let foreground = tcgetpgrp(process.childfd)
-            let busy = foreground > 0 && foreground != process.shellPid
-            if busy {
-                if busySince[id] == nil { busySince[id] = now }
-                continue
-            }
-            guard let started = busySince[id] else { continue }
-            busySince[id] = nil
-            let elapsed = now.timeIntervalSince(started)
-            guard elapsed >= 2 else { continue }
-            guard let deskID = deskID(containing: id) else { continue }
-            let window = controllers[deskID]?.window
-            let visibleHere = NSApp.isActive && window?.isKeyWindow == true && !NSApp.isHidden
-            guard !visibleHere else { continue }
-            FinishNotifier.deliver(title: pane.title, body: Self.finishedPhrase(elapsed))
+            // A pane whose process ended reports through noteExit, with its exit code.
+            guard !pane.exited, pane.chrome.terminal.process?.running == true else { continue }
+            guard let started = busySince.removeValue(forKey: id) else { continue }
+            notifyFinished(pane, command: started.command, since: started.date, exitCode: nil)
         }
         busySince = busySince.filter { live.contains($0.key) }
     }
 
-    private static func finishedPhrase(_ elapsed: TimeInterval) -> String {
-        let seconds = Int(elapsed.rounded())
-        if seconds < 60 { return "Finished in \(seconds)s" }
-        return "Finished in \(seconds / 60)m \(seconds % 60)s"
+    private func notifyFinished(_ pane: PaneController, command: String, since started: Date, exitCode: Int32?) {
+        guard settings.notifyOnFinish else { return }
+        let elapsed = Date().timeIntervalSince(started)
+        guard elapsed >= settings.notifyAfterSeconds else { return }
+        guard let deskID = deskID(containing: pane.id) else { return }
+        let window = controllers[deskID]?.window
+        let visibleHere = NSApp.isActive && window?.isKeyWindow == true && !NSApp.isHidden
+        guard !visibleHere else { return }
+        FinishNotifier.deliver(
+            title: command,
+            body: FinishNotifier.phrase(command: command, elapsed: elapsed, exitCode: exitCode),
+            pane: pane.id
+        )
     }
 
     private func focusedDirectory() -> String? {
@@ -909,9 +1068,23 @@ final class AppModel {
         return next
     }
 
+    /// At most one save every few seconds, for changes that are cheap to lose.
+    private func scheduleLazySave() {
+        guard lazySaveItem == nil, saveItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            self?.lazySaveItem = nil
+            self?.saveNow()
+        }
+        lazySaveItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: item)
+    }
+
     private func scheduleSave() {
+        lazySaveItem?.cancel()
+        lazySaveItem = nil
         saveItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
+            self?.saveItem = nil
             self?.saveNow()
         }
         saveItem = item
@@ -982,8 +1155,25 @@ enum ConfigStore {
         System.supportDirectory().appendingPathComponent("config.json")
     }
 
-    static func load() -> Settings? {
-        guard let data = try? Data(contentsOf: fileURL()) else { return nil }
+    /// Where an unreadable config.json was moved this launch, so Aether can say so once.
+    @MainActor static var quarantined: URL?
+
+    /// Each setting decodes on its own, so a bad value only resets itself. A file that is not
+    /// JSON at all is set aside as config.json.bad-<time> instead of being written over.
+    @MainActor static func load() -> Settings? {
+        let url = fileURL()
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let settings = decode(data) { return settings }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let moved = url.deletingLastPathComponent().appendingPathComponent("config.json.bad-\(stamp)")
+        if (try? FileManager.default.moveItem(at: url, to: moved)) != nil {
+            quarantined = moved
+        }
+        return nil
+    }
+
+    static func decode(_ data: Data) -> Settings? {
+        guard (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else { return nil }
         return try? JSONDecoder().decode(Settings.self, from: data)
     }
 
