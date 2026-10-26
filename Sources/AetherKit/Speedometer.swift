@@ -8,6 +8,11 @@ final class Speedometer: NSView {
     private var velocity: Double = 0
     private var ticker: Timer?
 
+    /// The tiny gauge in the update toast is too small for a readable percent.
+    var showsPercent = true {
+        didSet { needsDisplay = true }
+    }
+
     var fraction: Double {
         get { goal }
         set { setFraction(newValue) }
@@ -128,6 +133,7 @@ final class Speedometer: NSView {
         NSColor.white.withAlphaComponent(0.14).setFill()
         NSBezierPath(ovalIn: NSRect(x: center.x - hubRadius, y: center.y - hubRadius, width: hubRadius * 2, height: hubRadius * 2)).fill()
 
+        guard showsPercent else { return }
         let percent = "\(Int((displayed * 100).rounded()))%"
         let font = NSFont.monospacedDigitSystemFont(ofSize: side * 0.145, weight: .medium)
         let attributes: [NSAttributedString.Key: Any] = [
@@ -162,98 +168,155 @@ final class Speedometer: NSView {
     }
 }
 
+/// The update toast: a small glass card at the bottom-right of the window.
+/// The view spans the canvas so it can follow resizes, but only the card takes clicks.
 final class UpdateVeil: NSView {
     var onInstall: (() -> Void)?
-    let gauge = Speedometer(frame: NSRect(x: 0, y: 0, width: 188, height: 188))
-    private let cluster = NSView()
+    var onLater: (() -> Void)?
+    let gauge = Speedometer(frame: NSRect(x: 0, y: 0, width: 30, height: 30))
+    private let glass = NSGlassEffectView()
+    private let card = NSView()
+    private let label = NSTextField(labelWithString: "")
+    private let later = NSButton()
     private let install = NSButton()
+    private var showsGauge = false
     private var revealed = false
+
+    private static let margin: CGFloat = 16
+    private static let height: CGFloat = 44
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        cluster.wantsLayer = true
-        install.title = "Install now"
-        install.bezelStyle = .rounded
-        install.font = .systemFont(ofSize: 13, weight: .semibold)
-        install.target = self
-        install.action = #selector(installPressed)
-        install.isEnabled = false
-        cluster.addSubview(gauge)
-        cluster.addSubview(install)
-        addSubview(cluster)
-        positionGauge()
+        gauge.showsPercent = false
+        gauge.layer?.shadowOpacity = 0
+        label.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        label.textColor = NSColor.white.withAlphaComponent(0.95)
+        label.lineBreakMode = .byTruncatingTail
+        configure(later, title: "Later", action: #selector(laterPressed))
+        configure(install, title: "Restart to Update", action: #selector(installPressed))
+        card.addSubview(gauge)
+        card.addSubview(label)
+        card.addSubview(later)
+        card.addSubview(install)
+        glass.style = .regular
+        glass.cornerRadius = 14
+        glass.contentView = card
+        glass.wantsLayer = true
+        addSubview(glass)
+        showReady()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    private func configure(_ button: NSButton, title: String, action: Selector) {
+        button.title = title
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        // Clicking the toast must not pull focus out of the terminal.
+        button.refusesFirstResponder = true
+        button.target = self
+        button.action = action
+    }
+
+    func showDownloading() {
+        showsGauge = true
+        gauge.isHidden = false
+        label.stringValue = "Downloading Aether update…"
+        install.isEnabled = false
+        install.isHidden = true
+        later.isEnabled = true
+        positionCard()
+    }
+
+    func showReady() {
+        showsGauge = false
+        gauge.isHidden = true
+        label.stringValue = "Aether update ready"
+        install.isHidden = false
+        install.isEnabled = true
+        later.isEnabled = true
+        positionCard()
+    }
+
+    func showMessage(_ text: String) {
+        label.stringValue = text
+        positionCard()
+    }
+
+    func setRestarting(_ restarting: Bool) {
+        install.isEnabled = !restarting
+        later.isEnabled = !restarting
+    }
+
     func reveal() {
         guard !revealed else { return }
         revealed = true
         layoutSubtreeIfNeeded()
-        cluster.alphaValue = 0
-        cluster.layer?.transform = CATransform3DIdentity
-        let spring = CASpringAnimation(keyPath: "transform.scale")
-        spring.fromValue = 0.78
-        spring.toValue = 1
-        spring.mass = 0.6
-        spring.stiffness = 280
-        spring.damping = 24
-        spring.duration = min(spring.settlingDuration, 0.55)
-        spring.fillMode = .forwards
-        spring.isRemovedOnCompletion = false
-        cluster.layer?.add(spring, forKey: "reveal")
-        let settle = spring.settlingDuration
-        DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
-            self?.cluster.layer?.removeAnimation(forKey: "reveal")
-            self?.cluster.layer?.transform = CATransform3DIdentity
-        }
+        glass.alphaValue = 0
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Motion.reveal
             context.timingFunction = Motion.ease()
-            cluster.animator().alphaValue = 1
+            glass.animator().alphaValue = 1
         }
-    }
-
-    func setInstallEnabled(_ enabled: Bool) {
-        install.isEnabled = enabled
-        install.alphaValue = enabled ? 1 : 0.45
     }
 
     override func layout() {
         super.layout()
-        positionGauge()
+        positionCard()
     }
 
     override func resize(withOldSuperviewSize oldSize: NSSize) {
         super.resize(withOldSuperviewSize: oldSize)
-        positionGauge()
+        positionCard()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard install.isEnabled else { return nil }
         let local = convert(point, from: superview)
-        let inCluster = cluster.convert(local, from: self)
-        guard install.frame.contains(inCluster) else { return nil }
-        return install
+        guard glass.frame.contains(local) else { return nil }
+        return super.hitTest(point)
     }
 
     @objc private func installPressed() {
         onInstall?()
     }
 
-    private func positionGauge() {
-        let gaugeSide: CGFloat = 188
-        let button = NSSize(width: 132, height: 28)
-        let gap: CGFloat = 10
-        let height = gaugeSide + gap + button.height
-        cluster.frame = NSRect(
-            x: (bounds.width - gaugeSide) / 2,
-            y: (bounds.height - height) / 2,
-            width: gaugeSide,
+    @objc private func laterPressed() {
+        onLater?()
+    }
+
+    private func positionCard() {
+        let height = Self.height
+        let pad: CGFloat = 14
+        let gap: CGFloat = 8
+        let gaugeSide: CGFloat = 30
+        label.sizeToFit()
+        later.sizeToFit()
+        install.sizeToFit()
+        let maxWidth = max(160, bounds.width - Self.margin * 2)
+        var buttons = later.frame.width
+        if !install.isHidden { buttons += gap + install.frame.width }
+        let lead = showsGauge ? gaugeSide + gap : 0
+        let labelWidth = min(label.frame.width, max(60, maxWidth - pad * 2 - lead - buttons - 12))
+        let width = pad + lead + labelWidth + 12 + buttons + pad - 4
+        let frame = NSRect(
+            x: bounds.maxX - width - Self.margin,
+            y: Self.margin,
+            width: width,
             height: height
         )
-        gauge.frame = NSRect(x: 0, y: button.height + gap, width: gaugeSide, height: gaugeSide)
-        install.frame = NSRect(x: (gaugeSide - button.width) / 2, y: 0, width: button.width, height: button.height)
+        glass.frame = frame
+        card.frame = glass.bounds
+        var x = pad
+        if showsGauge {
+            gauge.frame = NSRect(x: x - 4, y: (height - gaugeSide) / 2, width: gaugeSide, height: gaugeSide)
+            x += lead
+        }
+        label.frame = NSRect(x: x, y: (height - label.frame.height) / 2, width: labelWidth, height: label.frame.height)
+        x += labelWidth + 12
+        later.frame.origin = NSPoint(x: x, y: (height - later.frame.height) / 2)
+        x += later.frame.width + gap
+        install.frame.origin = NSPoint(x: x, y: (height - install.frame.height) / 2)
     }
 }

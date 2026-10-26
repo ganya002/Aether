@@ -35,6 +35,25 @@ fi
 /usr/libexec/PlistBuddy -c "Delete :AetherCommit" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
 /usr/libexec/PlistBuddy -c "Add :AetherCommit string $COMMIT" "$APP/Contents/Info.plist"
 
+# The build number only goes up: it is the commit's Unix timestamp. The updater offers a
+# release only when its build number is higher, so a local build is never "updated" to an older one.
+if [[ -n "${AETHER_BUILD:-}" ]]; then
+  BUILD="$AETHER_BUILD"
+elif [[ "$COMMIT" != "dev" ]]; then
+  BUILD="$(git log -1 --format=%ct "$COMMIT" 2>/dev/null || echo 0)"
+else
+  BUILD=0
+fi
+if [[ ! "$BUILD" =~ ^[0-9]+$ ]]; then
+  echo "AETHER_BUILD must be a whole number, got: $BUILD" >&2
+  exit 1
+fi
+/usr/libexec/PlistBuddy -c "Delete :AetherBuild" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :AetherBuild string $BUILD" "$APP/Contents/Info.plist"
+if [[ "$BUILD" -gt 0 ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+fi
+
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
 run_swift scripts/make-icon.swift "$ICONSET"

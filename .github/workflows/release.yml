@@ -7,21 +7,46 @@ on:
 permissions:
   contents: write
 
+# Releases publish one at a time and in order, so an older push can't land after a newer one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build Aether
-        run: scripts/build-app.sh
+        env:
+          AETHER_COMMIT: ${{ github.sha }}
+        run: |
+          # The build number is the commit's Unix timestamp. Installed copies only take a higher one.
+          export AETHER_BUILD="$(git log -1 --format=%ct "$GITHUB_SHA")"
+          scripts/build-app.sh
+      - name: Package, checksum, and sign
+        env:
+          AETHER_UPDATE_KEY: ${{ secrets.AETHER_UPDATE_KEY }}
+        run: |
+          ditto -c -k --keepParent dist/Aether.app Aether.app.zip
+          shasum -a 256 Aether.app.zip > Aether.app.zip.sha256
+          swift scripts/sign-update.swift Aether.app.zip dist/Aether.app/Contents/Info.plist
       - name: Publish the app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ditto -c -k --keepParent dist/Aether.app Aether.app.zip
           tag="build-${GITHUB_SHA}"
+          build="$(/usr/libexec/PlistBuddy -c "Print :AetherBuild" dist/Aether.app/Contents/Info.plist)"
+          notes="Update ${GITHUB_SHA}
+
+          aether-build: ${build}"
+          assets=(Aether.app.zip Aether.app.zip.sha256)
+          if [[ -f Aether.app.zip.sig ]]; then
+            assets+=(Aether.app.zip.sig)
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" Aether.app.zip --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" --notes "$notes"
           else
-            gh release create "$tag" Aether.app.zip --title "Aether" --notes "Update ${GITHUB_SHA}"
+            gh release create "$tag" "${assets[@]}" --title "Aether" --notes "$notes"
           fi
