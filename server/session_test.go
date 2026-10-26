@@ -150,11 +150,64 @@ func TestAskForgetsWaiterWhenTheMacIsGone(t *testing.T) {
 		macLinks: map[string][]frameWriter{"tok": {&nullWriter{fail: true}}},
 		waiters:  map[string]chan map[string]any{},
 	}
-	if _, err := h.ask("tok", "/split", nil); err == nil {
+	if _, err := h.ask("tok", "/split", nil, time.Second); err == nil {
 		t.Fatal("ask succeeded over a dead link")
 	}
 	if len(h.waiters) != 0 {
 		t.Fatalf("leaked %d waiters", len(h.waiters))
+	}
+}
+
+// answeringWriter plays a Mac that answers every agent request right away.
+type answeringWriter struct {
+	h    *hub
+	mu   sync.Mutex
+	sent []map[string]any
+}
+
+func (w *answeringWriter) write(msg map[string]any) error {
+	w.mu.Lock()
+	w.sent = append(w.sent, msg)
+	w.mu.Unlock()
+	go w.h.finish(str(msg, "id"), map[string]any{"ok": true})
+	return nil
+}
+
+func TestAgentCallsActForTheirOwnSessionOnly(t *testing.T) {
+	h := &hub{waiters: map[string]chan map[string]any{}}
+	mac := &answeringWriter{h: h}
+	h.macLinks = map[string][]frameWriter{"alice": {mac}}
+	mine := &session{id: "mine", owner: "alice"}
+	before := time.Now()
+	if _, err := h.forwardAgent(mine, "/read", map[string]any{"session": "someone-else", "pane": "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.forwardAgent(mine, "/split", map[string]any{"command": "make"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.forwardAgent(mine, "/zoom", nil); err != nil {
+		t.Fatal(err)
+	}
+	mac.mu.Lock()
+	defer mac.mu.Unlock()
+	if len(mac.sent) != 3 {
+		t.Fatalf("sent %d requests", len(mac.sent))
+	}
+	for _, msg := range mac.sent {
+		body, _ := msg["body"].(map[string]any)
+		if body["session"] != "mine" {
+			t.Fatalf("forwarded session %v", body["session"])
+		}
+	}
+	deadline := func(i int) time.Duration {
+		ms, _ := mac.sent[i]["deadline"].(int64)
+		return time.UnixMilli(ms).Sub(before)
+	}
+	if d := deadline(0); d < agentQuickWait-time.Second || d > agentQuickWait+5*time.Second {
+		t.Fatalf("a read waits %v", d)
+	}
+	if d := deadline(1); d < agentApprovalWait-time.Second || d > agentApprovalWait+5*time.Second {
+		t.Fatalf("a command waits %v", d)
 	}
 }
 
@@ -183,5 +236,21 @@ func TestSessionTokenOnlyOpensItsOwnSession(t *testing.T) {
 	}
 	if h.agentSession("", "a") != nil {
 		t.Fatal("empty token accepted")
+	}
+}
+
+func TestRepliesEchoTheRequestTag(t *testing.T) {
+	h := &hub{sessions: map[string]*session{}}
+	w := &nullWriter{}
+	var subs []subscription
+	h.dispatch("tok", w, map[string]any{"type": "attach", "id": "nope", "req": "r7"}, &subs)
+	h.dispatch("tok", w, map[string]any{"type": "attach", "id": "nope"}, &subs)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.msgs) != 2 || w.msgs[0]["req"] != "r7" {
+		t.Fatalf("got %v", w.msgs)
+	}
+	if _, ok := w.msgs[1]["req"]; ok {
+		t.Fatalf("untagged request got a tag: %v", w.msgs[1])
 	}
 }

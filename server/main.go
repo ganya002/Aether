@@ -77,6 +77,11 @@ type hub struct {
 	enrolls   []enrollHit
 	pairs     map[string]pairTicket
 	claimMiss map[string][]time.Time
+	claimAll  []time.Time
+	// starting counts shells being started per person, before they are in sessions.
+	starting map[string]int
+	// seenChanged is set when someone's LastSeen moved since people.json was written.
+	seenChanged bool
 }
 
 func main() {
@@ -140,7 +145,7 @@ func (h *hub) handle(conn net.Conn) {
 	h.addMac(owner, link)
 	defer h.removeMac(owner, link)
 	_ = conn.SetDeadline(time.Time{})
-	_ = link.write(map[string]any{"type": "helloOk", "version": 1})
+	_ = link.write(map[string]any{"type": "helloOk", "version": 1, "echoesReq": true})
 	var subs []subscription
 	defer func() {
 		for _, item := range subs {
@@ -178,23 +183,38 @@ func (h *hub) removeMac(owner string, w frameWriter) {
 	h.macLinks[owner] = kept
 }
 
+// tagged echoes a client's "req" on the direct answer to its message, so the
+// client can tell which request an error belongs to.
+type tagged struct {
+	frameWriter
+	req string
+}
+
+func (t tagged) write(msg map[string]any) error {
+	if t.req != "" {
+		msg["req"] = t.req
+	}
+	return t.frameWriter.write(msg)
+}
+
 func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs *[]subscription) {
+	reply := tagged{link, str(msg, "req")}
 	switch msg["type"] {
 	case "create":
 		s, err := h.create(owner, str(msg, "cwd"), intNum(msg, "cols"), intNum(msg, "rows"), str(msg, "command"))
 		if err != nil {
-			_ = link.write(map[string]any{"type": "error", "message": err.Error()})
+			_ = reply.write(map[string]any{"type": "error", "message": err.Error()})
 			return
 		}
 		sub := s.subscribe()
 		*subs = append(*subs, subscription{s, sub})
 		go pump(link, s.id, sub)
-		_ = link.write(map[string]any{"type": "created", "id": s.id, "title": s.title})
+		_ = reply.write(map[string]any{"type": "created", "id": s.id, "title": s.title})
 		s.sendScroll(link)
 	case "attach":
 		s := h.get(str(msg, "id"))
 		if s == nil || !h.allows(owner, s) {
-			_ = link.write(map[string]any{"type": "error", "message": "no such session"})
+			_ = reply.write(map[string]any{"type": "error", "message": "no such session"})
 			return
 		}
 		s.resize(intNum(msg, "cols"), intNum(msg, "rows"))
@@ -206,7 +226,7 @@ func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs 
 		s.mu.Lock()
 		title, state, note := s.title, s.state, s.msg
 		s.mu.Unlock()
-		_ = link.write(map[string]any{"type": "attached", "id": s.id, "title": title, "state": state, "msg": note})
+		_ = reply.write(map[string]any{"type": "attached", "id": s.id, "title": title, "state": state, "msg": note})
 		s.sendScroll(link)
 	case "input":
 		if s := h.get(str(msg, "id")); s != nil && h.allows(owner, s) {
@@ -220,7 +240,7 @@ func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs 
 			s.resize(intNum(msg, "cols"), intNum(msg, "rows"))
 		}
 	case "list":
-		_ = link.write(map[string]any{"type": "sessions", "items": h.listFor(owner)})
+		_ = reply.write(map[string]any{"type": "sessions", "items": h.listFor(owner)})
 	case "agentResult":
 		h.finish(str(msg, "id"), msg)
 	case "close":
@@ -228,10 +248,10 @@ func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs 
 			h.close(s.id)
 		}
 	case "ping":
-		_ = link.write(map[string]any{"type": "pong"})
+		_ = reply.write(map[string]any{"type": "pong"})
 	case "detach":
 	default:
-		_ = link.write(map[string]any{"type": "error", "message": "unknown message"})
+		_ = reply.write(map[string]any{"type": "error", "message": "unknown message"})
 	}
 }
 
@@ -319,6 +339,8 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		cmd = exec.Command("/bin/bash", "-lc", command)
 	}
 	cmd.Dir = dir
+	h.markStarting(owner, 1)
+	defer h.markStarting(owner, -1)
 	id := newID()
 	token := newSecret()
 	cmd.Env = []string{
@@ -812,7 +834,7 @@ func (h *hub) serveAPI(addr string) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		res, err := h.ask(s.owner, body.Path, body.Body)
+		res, err := h.forwardAgent(s, body.Path, body.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -919,7 +941,35 @@ func (h *hub) authorized(r *http.Request) bool {
 	return h.known(token)
 }
 
-func (h *hub) ask(owner, path string, body map[string]any) (map[string]any, error) {
+const (
+	agentQuickWait    = 8 * time.Second
+	agentApprovalWait = 120 * time.Second
+)
+
+// agentWait is how long an /agent call waits for the Mac. Running a command or
+// listing every pane can put a question in front of the person there.
+func agentWait(path string, body map[string]any) time.Duration {
+	command, _ := body["command"].(string)
+	if path == "/view" || strings.TrimSpace(command) != "" {
+		return agentApprovalWait
+	}
+	return agentQuickWait
+}
+
+// forwardAgent hands an /agent call to the owner's Mac on behalf of s. The
+// session is always the one the caller proved, never one it named.
+func (h *hub) forwardAgent(s *session, path string, body map[string]any) (map[string]any, error) {
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["session"] = s.id
+	return h.ask(s.owner, path, body, agentWait(path, body))
+}
+
+// ask sends a request to the owner's Mac and waits up to wait for the answer.
+// The Mac gets the deadline too, so it never acts on a request nobody is
+// waiting for anymore.
+func (h *hub) ask(owner, path string, body map[string]any, wait time.Duration) (map[string]any, error) {
 	id := newID()
 	ch := make(chan map[string]any, 1)
 	h.mu.Lock()
@@ -935,7 +985,8 @@ func (h *hub) ask(owner, path string, body map[string]any) (map[string]any, erro
 		h.mu.Unlock()
 		return nil, errors.New("the Mac that owns this session is not connected")
 	}
-	if err := link.write(map[string]any{"type": "agent", "id": id, "path": path, "body": body}); err != nil {
+	deadline := time.Now().Add(wait).UnixMilli()
+	if err := link.write(map[string]any{"type": "agent", "id": id, "path": path, "body": body, "deadline": deadline}); err != nil {
 		h.mu.Lock()
 		delete(h.waiters, id)
 		h.mu.Unlock()
@@ -944,7 +995,7 @@ func (h *hub) ask(owner, path string, body map[string]any) (map[string]any, erro
 	select {
 	case res := <-ch:
 		return res, nil
-	case <-time.After(8 * time.Second):
+	case <-time.After(wait):
 		h.mu.Lock()
 		delete(h.waiters, id)
 		h.mu.Unlock()

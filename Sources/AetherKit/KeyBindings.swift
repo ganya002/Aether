@@ -416,8 +416,9 @@ public struct KeyMap: Codable, Equatable, Sendable {
 
 /// Text-editing keys that macOS turns into Cocoa commands SwiftTerm does not send to the shell.
 /// These match what Terminal.app and iTerm2 send, so readline and zle move by word and line.
+/// The ⌘ line keys are for shell prompts only. Full-screen programs like vim get the keys as before.
 enum EditingKeys {
-    static func sequence(keyCode: UInt16, flags: NSEvent.ModifierFlags, optionIsMeta: Bool) -> [UInt8]? {
+    static func sequence(keyCode: UInt16, flags: NSEvent.ModifierFlags, optionIsMeta: Bool, alternateScreen: Bool = false) -> [UInt8]? {
         let held = flags.intersection([.command, .option, .control, .shift])
         if held == .option, !optionIsMeta {
             switch Int(keyCode) {
@@ -427,7 +428,7 @@ enum EditingKeys {
             default: return nil
             }
         }
-        if held == .command {
+        if held == .command, !alternateScreen {
             switch Int(keyCode) {
             case kVK_LeftArrow: return [0x01]
             case kVK_RightArrow: return [0x05]

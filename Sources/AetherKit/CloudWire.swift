@@ -49,6 +49,9 @@ struct FrameDecoder {
 enum SecretRead: Equatable {
     case found(String)
     case missing
+    /// The keychain is locked or can't ask right now. Worth trying again later.
+    case locked
+    /// Access was refused, usually because the person clicked Deny.
     case failed
 }
 
@@ -77,6 +80,7 @@ struct KeychainStore: SecretStore {
         var result: AnyObject?
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound { return .missing }
+        if status == errSecInteractionNotAllowed { return .locked }
         guard status == errSecSuccess, let data = result as? Data, let text = String(data: data, encoding: .utf8) else {
             return .failed
         }
@@ -114,6 +118,8 @@ final class TokenVault {
     /// The token the store is known to hold. Nil until it has been read or written.
     private var secured: String?
     private(set) var unreadable = false
+    /// The read failed only because the keychain was locked. `retry()` may still get the token.
+    private(set) var locked = false
 
     init(store: SecretStore) {
         self.store = store
@@ -135,10 +141,44 @@ final class TokenVault {
         case .missing:
             secured = ""
             return ""
+        case .locked:
+            unreadable = true
+            locked = true
+            return ""
         case .failed:
             unreadable = true
             return ""
         }
+    }
+
+    /// Reads the token again after a locked keychain. Nil while it still can't be read.
+    func retry() -> String? {
+        guard unreadable, locked else { return nil }
+        switch store.read(Self.account) {
+        case .found(let token):
+            secured = token
+            unreadable = false
+            locked = false
+            return token
+        case .missing:
+            secured = ""
+            unreadable = false
+            locked = false
+            return ""
+        case .locked:
+            return nil
+        case .failed:
+            locked = false
+            return nil
+        }
+    }
+
+    /// What Settings shows when the token couldn't be read, or nil when it could.
+    var problem: String? {
+        guard unreadable else { return nil }
+        return locked
+            ? "Waiting for the keychain to unlock to sign in to Cloud."
+            : "Aether couldn't read your Cloud sign-in from the keychain, so Cloud is off. Allow access when macOS asks, or quit and reopen Aether to be asked again."
     }
 
     /// The token to write into JSON. Empty whenever the keychain holds it.
@@ -187,5 +227,30 @@ extension Settings {
 
     var usesCloud: Bool {
         cloudEnabled && hasCloudAccount
+    }
+}
+
+extension AppModel {
+    /// A token the keychain wouldn't hand over is never treated as "no account". Settings says why
+    /// Cloud is off, and a locked keychain is asked again every minute for a while.
+    func noteKeychainProblem(attempt: Int = 0) {
+        let vault = TokenVault.shared
+        guard let problem = vault.problem else { return }
+        if attempt == 0 {
+            NSLog("Aether: %@", problem)
+        }
+        SessionHub.shared.setLink(.unavailable(problem))
+        guard vault.locked, attempt < 30 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            guard let self, vault.unreadable else { return }
+            if let token = vault.retry() {
+                if self.settings.sessionToken.isEmpty {
+                    self.updateSettings { $0.sessionToken = token }
+                }
+                SessionHub.shared.setLink(.idle)
+                return
+            }
+            self.noteKeychainProblem(attempt: attempt + 1)
+        }
     }
 }

@@ -247,7 +247,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Cancel")
         if let window = model.keyWindowForSheets, window.isVisible {
-            guard window.attachedSheet == nil else { return .terminateCancel }
+            if let sheet = window.attachedSheet {
+                // Logging out or shutting down must not stall on a question nobody is answering.
+                if Self.quitBySystem { return .terminateNow }
+                window.makeKeyAndOrderFront(nil)
+                sheet.makeKeyAndOrderFront(nil)
+                NSSound.beep()
+                return .terminateCancel
+            }
             window.makeKeyAndOrderFront(nil)
             alert.beginSheetModal(for: window) { response in
                 NSApp.reply(toApplicationShouldTerminate: response == .alertFirstButtonReturn)
@@ -255,6 +262,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return .terminateLater
         }
         return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
+    /// True when the quit comes from logging out, restarting, or shutting down.
+    private static var quitBySystem: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue else { return false }
+        let system = [kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAERestart, kAEShowShutdownDialog, kAEShutDown]
+        return system.map { OSType($0) }.contains(reason)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

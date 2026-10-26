@@ -236,16 +236,21 @@ if curl -fsSL --retry 2 --retry-delay 1 -H "Accept: application/vnd.github+json"
     build="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$committed" +%s 2>/dev/null || true)"
   fi
 fi
-if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-  ARCHIVE_URL="https://github.com/$REPO/archive/$commit.tar.gz"
-  export AETHER_COMMIT="$commit"
-  if [[ "$build" =~ ^[0-9]+$ ]]; then
-    export AETHER_BUILD="$build"
-  fi
-else
-  # GitHub's API is rate limited. The source still downloads; this copy just won't update itself.
-  commit=''
-  ARCHIVE_URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
+if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+  # GitHub's API is rate limited; git's own protocol isn't. Without a build time the app
+  # takes the next release as newer, which replaces this copy with a fully stamped one.
+  commit="$(git ls-remote "https://github.com/$REPO" refs/heads/main 2>>"$LOG" | awk 'NR==1 { print $1 }' || true)"
+  build=''
+fi
+if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+  die "GitHub didn't say which version is current." \
+    "Aether needs that to keep itself up to date. Wait a minute, then run the installer again." \
+    "$RETRY"
+fi
+ARCHIVE_URL="https://github.com/$REPO/archive/$commit.tar.gz"
+export AETHER_COMMIT="$commit"
+if [[ "$build" =~ ^[0-9]+$ ]]; then
+  export AETHER_BUILD="$build"
 fi
 
 archive="$WORKDIR/aether.tar.gz"

@@ -61,11 +61,6 @@ final class SessionHub {
 
     var isOpen: Bool { opened }
 
-    private struct Pending {
-        var match: ([String: Any]) -> String?
-        var cont: CheckedContinuation<String, Error>
-    }
-
     private var connection: NWConnection?
     private var socket: URLSessionWebSocketTask?
     private var socketSession: URLSession?
@@ -83,13 +78,15 @@ final class SessionHub {
     private var events: [String: (CloudSessionEvent) -> Void] = [:]
     private var earlyStatus: [String: (String, String)] = [:]
     private var waiters: [CheckedContinuation<Void, Error>] = []
-    private var pending: [Pending] = []
+    private var pending = PendingQueue<CheckedContinuation<String, Error>>()
+    private var nextReq = 0
     private var output: [String: (Data) -> Void] = [:]
     private var earlyOutput: [String: Data] = [:]
     private var status: [String: (String, String) -> Void] = [:]
     private var reconnectTask: Task<Void, Never>?
     private var askingAboutAccount = false
     private var approvals: Task<Void, Never>?
+    private var agentsInFlight = 0
     /// Terminals closed while the link was down. They are closed on the server once it is back.
     private var closing: Set<String> = []
 
@@ -192,7 +189,10 @@ final class SessionHub {
         return generation
     }
 
+    /// Drops the transport. Requests still waiting on it fail, since their answers can't arrive anymore.
     private func teardown() {
+        pending.drain().forEach { $0.resume(throwing: SessionError.disconnected) }
+        pending.echoesReq = false
         generation += 1
         opened = false
         connecting = false
@@ -239,15 +239,14 @@ final class SessionHub {
     private func fail(_ error: Error) {
         let waiting = waiters
         waiters = []
-        let queued = pending
-        pending = []
+        let queued = pending.drain()
         let hadTransport = connecting || opened || connection != nil || socket != nil
         guard hadTransport || !waiting.isEmpty || !queued.isEmpty else { return }
         teardown()
         let text = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         link = .failed(text)
         waiting.forEach { $0.resume(throwing: error) }
-        queued.forEach { $0.cont.resume(throwing: error) }
+        queued.forEach { $0.resume(throwing: error) }
         if case SessionError.unauthorized = error {
             for id in sizes.keys { events[id]?(.disconnected) }
             askAboutAccount()
@@ -373,6 +372,12 @@ final class SessionHub {
         forget(id)
     }
 
+    /// Stops showing a terminal without ending it. It stays on the server and in the Cloud list.
+    func detach(_ id: String) {
+        forget(id)
+        closing.remove(id)
+    }
+
     private func forget(_ id: String) {
         output[id] = nil
         status[id] = nil
@@ -407,9 +412,13 @@ final class SessionHub {
 
     private func request(_ msg: [String: Any], match: @escaping ([String: Any]) -> String?) async throws -> String {
         guard opened else { throw SessionError.disconnected }
+        nextReq += 1
+        let req = "r\(nextReq)"
+        var tagged = msg
+        tagged["req"] = req
         return try await withCheckedThrowingContinuation { cont in
-            pending.append(Pending(match: match, cont: cont))
-            send(msg)
+            pending.add(req: req, match: match, waiter: cont)
+            send(tagged)
         }
     }
 
@@ -440,11 +449,10 @@ final class SessionHub {
         TokenVault.shared.backup(AppModel.shared.settings.sessionToken)
         let waiting = waiters
         waiters = []
-        let queued = pending
-        pending = []
+        let queued = pending.drain()
         teardown()
         waiting.forEach { $0.resume(throwing: SessionError.unconfigured) }
-        queued.forEach { $0.cont.resume(throwing: SessionError.unconfigured) }
+        queued.forEach { $0.resume(throwing: SessionError.unconfigured) }
         for id in sizes.keys { events[id]?(.disconnected) }
         AppModel.shared.updateSettings { settings in
             settings.sessionHost = ""
@@ -487,30 +495,45 @@ final class SessionHub {
         var body = msg["body"] as? [String: Any] ?? [:]
         // A Cloud request names its own Cloud terminal by session. It never gets to pick a local pane by id.
         body.removeValue(forKey: "pane")
+        let deadline = CloudPrompt.deadline(msg["deadline"])
         let previous = approvals
+        // Only a wait for a person is checked against the deadline. Requests that run right
+        // away are never refused over a few seconds of clock difference with the server.
+        let queued = agentsInFlight > 0
+        agentsInFlight += 1
         approvals = Task { @MainActor in
             await previous?.value
-            var result: [String: Any]
-            if await self.approve(path: path, body: body) {
-                result = AppModel.shared.agent(path: path, body: body)
-            } else {
-                result = ["ok": false, "error": "Declined on the Mac."]
-            }
+            defer { self.agentsInFlight -= 1 }
+            var result = await self.runAgent(path: path, body: body, deadline: deadline, queued: queued)
             result["type"] = "agentResult"
             result["id"] = requestID
             self.send(result)
         }
     }
 
-    /// Anything that runs a command needs a yes from the person at this Mac.
-    /// Reading the screen also needs one unless the request comes from a Cloud terminal reading itself.
-    private func approve(path: String, body: [String: Any]) async -> Bool {
+    private func runAgent(path: String, body: [String: Any], deadline: Date?, queued: Bool) async -> [String: Any] {
+        if case .failure(let error) = AppModel.shared.cloudTarget(body) {
+            return ["ok": false, "error": error.message]
+        }
+        if queued, CloudPrompt.expired(deadline, now: Date()) {
+            return ["ok": false, "error": "The Mac took too long to answer."]
+        }
+        let answer = await approve(path: path, body: body)
+        guard answer.allowed else { return ["ok": false, "error": "Declined on the Mac."] }
+        if queued || answer.asked, CloudPrompt.expired(deadline, now: Date()) {
+            // Nobody is waiting for the answer anymore, so a late yes runs nothing.
+            return ["ok": false, "error": "Allowed too late."]
+        }
+        return AppModel.shared.agent(path: path, body: body, fromCloud: true)
+    }
+
+    /// Anything that runs a command needs a yes from the person at this Mac, and so does listing
+    /// every pane. Everything else acts only on the Cloud terminal that asked, so it goes ahead.
+    private func approve(path: String, body: [String: Any]) async -> (allowed: Bool, asked: Bool) {
         let command = CloudPrompt.command(in: body)
-        let ownSession = !((body["session"] as? String) ?? "").isEmpty
-        let reads = CloudPrompt.readsScreen(path) && !ownSession
-        guard command != nil || reads else { return true }
+        guard command != nil || CloudPrompt.needsApproval(path) else { return (true, false) }
         let account = CloudPrompt.fingerprint(AppModel.shared.settings.sessionToken)
-        if CloudPrompt.trusted(account) { return true }
+        if CloudPrompt.trusted(account) { return (true, false) }
         let alert = NSAlert()
         alert.alertStyle = .warning
         if let command {
@@ -519,7 +542,7 @@ final class SessionHub {
             alert.informativeText = command
         } else {
             alert.messageText = "Your Cloud device wants to read what's on screen in Aether."
-            alert.informativeText = path == "/view" ? "It will see the titles of your terminals." : "It will see the text in the focused terminal."
+            alert.informativeText = "It will see the titles of your terminals."
         }
         alert.addButton(withTitle: "Deny")
         alert.addButton(withTitle: "Allow")
@@ -529,7 +552,7 @@ final class SessionHub {
         if allowed, alert.suppressionButton?.state == .on {
             CloudPrompt.trust(account)
         }
-        return allowed
+        return (allowed, true)
     }
 
     // MARK: Wire
@@ -596,6 +619,7 @@ final class SessionHub {
             guard connecting else { return }
             opened = true
             connecting = false
+            pending.echoesReq = msg["echoesReq"] as? Bool ?? false
             link = .connected
             for id in closing {
                 send(["type": "close", "id": id])
@@ -612,10 +636,7 @@ final class SessionHub {
                 fail(message == "unauthorized" ? SessionError.unauthorized : SessionError.server(message))
                 return
             }
-            // Replies come back in order, so an error answers the oldest open request.
-            if !pending.isEmpty {
-                pending.removeFirst().cont.resume(throwing: SessionError.server(message))
-            }
+            pending.takeError(msg)?.resume(throwing: SessionError.server(message))
             return
         }
         guard opened else { return }
@@ -649,10 +670,7 @@ final class SessionHub {
             status[id]?("done", "exited")
             return
         }
-        if let index = pending.firstIndex(where: { $0.match(msg) != nil }) {
-            let value = pending[index].match(msg) ?? ""
-            let cont = pending[index].cont
-            pending.remove(at: index)
+        if let (cont, value) = pending.takeMatch(msg) {
             cont.resume(returning: value)
             return
         }
@@ -670,6 +688,48 @@ final class SessionHub {
         }
         guard let connection else { return }
         connection.send(content: FrameDecoder.frame(body), completion: .contentProcessed { _ in })
+    }
+}
+
+/// Requests waiting for the server's answer. Pure, so the matching rules can be tested.
+struct PendingQueue<Waiter> {
+    struct Entry {
+        var req: String
+        var match: ([String: Any]) -> String?
+        var waiter: Waiter
+    }
+
+    private(set) var entries: [Entry] = []
+    /// The server tags each direct answer with the request's "req". Older servers don't.
+    var echoesReq = false
+
+    var isEmpty: Bool { entries.isEmpty }
+
+    mutating func add(req: String, match: @escaping ([String: Any]) -> String?, waiter: Waiter) {
+        entries.append(Entry(req: req, match: match, waiter: waiter))
+    }
+
+    mutating func drain() -> [Waiter] {
+        defer { entries.removeAll() }
+        return entries.map(\.waiter)
+    }
+
+    /// The request an error answers. A tagged error answers its own request. An untagged one
+    /// answers nothing on a server that tags, since it came from a message nobody waits on.
+    /// Older servers answer in order, so there it is the oldest request.
+    mutating func takeError(_ msg: [String: Any]) -> Waiter? {
+        if let req = msg["req"] as? String {
+            guard let index = entries.firstIndex(where: { $0.req == req }) else { return nil }
+            return entries.remove(at: index).waiter
+        }
+        guard !echoesReq, !entries.isEmpty else { return nil }
+        return entries.removeFirst().waiter
+    }
+
+    mutating func takeMatch(_ msg: [String: Any]) -> (Waiter, String)? {
+        guard let index = entries.firstIndex(where: { $0.match(msg) != nil }) else { return nil }
+        let entry = entries.remove(at: index)
+        return (entry.waiter, entry.match(msg) ?? "")
     }
 }
 
@@ -711,8 +771,25 @@ enum CloudPrompt {
         }
     }
 
-    nonisolated static func readsScreen(_ path: String) -> Bool {
-        path == "/read" || path == "/view"
+    /// Requests that show more than the asking terminal, so the person at the Mac decides.
+    nonisolated static func needsApproval(_ path: String) -> Bool {
+        path == "/view"
+    }
+
+    /// The server's deadline for a request, in Unix milliseconds. Nil when it sent none.
+    nonisolated static func deadline(_ raw: Any?) -> Date? {
+        let ms: Double
+        if let value = raw as? Double { ms = value }
+        else if let value = raw as? Int { ms = Double(value) }
+        else if let value = raw as? NSNumber { ms = value.doubleValue }
+        else { return nil }
+        guard ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: ms / 1000)
+    }
+
+    nonisolated static func expired(_ deadline: Date?, now: Date) -> Bool {
+        guard let deadline else { return false }
+        return now > deadline
     }
 
     nonisolated static func command(in body: [String: Any]) -> String? {

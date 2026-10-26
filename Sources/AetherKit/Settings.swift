@@ -225,7 +225,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.warnMultilinePaste = warnMultilinePaste
         self.baseFontSize = baseFontSize
         self.notifyAfterSeconds = notifyAfterSeconds
-        self.cloudEnabled = cloudEnabled ?? !sessionHost.isEmpty
+        self.cloudEnabled = cloudEnabled ?? !(sessionHost.isEmpty && sessionWS.isEmpty)
     }
 
     /// Each field falls back on its own, so one bad value in config.json does not throw away the rest.
@@ -257,7 +257,7 @@ public struct Settings: Codable, Equatable, Sendable {
         warnMultilinePaste = field(.warnMultilinePaste, true)
         baseFontSize = field(.baseFontSize, 13.0)
         notifyAfterSeconds = field(.notifyAfterSeconds, 10.0)
-        cloudEnabled = field(.cloudEnabled, !sessionHost.isEmpty)
+        cloudEnabled = field(.cloudEnabled, !(sessionHost.isEmpty && sessionWS.isEmpty))
         themeName = field(.themeName, "Aether")
         minimumContrast = field(.minimumContrast, 0.25)
         fontFamily = field(.fontFamily, "")

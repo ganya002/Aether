@@ -154,6 +154,16 @@ private func desk(_ id: String, _ panes: [String], focused: String) -> Desk {
         #expect(target == AgentArgs.Target(desk: "D1", pane: "B", explicit: true))
     }
 
+    @Test func aCloudRequestOnlyReachesItsOwnPane() {
+        let desks = ["D1": desk("D1", ["A", "B"], focused: "A")]
+        let own = try? AgentArgs.target(pane: nil, session: "S1", desks: desks, sessions: ["B": "S1"], keyDesk: "D1", allowFocusedFallback: false).get()
+        #expect(own == AgentArgs.Target(desk: "D1", pane: "B", explicit: true))
+        let missing = AgentError(AgentArgs.cloudTerminalMissing)
+        #expect(AgentArgs.target(pane: nil, session: "S9", desks: desks, sessions: ["B": "S1"], keyDesk: "D1", allowFocusedFallback: false) == .failure(missing))
+        #expect(AgentArgs.target(pane: nil, session: nil, desks: desks, sessions: [:], keyDesk: "D1", allowFocusedFallback: false) == .failure(missing))
+        #expect(AgentArgs.target(pane: "A", session: "S9", desks: desks, sessions: ["B": "S1"], keyDesk: "D1", allowFocusedFallback: false) == .failure(missing))
+    }
+
     @Test func tailKeepsTheLastLinesWithoutTrailingBlanks() {
         #expect(AgentArgs.tail("a\nb\nc\n\n  \n", lines: 2) == "b\nc")
         #expect(AgentArgs.tail("a\nb", lines: 10) == "a\nb")

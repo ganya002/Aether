@@ -83,9 +83,11 @@ private final class MemoryStore: SecretStore {
     var items: [String: String] = [:]
     var refuseWrites = false
     var failReads = false
+    var lockReads = false
     var deletes = 0
 
     func read(_ account: String) -> SecretRead {
+        if lockReads { return .locked }
         if failReads { return .failed }
         return items[account].map(SecretRead.found) ?? .missing
     }
@@ -142,6 +144,32 @@ private final class MemoryStore: SecretStore {
     #expect(store.items[TokenVault.account] == "kept")
 }
 
+@MainActor @Test func aLockedKeychainIsAskedAgain() {
+    let store = MemoryStore()
+    store.items[TokenVault.account] = "kept"
+    store.lockReads = true
+    let vault = TokenVault(store: store)
+    #expect(vault.adopt(fileToken: "") == "")
+    #expect(vault.locked && vault.problem != nil)
+    #expect(vault.retry() == nil)
+    #expect(vault.diskToken(for: "") == "")
+    #expect(store.items[TokenVault.account] == "kept")
+    store.lockReads = false
+    #expect(vault.retry() == "kept")
+    #expect(!vault.unreadable && vault.problem == nil)
+    #expect(vault.diskToken(for: "kept") == "")
+}
+
+@MainActor @Test func aDeniedKeychainSaysSoInsteadOfLookingSignedOut() {
+    let store = MemoryStore()
+    store.failReads = true
+    let vault = TokenVault(store: store)
+    _ = vault.adopt(fileToken: "")
+    #expect(!vault.locked)
+    #expect(vault.problem?.contains("keychain") == true)
+    #expect(vault.retry() == nil)
+}
+
 @MainActor @Test func newTokenReplacesOldOneAndBackupKeepsIt() {
     let store = MemoryStore()
     let vault = TokenVault(store: store)
@@ -158,6 +186,8 @@ private final class MemoryStore: SecretStore {
     let cloud = try JSONDecoder().decode(Settings.self, from: Data(#"{"sessionHost":"h","sessionToken":"t"}"#.utf8))
     #expect(cloud.cloudEnabled)
     #expect(cloud.usesCloud)
+    let socketOnly = try JSONDecoder().decode(Settings.self, from: Data(#"{"sessionWS":"wss://w/ws","sessionToken":"t"}"#.utf8))
+    #expect(socketOnly.cloudEnabled)
     let local = try JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
     #expect(!local.cloudEnabled)
     var parked = cloud
@@ -171,4 +201,46 @@ private final class MemoryStore: SecretStore {
     #expect(CloudPrompt.command(in: ["command": "   "]) == nil)
     #expect(CloudPrompt.command(in: ["direction": "right"]) == nil)
     #expect(CloudPrompt.fingerprint("a") != CloudPrompt.fingerprint("b"))
+}
+
+@Test func onlyListingEveryPaneNeedsApprovalWithoutACommand() {
+    #expect(CloudPrompt.needsApproval("/view"))
+    #expect(!CloudPrompt.needsApproval("/read"))
+    #expect(!CloudPrompt.needsApproval("/status"))
+}
+
+@Test func aLateApprovalRunsNothing() {
+    let deadline = CloudPrompt.deadline(Int64(1_700_000_000_000))
+    #expect(deadline == Date(timeIntervalSince1970: 1_700_000_000))
+    #expect(CloudPrompt.deadline(1_700_000_000_000.0) == deadline)
+    #expect(!CloudPrompt.expired(deadline, now: Date(timeIntervalSince1970: 1_699_999_999)))
+    #expect(CloudPrompt.expired(deadline, now: Date(timeIntervalSince1970: 1_700_000_001)))
+    #expect(CloudPrompt.deadline(nil) == nil)
+    #expect(CloudPrompt.deadline("soon") == nil)
+    #expect(!CloudPrompt.expired(nil, now: Date()))
+}
+
+@Test func errorsAnswerOnlyTheirOwnRequest() {
+    var queue = PendingQueue<Int>()
+    queue.echoesReq = true
+    queue.add(req: "r1", match: { _ in nil }, waiter: 1)
+    queue.add(req: "r2", match: { $0["type"] as? String == "created" ? "id" : nil }, waiter: 2)
+    // A stray error from a message nobody waits on, like a reattach after a resync.
+    #expect(queue.takeError(["type": "error", "message": "no such session"]) == nil)
+    #expect(queue.takeError(["type": "error", "req": "r2"]) == 2)
+    #expect(queue.takeError(["type": "error", "req": "r9"]) == nil)
+    #expect(queue.entries.map(\.waiter) == [1])
+    var old = PendingQueue<Int>()
+    old.add(req: "r1", match: { _ in nil }, waiter: 1)
+    old.add(req: "r2", match: { _ in nil }, waiter: 2)
+    #expect(old.takeError(["type": "error"]) == 1)
+}
+
+@Test func droppingTheConnectionFailsEveryWaitingRequest() {
+    var queue = PendingQueue<Int>()
+    queue.add(req: "r1", match: { _ in nil }, waiter: 1)
+    queue.add(req: "r2", match: { $0["type"] as? String == "created" ? "abc" : nil }, waiter: 2)
+    #expect(queue.takeMatch(["type": "created"])?.1 == "abc")
+    #expect(queue.drain() == [1])
+    #expect(queue.isEmpty)
 }

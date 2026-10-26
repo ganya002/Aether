@@ -77,21 +77,34 @@ var removeUser = func(p *person) {
 	}
 }
 
-// sweepUser cleans up after owner once their last terminal is gone.
+func (h *hub) markStarting(owner string, delta int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.starting == nil {
+		h.starting = map[string]int{}
+	}
+	h.starting[owner] += delta
+	if h.starting[owner] <= 0 {
+		delete(h.starting, owner)
+	}
+}
+
+// sweepUser cleans up after owner once their last terminal is gone. It holds
+// the lock while it kills, so a terminal opening at the same moment either
+// counts as busy or starts after the sweep.
 func (h *hub) sweepUser(owner string) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	p := h.people[owner]
-	busy := false
+	if p == nil || h.starting[owner] > 0 {
+		return
+	}
 	for _, s := range h.sessions {
 		if s.owner == owner {
-			busy = true
-			break
+			return
 		}
 	}
-	h.mu.Unlock()
-	if p != nil && !busy {
-		killUser(p.UID)
-	}
+	killUser(p.UID)
 }
 
 // expireIdle removes people who have no terminals, no connected Mac, and have
@@ -115,6 +128,9 @@ func (h *hub) expireIdle(now time.Time, limit time.Duration) []*person {
 		if seen == 0 {
 			seen = p.Created
 		}
+		if p.loaded > seen {
+			seen = p.loaded
+		}
 		if busy[token] || h.devices[token] || seen > cutoff {
 			continue
 		}
@@ -130,19 +146,34 @@ func (h *hub) expireIdle(now time.Time, limit time.Duration) []*person {
 	return gone
 }
 
+const reapInterval = time.Hour
+
+// reapLoop waits a full interval before its first sweep, so a restart never
+// judges anyone before they have had a chance to reconnect.
 func (h *hub) reapLoop() {
 	for {
-		if gone := h.expireIdle(time.Now(), idleLimit()); len(gone) > 0 {
-			saveMu.Lock()
-			h.savePeople()
-			saveMu.Unlock()
-			for _, p := range gone {
-				log.Printf("expired %s after %s idle", p.User, idleLimit())
-				killUser(p.UID)
-				removeUser(p)
-			}
-		}
-		h.pruneClaimMisses(time.Now())
-		time.Sleep(time.Hour)
+		time.Sleep(reapInterval)
+		h.reapTick(time.Now())
 	}
+}
+
+// reapTick removes idle people and writes people.json when that, or anyone's
+// LastSeen, changed. Without the write a restart would forget who was active.
+func (h *hub) reapTick(now time.Time) {
+	gone := h.expireIdle(now, idleLimit())
+	h.mu.Lock()
+	changed := h.seenChanged
+	h.seenChanged = false
+	h.mu.Unlock()
+	if len(gone) > 0 || changed {
+		saveMu.Lock()
+		h.savePeople()
+		saveMu.Unlock()
+	}
+	for _, p := range gone {
+		log.Printf("expired %s after %s idle", p.User, idleLimit())
+		killUser(p.UID)
+		removeUser(p)
+	}
+	h.pruneClaimMisses(now)
 }
