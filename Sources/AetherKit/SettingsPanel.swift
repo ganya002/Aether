@@ -28,6 +28,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let sessionWhere = NSSegmentedControl(labels: ["Local", "Cloud"], trackingMode: .selectOne, target: nil, action: nil)
     private let cloudStatus = NSTextField(wrappingLabelWithString: "")
     private var cloudChosen = false
+    private let pairButton = NSButton(title: "Code for another device", target: nil, action: nil)
+    private let signOutButton = NSButton(title: "Sign Out of Cloud…", target: nil, action: nil)
+    private var prompting = false
     private var applying = false
     private var escMonitor: Any?
     private var vaporToken = 0
@@ -97,11 +100,17 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         cloudStatus.textColor = .secondaryLabelColor
         cloudStatus.preferredMaxLayoutWidth = 560
         add(cloudStatus, to: cloudPage)
-        let pair = NSButton(title: "Code for another device", target: self, action: #selector(pairDevice))
-        pair.bezelStyle = .rounded
-        pair.font = .systemFont(ofSize: 12, weight: .medium)
-        add(pair, to: cloudPage)
-        add(note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer."), to: cloudPage)
+        pairButton.target = self
+        pairButton.action = #selector(pairDevice)
+        pairButton.bezelStyle = .rounded
+        pairButton.font = .systemFont(ofSize: 12, weight: .medium)
+        add(pairButton, to: cloudPage)
+        add(note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer. Local keeps your Cloud account for later."), to: cloudPage)
+        signOutButton.target = self
+        signOutButton.action = #selector(signOut)
+        signOutButton.bezelStyle = .rounded
+        signOutButton.font = .systemFont(ofSize: 12, weight: .medium)
+        add(signOutButton, to: cloudPage)
         let reveal = NSButton(title: "Show Config in Finder", target: self, action: #selector(revealConfig))
         reveal.bezelStyle = .rounded
         reveal.font = .systemFont(ofSize: 12, weight: .medium)
@@ -266,6 +275,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        guard !prompting else { return }
         vaporize()
     }
 
@@ -297,51 +307,99 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             settings.dropdownEnabled = dropdown.state == .on
             settings.hideDockIcon = dock.state == .on
             if switched && !wantsCloud {
-                settings.sessionHost = ""
-                settings.sessionToken = ""
-                settings.sessionWS = ""
+                // Local stops using the account. It does not forget it.
+                settings.cloudEnabled = false
             }
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
         guard switched else { return }
-        cloudChosen = wantsCloud
         if wantsCloud {
-            Task { await self.connectCloud() }
+            Task { await self.chooseCloud() }
         } else {
+            cloudChosen = false
             SessionHub.shared.setLink(.idle)
+            refreshCloudControls()
         }
     }
 
-    private func connectCloud() async {
-        let saved = AppModel.shared.settings
-        if saved.sessionHost.isEmpty || saved.sessionToken.isEmpty {
-            SessionHub.shared.setLink(.connecting)
-            guard let endpoint = await CloudCatalog.published() else {
-                SessionHub.shared.setLink(.unavailable("Cloud isn't publicly available yet."))
+    private func chooseCloud() async {
+        if !AppModel.shared.settings.hasCloudAccount {
+            let alert = NSAlert()
+            alert.messageText = "Start a Cloud account?"
+            alert.informativeText = "Aether will make a Cloud account for this Mac. New terminals will run on the Cloud server instead of this Mac."
+            alert.addButton(withTitle: "Start Cloud")
+            alert.addButton(withTitle: "Cancel")
+            guard await confirm(alert) == .alertFirstButtonReturn else {
+                showLocal()
                 return
             }
+            SessionHub.shared.setLink(.connecting)
             do {
-                let creds = try await CloudCatalog.enroll(at: endpoint)
-                AppModel.shared.updateSettings { settings in
-                    settings.sessionHost = creds.host
-                    settings.sessionToken = creds.token
-                    settings.sessionWS = creds.ws
-                }
+                try await SessionHub.shared.enroll()
             } catch {
-                SessionHub.shared.setLink(.failed(error.localizedDescription))
+                SessionHub.shared.setLink(.failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription))
+                showLocal()
                 return
             }
         }
+        cloudChosen = true
+        AppModel.shared.updateSettings { $0.cloudEnabled = true }
+        refreshCloudControls()
+        await connectCloud()
+    }
+
+    private func showLocal() {
+        applying = true
+        sessionWhere.selectedSegment = 0
+        applying = false
+        cloudChosen = false
+        refreshCloudControls()
+    }
+
+    private func connectCloud() async {
+        guard AppModel.shared.settings.usesCloud else { return }
         SessionHub.shared.setLink(.connecting)
         do {
             try await SessionHub.shared.open()
+        } catch SessionError.unauthorized {
+            // SessionHub asks the person what to do.
         } catch {
-            SessionHub.shared.setLink(.failed(error.localizedDescription))
+            SessionHub.shared.setLink(.failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription))
+        }
+    }
+
+    private func confirm(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        prompting = true
+        defer { prompting = false }
+        guard let window, window.isVisible else { return alert.runModal() }
+        return await withCheckedContinuation { cont in
+            alert.beginSheetModal(for: window) { cont.resume(returning: $0) }
+        }
+    }
+
+    private func refreshCloudControls() {
+        let settings = AppModel.shared.settings
+        pairButton.isEnabled = settings.usesCloud
+        signOutButton.isEnabled = settings.hasCloudAccount
+    }
+
+    @objc private func signOut() {
+        Task {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Sign out of Cloud?"
+            alert.informativeText = "This Mac forgets its Cloud account and goes back to Local. Terminals running in Cloud can't be reached from here again. The sign-in is kept in your keychain as a backup."
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Sign Out")
+            guard await confirm(alert) == .alertSecondButtonReturn else { return }
+            SessionHub.shared.signOut()
+            load()
         }
     }
 
     @objc private func pairDevice() {
         let settings = AppModel.shared.settings
+        guard settings.usesCloud else { return }
         cloudStatus.stringValue = "Making a code…"
         Task {
             do {
@@ -389,8 +447,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         dropdown.state = settings.dropdownEnabled ? .on : .off
         dock.state = settings.hideDockIcon ? .on : .off
         dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
-        sessionWhere.selectedSegment = settings.sessionHost.isEmpty ? 0 : 1
+        sessionWhere.selectedSegment = settings.usesCloud ? 1 : 0
         cloudChosen = sessionWhere.selectedSegment == 1
+        refreshCloudControls()
         keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()
