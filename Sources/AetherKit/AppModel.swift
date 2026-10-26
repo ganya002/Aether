@@ -1372,7 +1372,7 @@ extension AppModel {
             switch resolved {
             case .success(let target):
                 guard let pane = openAgentPane(beside: target, zone: zone, command: command, focus: bool(body["focus"], false), share: share(body["ratio"])) else {
-                    return failure("Could not split that pane.")
+                    return failure("No room for another pane there. Make the window bigger, or close a pane.")
                 }
                 return ["ok": true, "pane": pane]
             case .failure(let error):
@@ -1390,7 +1390,7 @@ extension AppModel {
                 source = URL(fileURLWithPath: base).appendingPathComponent(source).standardized.path
             }
             guard let pane = openAgentPane(beside: target, zone: zone, command: nil, focus: bool(body["focus"], false), share: share(body["ratio"])) else {
-                return failure("Could not split that pane.")
+                return failure("No room for another pane there. Make the window bigger, or close a pane.")
             }
             guard let controller = panes[pane], controller.chrome.showPreview(kind: kind, source: source) else {
                 closePane(pane, confirm: false)
