@@ -10,6 +10,8 @@ struct PaneState: Codable, Equatable {
     var exitCode: Int32?
     /// The Cloud terminal this pane shows, so it can be attached again after Aether restarts.
     var remoteSession: String?
+    /// A name the user gave the terminal. It wins over the title programs set.
+    var customTitle: String?
 }
 
 struct Desk: Equatable {
@@ -501,6 +503,14 @@ final class AppModel {
 
     func arrange(_ pattern: Pattern) {
         guard let kind = LayoutKind(pattern: pattern) else { return }
+        arrange(kind)
+    }
+
+    var keyLayoutKind: LayoutKind? {
+        keyDeskID.flatMap { desks[$0]?.kind }
+    }
+
+    func arrange(_ kind: LayoutKind) {
         guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
         desk.kind = kind
         var ids = Layout.visualIDs(desk.layout)
@@ -639,7 +649,7 @@ final class AppModel {
         desks[deskID] = desk
         pane.refreshCaption(tone: settings.text.effective)
         if desk.focusedID == paneID {
-            controllers[deskID]?.window?.title = "\(pane.title) — Aether"
+            controllers[deskID]?.window?.title = "\(pane.customTitle ?? pane.title) — Aether"
         }
         // Programs retitle the window constantly. Only a new directory is worth saving right away.
         if moved {
@@ -748,6 +758,76 @@ final class AppModel {
 
     func scheduleDirectoryRefresh() {
         refreshDirectories()
+    }
+
+    /// The panes of the key window in reading order, left to right and top to bottom.
+    var keyPaneOrder: [String] {
+        guard let deskID = keyDeskID, let desk = desks[deskID] else { return [] }
+        return Layout.visualIDs(desk.layout)
+    }
+
+    /// ⌘1 through ⌘9. A number past the last pane does nothing.
+    func focusPane(number: Int) {
+        let ids = keyPaneOrder
+        guard number >= 1, number <= ids.count else { return }
+        focusKeyPane(ids[number - 1])
+    }
+
+    func cyclePane(by delta: Int) {
+        guard let deskID = keyDeskID, let desk = desks[deskID] else { return }
+        let ids = Layout.visualIDs(desk.layout)
+        guard ids.count > 1, let index = ids.firstIndex(of: desk.focusedID) else { return }
+        focusKeyPane(ids[(index + delta % ids.count + ids.count) % ids.count])
+    }
+
+    private func focusKeyPane(_ paneID: String) {
+        guard let deskID = keyDeskID, var desk = desks[deskID], desk.focusedID != paneID else { return }
+        noteFocusLeaving(deskID, desk.focusedID)
+        desk.focusedID = paneID
+        if desk.maximizedID != nil { desk.maximizedID = nil }
+        desks[deskID] = desk
+        controllers[deskID]?.sync(animated: true)
+    }
+
+    /// Trades places with the next pane in reading order, without touching the split sizes.
+    func swapWithNext(_ paneID: String? = nil) {
+        guard let deskID = paneID.flatMap({ deskID(containing: $0) }) ?? keyDeskID, var desk = desks[deskID] else { return }
+        let source = paneID ?? desk.focusedID
+        let ids = Layout.visualIDs(desk.layout)
+        guard ids.count > 1, let index = ids.firstIndex(of: source) else { return }
+        let target = ids[(index + 1) % ids.count]
+        let hold = UUID().uuidString
+        desk.layout = replace(replace(replace(desk.layout, source, with: hold), target, with: source), hold, with: target)
+        if desk.kind != .stack { desk.kind = .splits }
+        desk.focusedID = source
+        desks[deskID] = desk
+        controllers[deskID]?.sync(animated: true)
+        scheduleSave()
+    }
+
+    /// Pulls a pane out into its own window, as dragging it out by its grip does.
+    func moveToNewWindow(_ paneID: String? = nil) {
+        guard let deskID = paneID.flatMap({ deskID(containing: $0) }) ?? keyDeskID, let desk = desks[deskID] else { return }
+        let source = paneID ?? desk.focusedID
+        guard !desk.dropdown, Layout.count(desk.layout) > 1 else {
+            NSSound.beep()
+            controllers[deskID]?.flashLayout("This terminal already has its own window")
+            return
+        }
+        let frame = controllers[deskID]?.window?.frame ?? cascadedFrame()
+        let origin = CGPoint(x: frame.minX + 40, y: frame.maxY - 480)
+        detach(source, at: origin, cursor: CGPoint(x: frame.midX, y: frame.midY), from: deskID)
+    }
+
+    /// An empty name gives the title back to the shell.
+    func rename(_ paneID: String, to name: String?) {
+        let cleaned = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = (cleaned?.isEmpty ?? true) ? nil : cleaned
+        guard let deskID = deskID(containing: paneID), let pane = panes[paneID] else { return }
+        pane.customTitle = value
+        desks[deskID]?.panes[paneID]?.customTitle = value
+        refreshChrome(for: paneID)
+        scheduleSave()
     }
 
     func noteRemote(_ paneID: String, session: String?) {
@@ -962,6 +1042,7 @@ final class AppModel {
     private func makePane(_ state: PaneState, settings: Settings) {
         let pane = PaneController(id: state.id, cwd: state.cwd, command: state.command, settings: settings)
         pane.title = state.title
+        pane.customTitle = state.customTitle
         pane.resumeRemote = state.remoteSession
         panes[state.id] = pane
     }
