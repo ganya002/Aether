@@ -72,7 +72,11 @@ func (h *hub) person(token string) *person {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.people[token]
+	p := h.people[token]
+	if p != nil {
+		p.LastSeen = time.Now().Unix()
+	}
+	return p
 }
 
 func (h *hub) known(token string) bool {

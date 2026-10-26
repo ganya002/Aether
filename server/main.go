@@ -78,6 +78,7 @@ func main() {
 	if err := h.loadPeople(); err != nil {
 		log.Fatal(err)
 	}
+	go h.reapLoop()
 	if legacy := envOr("AETHER_LEGACY_LISTEN", defaultLegacyListen); legacy != "off" {
 		go h.serveLegacy(legacy)
 	}
@@ -317,7 +318,10 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"LANG=C.UTF-8",
 	}
+	// Each shell leads its own session and process group (pid == pgid), so
+	// closing it can take every job it started down with it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:     true,
 		Credential: &syscall.Credential{Uid: p.UID, Gid: p.GID},
 	}
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
@@ -337,6 +341,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 	go s.readLoop()
 	go func() {
 		_ = cmd.Wait()
+		killGroup(cmd.Process.Pid)
 		s.mu.Lock()
 		s.state = "done"
 		s.msg = "exited"
@@ -346,6 +351,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		h.mu.Lock()
 		delete(h.sessions, id)
 		h.mu.Unlock()
+		h.sweepUser(owner)
 	}()
 	return s, nil
 }
@@ -518,7 +524,7 @@ func (h *hub) close(id string) {
 	}
 	_ = s.master.Close()
 	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		killGroup(s.cmd.Process.Pid)
 	}
 	h.mu.Lock()
 	delete(h.sessions, id)

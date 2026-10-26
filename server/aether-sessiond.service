@@ -7,9 +7,20 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/aether-sessiond
 Restart=on-failure
 User=root
-WorkingDirectory=/var/lib/aether
+WorkingDirectory=-/var/lib/aether
 EnvironmentFile=-/etc/aether/public.env
+# Listens on loopback only; cloudflared publishes it. Uncomment to change.
+#Environment=AETHER_LISTEN=127.0.0.1:7392
+#Environment=AETHER_LEGACY_LISTEN=off
+# People with no terminals who stay away this long are removed (0 = never).
+#Environment=AETHER_PERSON_IDLE_DAYS=30
 NoNewPrivileges=true
+# Every Cloud shell runs inside this service, so these caps bound all of them
+# together and keep one person from starving the machine. Tune to the box.
+TasksMax=4096
+MemoryMax=85%
+LimitNOFILE=65536
+#CPUQuota=300%
 
 [Install]
 WantedBy=multi-user.target
