@@ -144,3 +144,16 @@ func TestEndedSessionClosesViewers(t *testing.T) {
 	}
 	s.unsubscribe(late)
 }
+
+func TestAskForgetsWaiterWhenTheMacIsGone(t *testing.T) {
+	h := &hub{
+		macLinks: map[string][]frameWriter{"tok": {&nullWriter{fail: true}}},
+		waiters:  map[string]chan map[string]any{},
+	}
+	if _, err := h.ask("tok", "/split", nil); err == nil {
+		t.Fatal("ask succeeded over a dead link")
+	}
+	if len(h.waiters) != 0 {
+		t.Fatalf("leaked %d waiters", len(h.waiters))
+	}
+}

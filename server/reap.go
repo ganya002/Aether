@@ -142,6 +142,7 @@ func (h *hub) reapLoop() {
 				removeUser(p)
 			}
 		}
+		h.pruneClaimMisses(time.Now())
 		time.Sleep(time.Hour)
 	}
 }

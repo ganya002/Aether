@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -314,7 +315,10 @@ func (h *hub) claimPair(code, ip string) (string, error) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cutoff := time.Now().Add(-10 * time.Minute)
+	if len(h.claimMiss) >= maxClaimMissIPs {
+		h.pruneClaimMissesLocked(time.Now())
+	}
+	cutoff := time.Now().Add(-claimWindow)
 	misses := h.claimMiss[ip][:0]
 	for _, at := range h.claimMiss[ip] {
 		if at.After(cutoff) {
@@ -332,8 +336,48 @@ func (h *hub) claimPair(code, ip string) (string, error) {
 		return "", errors.New("that code does not work")
 	}
 	delete(h.pairs, code)
-	h.claimMiss[ip] = misses
+	if len(misses) == 0 {
+		delete(h.claimMiss, ip)
+	} else {
+		h.claimMiss[ip] = misses
+	}
 	return ticket.token, nil
+}
+
+const (
+	claimWindow     = 10 * time.Minute
+	maxClaimMissIPs = 4096
+)
+
+func (h *hub) pruneClaimMisses(now time.Time) {
+	h.mu.Lock()
+	h.pruneClaimMissesLocked(now)
+	h.mu.Unlock()
+}
+
+// pruneClaimMissesLocked forgets addresses whose wrong guesses have aged out.
+// If a flood of fresh addresses still leaves too many, the quietest half go.
+func (h *hub) pruneClaimMissesLocked(now time.Time) {
+	cutoff := now.Add(-claimWindow)
+	for ip, times := range h.claimMiss {
+		if len(times) == 0 || !times[len(times)-1].After(cutoff) {
+			delete(h.claimMiss, ip)
+		}
+	}
+	if len(h.claimMiss) < maxClaimMissIPs {
+		return
+	}
+	ips := make([]string, 0, len(h.claimMiss))
+	for ip := range h.claimMiss {
+		ips = append(ips, ip)
+	}
+	sort.Slice(ips, func(i, j int) bool {
+		a, b := h.claimMiss[ips[i]], h.claimMiss[ips[j]]
+		return a[len(a)-1].Before(b[len(b)-1])
+	})
+	for _, ip := range ips[:len(ips)-maxClaimMissIPs/2] {
+		delete(h.claimMiss, ip)
+	}
 }
 
 // clientIP names the caller for rate limits. Forwarding headers are only

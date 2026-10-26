@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -173,5 +174,31 @@ func TestLoadPeopleRefusesDamagedFile(t *testing.T) {
 	again := &hub{}
 	if err := again.loadPeople(); err != nil || again.person("tok") == nil {
 		t.Fatalf("round trip: %v", err)
+	}
+}
+
+func TestClaimMissesStayBounded(t *testing.T) {
+	h := &hub{
+		people:    map[string]*person{},
+		pairs:     map[string]pairTicket{},
+		claimMiss: map[string][]time.Time{},
+	}
+	for i := 0; i < maxClaimMissIPs*3; i++ {
+		ip := "10." + strconv.Itoa(i/65536) + "." + strconv.Itoa(i/256%256) + "." + strconv.Itoa(i%256)
+		_, _ = h.claimPair("NOPE-NOPE", ip)
+	}
+	if len(h.claimMiss) > maxClaimMissIPs {
+		t.Fatalf("map grew to %d", len(h.claimMiss))
+	}
+	h.claimMiss["old"] = []time.Time{time.Now().Add(-time.Hour)}
+	h.pruneClaimMisses(time.Now())
+	if _, ok := h.claimMiss["old"]; ok {
+		t.Fatal("aged-out address kept")
+	}
+	for i := 0; i < 8; i++ {
+		_, _ = h.claimPair("NOPE-NOPE", "9.9.9.9")
+	}
+	if _, err := h.claimPair("NOPE-NOPE", "9.9.9.9"); err == nil || err.Error() != "too many wrong codes" {
+		t.Fatalf("guessing was not limited: %v", err)
 	}
 }

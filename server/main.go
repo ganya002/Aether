@@ -23,6 +23,9 @@ import (
 	"github.com/creack/pty"
 )
 
+// maxBody caps the JSON bodies the HTTP endpoints will read.
+const maxBody = 1 << 20
+
 const (
 	defaultListen       = "127.0.0.1:7392"
 	defaultLegacyListen = "127.0.0.1:7391"
@@ -110,6 +113,7 @@ type lockedConn struct {
 func (l *lockedConn) write(msg map[string]any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	_ = l.c.SetWriteDeadline(time.Now().Add(8 * time.Second))
 	return writeFrame(l.c, msg)
 }
 
@@ -706,6 +710,7 @@ func (h *hub) serveAPI(addr string) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		ip := clientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), r.Header.Get("CF-Connecting-IP"))
 		p, err := h.enrollSaved(ip)
 		if err != nil {
@@ -720,6 +725,7 @@ func (h *hub) serveAPI(addr string) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		code, exp, err := h.issuePair(token)
 		if err != nil {
@@ -774,6 +780,7 @@ func (h *hub) serveAPI(addr string) {
 			Session string         `json:"session"`
 			Body    map[string]any `json:"body"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -806,7 +813,11 @@ func (h *hub) serveAPI(addr string) {
 				Cwd     string `json:"cwd"`
 				Command string `json:"command"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
 			owner := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			s, err := h.create(owner, body.Cwd, 80, 24, body.Command)
 			if err != nil {
@@ -838,8 +849,9 @@ func (h *hub) serveAPI(addr string) {
 		}
 		if strings.HasSuffix(r.URL.Path, "/output") {
 			s.mu.Lock()
-			defer s.mu.Unlock()
-			_, _ = w.Write(s.scroll)
+			scroll := append([]byte(nil), s.scroll...)
+			s.mu.Unlock()
+			_, _ = w.Write(scroll)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/input") && r.Method == http.MethodPost {
@@ -883,6 +895,9 @@ func (h *hub) ask(owner, path string, body map[string]any) (map[string]any, erro
 		return nil, errors.New("the Mac that owns this session is not connected")
 	}
 	if err := link.write(map[string]any{"type": "agent", "id": id, "path": path, "body": body}); err != nil {
+		h.mu.Lock()
+		delete(h.waiters, id)
+		h.mu.Unlock()
 		return nil, err
 	}
 	select {
