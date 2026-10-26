@@ -20,6 +20,7 @@
         <form id="claim-form" class="claim" method="post" action="#claim">
           <input id="code" name="code" aria-label="Use a code" placeholder="Use a code" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
           <button type="submit" class="text-btn">Use a code</button>
+          <button type="button" class="text-btn" id="pair-keep" hidden>Keep the current account</button>
         </form>
         <p id="gate-note" class="note" role="status"></p>
         <noscript><p class="note">This page needs JavaScript to open a terminal.</p></noscript>
@@ -49,6 +50,12 @@
         <p id="desk-note" class="note" role="status"></p>
 
         <div id="stage" class="stage">
+          <div id="offline" class="offline" hidden>
+            <div class="offline-card" role="status" aria-live="polite">
+              <p id="offline-text" class="offline-text">Reconnecting…</p>
+              <button type="button" class="text-btn" id="retry">Retry now</button>
+            </div>
+          </div>
           <textarea id="keysink" class="keysink" tabindex="-1" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Terminal input" enterkeyhint="send"></textarea>
         </div>
 

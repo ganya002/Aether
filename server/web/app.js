@@ -3,6 +3,9 @@
 
   const TOKEN_KEY = "aether-cloud-token";
   const BACKOFF = [400, 1000, 2000, 4000, 5000];
+  const PING_EVERY = 20000;
+  const PONG_WAIT = 8000;
+  const QUEUE_LIMIT = 4096;
   const KEYS = {
     esc: "\x1b",
     tab: "\t",
@@ -36,6 +39,10 @@
   const newButton = document.getElementById("new-terminal");
   const pairButton = document.getElementById("pair");
   const signOutButton = document.getElementById("sign-out");
+  const pairKeep = document.getElementById("pair-keep");
+  const offline = document.getElementById("offline");
+  const offlineText = document.getElementById("offline-text");
+  const retryButton = document.getElementById("retry");
 
   const narrowQuery = window.matchMedia("(max-width: 720px)");
   const coarseQuery = window.matchMedia("(pointer: coarse), (hover: none)");
@@ -57,7 +64,12 @@
   let ctrlSticky = false;
   let sinkSent = false;
   let composing = false;
+  let pingTimer = 0;
+  let pongTimer = 0;
+  let queuedBytes = 0;
+  let queueFull = false;
   const pendingCreates = [];
+  const queuedInput = [];
 
   function fontSize() {
     return narrowQuery.matches ? 13 : 14;
@@ -238,7 +250,37 @@
   function sendInput(id, text) {
     if (!id || text == null || text === "") return;
     const bytes = new TextEncoder().encode(text);
-    send({ type: "input", id, data: bytesToBase64(bytes) });
+    if (ready && send({ type: "input", id, data: bytesToBase64(bytes) })) return;
+    // Hold keystrokes while the link is down and send them once it is back.
+    if (queuedBytes + bytes.length > QUEUE_LIMIT) {
+      queueFull = true;
+      paintOffline();
+      return;
+    }
+    queuedBytes += bytes.length;
+    queuedInput.push({ id, bytes });
+    paintOffline();
+  }
+
+  function flushInput() {
+    const items = queuedInput.splice(0);
+    queuedBytes = 0;
+    queueFull = false;
+    for (const item of items) {
+      const session = sessions.get(item.id);
+      if (!session || session.exited) continue;
+      send({ type: "input", id: item.id, data: bytesToBase64(item.bytes) });
+    }
+  }
+
+  function paintOffline() {
+    const down = !desk.hidden && !ready && !!localStorage.getItem(TOKEN_KEY);
+    offline.hidden = !down;
+    if (!down) return;
+    let text = attempt === 0 ? "Connecting…" : "Reconnecting…";
+    if (queueFull) text += " Typing is paused until the connection is back.";
+    else if (queuedBytes) text += " What you type will be sent when it's back.";
+    offlineText.textContent = text;
   }
 
   function sendResize(session, size) {
@@ -336,6 +378,9 @@
         });
         close.addEventListener("click", (event) => {
           event.stopPropagation();
+          const current = sessions.get(id);
+          const busy = current && !current.exited && (current.state === "working" || current.state === "blocked");
+          if (busy && !window.confirm("“" + (current.title || "Terminal") + "” is still working. Close it anyway?")) return;
           send({ type: "close", id });
         });
         row.append(open, close);
@@ -490,12 +535,16 @@
     attempt = 0;
     setLink("");
     setNote("");
+    paintOffline();
     send({ type: "list" });
-    if (!visibleId) return;
-    const session = sessions.get(visibleId);
-    if (!session || session.exited) return;
-    session.attached = false;
-    attach(visibleId, true);
+    if (visibleId) {
+      const session = sessions.get(visibleId);
+      if (session && !session.exited) {
+        session.attached = false;
+        attach(visibleId, true);
+      }
+    }
+    flushInput();
   }
 
   function handleMessage(msg) {
@@ -511,6 +560,11 @@
     }
     if (msg.type === "helloOk") {
       onHello();
+      return;
+    }
+    if (msg.type === "pong") {
+      clearTimeout(pongTimer);
+      pongTimer = 0;
       return;
     }
     if (!ready) return;
@@ -541,6 +595,9 @@
     ready = false;
     attempt = 0;
     pendingCreates.length = 0;
+    queuedInput.length = 0;
+    queuedBytes = 0;
+    queueFull = false;
     ctrlSticky = false;
     paintCtrl();
     if (probe) {
@@ -555,6 +612,7 @@
   function signOut(message) {
     generation += 1;
     clearTimeout(reconnectTimer);
+    stopHeartbeat();
     localStorage.removeItem(TOKEN_KEY);
     const ws = socket;
     socket = null;
@@ -566,6 +624,68 @@
     }
     wipe();
     showGate(message || "");
+    paintOffline();
+  }
+
+  function stopHeartbeat() {
+    clearInterval(pingTimer);
+    clearTimeout(pongTimer);
+    pingTimer = 0;
+    pongTimer = 0;
+  }
+
+  // ping asks the server for a pong; a socket that stays quiet is treated as
+  // dead even if the browser still thinks it is open, which is what happens
+  // after sleep or a network change.
+  function ping() {
+    if (!ready || pongTimer) return;
+    if (!send({ type: "ping" })) return;
+    const ws = socket;
+    pongTimer = setTimeout(() => {
+      pongTimer = 0;
+      if (ws && socket === ws) drop(ws);
+    }, PONG_WAIT);
+  }
+
+  function drop(ws) {
+    if (socket !== ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    try { ws.close(); } catch (err) { /* already closed */ }
+    lost(ws, generation);
+  }
+
+  function lost(ws, gen) {
+    if (gen !== generation) return;
+    if (socket === ws) socket = null;
+    stopHeartbeat();
+    ready = false;
+    pendingCreates.length = 0;
+    for (const session of sessions.values()) session.attached = false;
+    const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
+    attempt += 1;
+    setLink("Reconnecting");
+    paintOffline();
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+      if (gen !== generation) return;
+      connect();
+    }, delay);
+  }
+
+  // reconnectNow skips the backoff when the page comes back into view or the
+  // network returns, and checks that an open socket is really alive.
+  function reconnectNow() {
+    if (!localStorage.getItem(TOKEN_KEY) || desk.hidden) return;
+    if (socket && socket.readyState === WebSocket.OPEN && ready) {
+      ping();
+      return;
+    }
+    if (socket && socket.readyState === WebSocket.CONNECTING) return;
+    clearTimeout(reconnectTimer);
+    connect();
   }
 
   function connect() {
@@ -581,9 +701,10 @@
     ready = false;
     setLink(attempt === 0 ? "Connecting" : "Reconnecting");
     showDesk();
+    paintOffline();
     const helloTimer = setTimeout(() => {
       if (gen !== generation || ready) return;
-      try { ws.close(); } catch (err) { /* already closed */ }
+      drop(ws);
     }, 8000);
     ws.onopen = () => {
       if (gen !== generation) return;
@@ -603,7 +724,11 @@
       } catch (err) {
         return;
       }
-      if (msg && msg.type === "helloOk") clearTimeout(helloTimer);
+      if (msg && msg.type === "helloOk") {
+        clearTimeout(helloTimer);
+        stopHeartbeat();
+        pingTimer = setInterval(ping, PING_EVERY);
+      }
       handleMessage(msg);
     };
     ws.onerror = () => {
@@ -611,18 +736,7 @@
     };
     ws.onclose = () => {
       clearTimeout(helloTimer);
-      if (gen !== generation) return;
-      if (socket === ws) socket = null;
-      ready = false;
-      pendingCreates.length = 0;
-      for (const session of sessions.values()) session.attached = false;
-      const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
-      attempt += 1;
-      setLink("Reconnecting");
-      reconnectTimer = setTimeout(() => {
-        if (gen !== generation) return;
-        connect();
-      }, delay);
+      lost(ws, gen);
     };
   }
 
@@ -857,16 +971,52 @@
   }
 
   function claim(code) {
-    return runAction(claimForm.querySelector("button"), async () => {
+    if (localStorage.getItem(TOKEN_KEY) && !window.confirm("This will replace the account on this device. Its terminals can only be reached again with a code from another device that is still signed in.")) {
+      return Promise.resolve();
+    }
+    return runAction(claimForm.querySelector("button[type=submit]"), async () => {
       setNote("Checking the code");
       const data = await postJSON("/claim", { code });
+      leaveCurrent();
       storeToken(data);
       stripPair();
+      pairKeep.hidden = true;
+      enrollForm.hidden = false;
+      codeInput.value = "";
       setNote("");
       connect();
-    }).then(() => {
-      stripPair();
     });
+  }
+
+  // leaveCurrent drops the live connection before another account moves in.
+  function leaveCurrent() {
+    if (!socket && !sessions.size) return;
+    generation += 1;
+    clearTimeout(reconnectTimer);
+    stopHeartbeat();
+    const ws = socket;
+    socket = null;
+    if (ws) {
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      try { ws.close(); } catch (err) { /* already closed */ }
+    }
+    wipe();
+  }
+
+  // offerPair fills in a code from a ?pair= link but waits for a click, so a
+  // link alone can never sign this device in or swap out its account.
+  function offerPair(code) {
+    codeInput.value = code;
+    const signedIn = !!localStorage.getItem(TOKEN_KEY);
+    pairKeep.hidden = !signedIn;
+    enrollForm.hidden = signedIn;
+    showGate(signedIn
+      ? "A link wants to sign this device in to another account. Using it will replace the account on this device."
+      : "Press Use a code to sign in with this link.");
+    claimForm.querySelector("button[type=submit]").focus();
   }
 
   enrollForm.addEventListener("submit", (event) => {
@@ -925,7 +1075,35 @@
     }
   });
 
-  signOutButton.addEventListener("click", () => signOut(""));
+  signOutButton.addEventListener("click", () => {
+    if (!window.confirm("Sign out on this device? Your terminals keep running, but you'll need a code from another signed-in device to get back to them.")) return;
+    signOut("");
+  });
+
+  pairKeep.addEventListener("click", () => {
+    stripPair();
+    pairKeep.hidden = true;
+    enrollForm.hidden = false;
+    codeInput.value = "";
+    setNote("");
+    connect();
+  });
+
+  retryButton.addEventListener("click", () => {
+    if (socket && !ready) drop(socket);
+    attempt = 0;
+    clearTimeout(reconnectTimer);
+    connect();
+    focusSurface();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") reconnectNow();
+  });
+  window.addEventListener("online", reconnectNow);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) reconnectNow();
+  });
 
   keybar.addEventListener("pointerdown", (event) => {
     if (event.target.closest("button")) event.preventDefault();
@@ -1012,7 +1190,7 @@
 
   layoutChrome();
   const pair = new URLSearchParams(location.search).get("pair");
-  if (pair && pair.trim()) claim(pair.trim());
+  if (pair && pair.trim()) offerPair(pair.trim());
   else if (localStorage.getItem(TOKEN_KEY)) connect();
   else showGate("");
 })();

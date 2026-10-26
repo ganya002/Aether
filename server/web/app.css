@@ -345,6 +345,35 @@ button:disabled {
   min-height: 0;
 }
 
+.offline {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(10, 14, 16, 0.55);
+  pointer-events: none;
+}
+
+.offline-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(16, 20, 22, 0.92);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.offline-text {
+  margin: 0;
+  font-size: 14px;
+}
+
 .term-host {
   display: none;
   position: absolute;
@@ -464,7 +493,7 @@ button:disabled {
   }
 
   .rail-actions {
-    order: 0;
+    order: 3;
     flex-direction: row;
   }
 
