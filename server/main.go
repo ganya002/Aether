@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -39,8 +40,11 @@ func envOr(key, fallback string) string {
 }
 
 type session struct {
-	id     string
-	owner  string
+	id    string
+	owner string
+	// token is handed to the shell as AETHER_TOKEN so the aether command can
+	// reach /agent for this one session without the person's own token.
+	token  string
 	cmd    *exec.Cmd
 	master *os.File
 	mu     sync.Mutex
@@ -311,6 +315,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 	}
 	cmd.Dir = dir
 	id := newID()
+	token := newSecret()
 	cmd.Env = []string{
 		"HOME=" + p.Home,
 		"USER=" + p.User,
@@ -319,6 +324,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		"TERM=xterm-256color",
 		"TERM_PROGRAM=Aether",
 		"AETHER_SESSION=" + id,
+		"AETHER_TOKEN=" + token,
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"LANG=C.UTF-8",
 	}
@@ -336,7 +342,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		_ = exec.Command("prlimit", "--pid", strconv.Itoa(cmd.Process.Pid), "--nproc=128", "--nofile=4096").Run()
 	}
 	s := &session{
-		id: id, owner: owner, cmd: cmd, master: master, cols: cols, rows: rows, cwd: dir,
+		id: id, owner: owner, token: token, cmd: cmd, master: master, cols: cols, rows: rows, cwd: dir,
 		title: "shell", state: "idle", subs: map[*subscriber]struct{}{},
 	}
 	h.mu.Lock()
@@ -685,6 +691,12 @@ func intNum(msg map[string]any, key string) int {
 	}
 }
 
+func newSecret() string {
+	buf := make([]byte, 24)
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
+
 func newID() string {
 	buf := make([]byte, 8)
 	_, _ = rand.Read(buf)
@@ -770,11 +782,7 @@ func (h *hub) serveAPI(addr string) {
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 			return
 		}
-		owner := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !h.known(owner) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		var body struct {
 			Path    string         `json:"path"`
 			Session string         `json:"session"`
@@ -785,9 +793,9 @@ func (h *hub) serveAPI(addr string) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		s := h.get(body.Session)
-		if s == nil || !h.allows(owner, s) {
-			http.Error(w, "missing", http.StatusNotFound)
+		s := h.agentSession(token, body.Session)
+		if s == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		res, err := h.ask(s.owner, body.Path, body.Body)
@@ -871,6 +879,25 @@ func (h *hub) serveAPI(addr string) {
 	log.Printf("agent api on %s", addr)
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(srv.ListenAndServe())
+}
+
+// agentSession returns the session an /agent call may act for: the one whose
+// own token it carries, or any of the caller's sessions for a person token.
+func (h *hub) agentSession(token, id string) *session {
+	if token == "" {
+		return nil
+	}
+	s := h.get(id)
+	if s == nil {
+		return nil
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1 {
+		return s
+	}
+	if h.known(token) && h.allows(token, s) {
+		return s
+	}
+	return nil
 }
 
 func (h *hub) authorized(r *http.Request) bool {

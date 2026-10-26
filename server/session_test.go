@@ -157,3 +157,31 @@ func TestAskForgetsWaiterWhenTheMacIsGone(t *testing.T) {
 		t.Fatalf("leaked %d waiters", len(h.waiters))
 	}
 }
+
+func TestSessionTokenOnlyOpensItsOwnSession(t *testing.T) {
+	mine := &session{id: "a", owner: "alice", token: newSecret()}
+	other := &session{id: "b", owner: "alice", token: newSecret()}
+	bobs := &session{id: "c", owner: "bob", token: newSecret()}
+	h := &hub{
+		people:   map[string]*person{"alice": {Token: "alice"}, "bob": {Token: "bob"}},
+		sessions: map[string]*session{"a": mine, "b": other, "c": bobs},
+	}
+	if h.agentSession(mine.token, "a") != mine {
+		t.Fatal("session token refused for its own session")
+	}
+	if h.agentSession(mine.token, "b") != nil {
+		t.Fatal("session token opened a sibling session")
+	}
+	if h.agentSession(mine.token, "c") != nil {
+		t.Fatal("session token opened someone else's session")
+	}
+	if h.known(mine.token) {
+		t.Fatal("session token works as a person token")
+	}
+	if h.agentSession("alice", "b") != other || h.agentSession("alice", "c") != nil {
+		t.Fatal("person token rules changed")
+	}
+	if h.agentSession("", "a") != nil {
+		t.Fatal("empty token accepted")
+	}
+}
