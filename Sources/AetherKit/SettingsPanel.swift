@@ -21,6 +21,11 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
     private let dropdown = NSButton(checkboxWithTitle: "Dropdown terminal    ⌃⌘`", target: nil, action: nil)
     private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
     private let updates = NSButton(checkboxWithTitle: "Look for updates in the background", target: nil, action: nil)
+    private let hotkeyTaken = NSTextField(labelWithString: "This shortcut is used by another app.")
+    private let confirmClose = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let optionKey = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let shellExit = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let pasteWarning = NSButton(checkboxWithTitle: "Ask before pasting several lines", target: nil, action: nil)
     private let tabs = NSSegmentedControl(labels: ["Look", "Window", "Terminal", "Cloud", "Updates"], trackingMode: .selectOne, target: nil, action: nil)
     private var pages: [NSStackView] = []
     private let updateStatus = NSTextField(labelWithString: "")
@@ -85,11 +90,22 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         add(sliderRow("Gap", gap, gapValue, min: 4, max: 22), to: windowPage)
         add(snap, to: windowPage)
         add(dropdown, to: windowPage)
+        hotkeyTaken.font = .systemFont(ofSize: 11)
+        hotkeyTaken.textColor = .systemOrange
+        add(hotkeyTaken, to: windowPage)
         add(dock, to: windowPage)
 
         let terminalPage = page()
         add(notify, to: terminalPage)
         add(note("A finished command in a pane you are not looking at can post a notification."), to: terminalPage)
+        confirmClose.addItems(withTitles: ConfirmClose.allCases.map(\.title))
+        optionKey.addItems(withTitles: OptionKey.allCases.map(\.title))
+        shellExit.addItems(withTitles: ShellExit.allCases.map(\.title))
+        add(labeled("Confirm close", confirmClose), to: terminalPage)
+        add(labeled("Option key", optionKey), to: terminalPage)
+        add(labeled("Shell exits", shellExit), to: terminalPage)
+        add(note("A shell that exits cleanly closes its terminal. A command, or an error, keeps it open with Restart."), to: terminalPage)
+        add(pasteWarning, to: terminalPage)
 
         let cloudPage = page()
         add(sessionWhere, to: cloudPage)
@@ -170,7 +186,12 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             control.action = #selector(changed)
             control.segmentDistribution = .fillEqually
         }
-        for box in [snap, notify, dropdown, dock, updates] {
+        for popup in [confirmClose, optionKey, shellExit] {
+            popup.target = self
+            popup.action = #selector(changed)
+            popup.font = .systemFont(ofSize: 13)
+        }
+        for box in [snap, notify, dropdown, dock, updates, pasteWarning] {
             box.target = self
             box.action = #selector(changed)
             box.font = .systemFont(ofSize: 13)
@@ -282,11 +303,15 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         paintValues()
         let wantsCloud = sessionWhere.selectedSegment == 1
         let switched = wantsCloud != cloudChosen
+        let wasNotifying = AppModel.shared.settings.notifyOnFinish
         AppModel.shared.updateSettings { settings in
             settings.shade = shade.doubleValue
             settings.cornerRadius = radius.doubleValue
             settings.gap = gap.doubleValue
-            settings.fontSize = font.doubleValue
+            if abs(settings.fontSize - font.doubleValue) > 0.01 {
+                settings.fontSize = font.doubleValue
+                settings.baseFontSize = font.doubleValue
+            }
             settings.glass = GlassStyle.allCases[glass.selectedSegment]
             settings.text = TextTone.allCases[text.selectedSegment]
             settings.focusRest = FocusRest.allCases[rest.selectedSegment]
@@ -296,6 +321,10 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             settings.checkForUpdates = updates.state == .on
             settings.dropdownEnabled = dropdown.state == .on
             settings.hideDockIcon = dock.state == .on
+            settings.confirmClose = ConfirmClose.allCases[max(0, confirmClose.indexOfSelectedItem)]
+            settings.optionKey = OptionKey.allCases[max(0, optionKey.indexOfSelectedItem)]
+            settings.shellExit = ShellExit.allCases[max(0, shellExit.indexOfSelectedItem)]
+            settings.warnMultilinePaste = pasteWarning.state == .on
             if switched && !wantsCloud {
                 settings.sessionHost = ""
                 settings.sessionToken = ""
@@ -303,6 +332,10 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             }
         }
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
+        if !wasNotifying, AppModel.shared.settings.notifyOnFinish {
+            FinishNotifier.requestPermission()
+        }
+        hotkeyTaken.isHidden = !(AppModel.shared.settings.dropdownEnabled && HotkeyCenter.takenByAnotherApp)
         guard switched else { return }
         cloudChosen = wantsCloud
         if wantsCloud {
@@ -388,6 +421,11 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         notify.state = settings.notifyOnFinish ? .on : .off
         dropdown.state = settings.dropdownEnabled ? .on : .off
         dock.state = settings.hideDockIcon ? .on : .off
+        confirmClose.selectItem(at: ConfirmClose.allCases.firstIndex(of: settings.confirmClose) ?? 0)
+        optionKey.selectItem(at: OptionKey.allCases.firstIndex(of: settings.optionKey) ?? 0)
+        shellExit.selectItem(at: ShellExit.allCases.firstIndex(of: settings.shellExit) ?? 0)
+        pasteWarning.state = settings.warnMultilinePaste ? .on : .off
+        hotkeyTaken.isHidden = !(settings.dropdownEnabled && HotkeyCenter.takenByAnotherApp)
         dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
         sessionWhere.selectedSegment = settings.sessionHost.isEmpty ? 0 : 1
         cloudChosen = sessionWhere.selectedSegment == 1

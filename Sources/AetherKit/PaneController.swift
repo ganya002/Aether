@@ -10,12 +10,21 @@ final class AetherTerminal: LocalProcessTerminalView {
     var onUserInput: ((ArraySlice<UInt8>) -> Void)?
     var onFocus: (() -> Void)?
     var onStatus: ((String, String) -> Void)?
+    /// Keys typed while the shell is gone. Returning true swallows them.
+    var onExitedKey: ((ArraySlice<UInt8>) -> Bool)?
     var remoteSession: String?
     var workingDirectory: () -> String = { System.home() }
+    var optionMode: OptionKey = .characters
+    var warnMultilinePaste = true
+    /// True while SwiftTerm answers the program itself (cursor reports, color queries, mouse and focus reports).
+    /// Those replies are not typing, so they never reach broadcast.
+    private var replying = false
+    private static var optionMonitor: Any?
 
     override init(frame: CGRect, font: NSFont?, options: TerminalOptions) {
         super.init(frame: frame, font: font, options: options)
-        registerForDraggedTypes([.fileURL, .png, .tiff])
+        Self.installOptionMonitor()
+        registerForDraggedTypes([.fileURL, .URL, .string, .png, .tiff])
         terminal.registerOscHandler(code: 7501) { [weak self] data in
             let body = String(bytes: data, encoding: .utf8) ?? ""
             DispatchQueue.main.async {
@@ -30,7 +39,7 @@ final class AetherTerminal: LocalProcessTerminalView {
         if body == "?" || body.hasPrefix("?:") {
             guard remoteSession == nil else { return }
             let reply = "\u{1b}]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\u{1b}\\"
-            send(source: self, data: ArraySlice(Array(reply.utf8)))
+            deliver(ArraySlice(Array(reply.utf8)))
             return
         }
         var state = ""
@@ -52,9 +61,10 @@ final class AetherTerminal: LocalProcessTerminalView {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         let board = sender.draggingPasteboard
-        let hasFile = board.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        let hasURL = board.canReadObject(forClasses: [NSURL.self])
+        let hasText = board.canReadObject(forClasses: [NSString.self])
         let hasImage = board.canReadObject(forClasses: [NSImage.self])
-        return (hasFile || hasImage) ? .copy : []
+        return (hasURL || hasText || hasImage) ? .copy : []
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -62,22 +72,48 @@ final class AetherTerminal: LocalProcessTerminalView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let paths = dropPaths(from: sender.draggingPasteboard)
-        guard !paths.isEmpty else { return false }
+        guard let text = dropText(from: sender.draggingPasteboard), !text.isEmpty else { return false }
         window?.makeFirstResponder(self)
-        insertText(paths.map(ShellPath.quote).joined(separator: " "), replacementRange: NSRange(location: 0, length: 0))
+        insertPasted(text)
         return true
     }
 
-    private func dropPaths(from pasteboard: NSPasteboard) -> [String] {
+    /// Paths and links come quoted with a trailing space, ready for the next word. Plain text goes in as is.
+    private func dropText(from pasteboard: NSPasteboard) -> String? {
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-            return urls.map(\.path)
+            return urls.map { ShellPath.quote($0.path) }.joined(separator: " ") + " "
         }
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
-            return urls.map { $0.isFileURL ? $0.path : $0.absoluteString }
+            return urls.map { ShellPath.quote($0.isFileURL ? $0.path : $0.absoluteString) }.joined(separator: " ") + " "
         }
-        guard let image = NSImage(pasteboard: pasteboard), let path = Self.stash(image) else { return [] }
-        return [path]
+        if let image = NSImage(pasteboard: pasteboard), let path = Self.stash(image) {
+            return ShellPath.quote(path) + " "
+        }
+        return pasteboard.string(forType: .string)
+    }
+
+    /// Text that arrives all at once, like a drop or Insert Path. A shell in bracketed paste mode
+    /// then treats it as one paste instead of running any newline inside it.
+    func insertPasted(_ text: String) {
+        if terminal.bracketedPasteMode {
+            send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
+        } else {
+            insertText(text, replacementRange: NSRange(location: 0, length: 0))
+        }
+    }
+
+    /// Drops of pictures are saved to temporary files. Anything older than a day is gone by the next launch.
+    static func cleanDropStash() {
+        let folder = FileManager.default.temporaryDirectory
+        let cutoff = Date().addingTimeInterval(-86_400)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
+        for name in names where name.hasPrefix("Aether-drop-") && name.hasSuffix(".png") {
+            let url = folder.appendingPathComponent(name)
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if modified < cutoff {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
     }
 
     private static func stash(_ image: NSImage) -> String? {
@@ -92,14 +128,99 @@ final class AetherTerminal: LocalProcessTerminalView {
         }
     }
 
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        replying = true
+        defer { replying = false }
+        super.send(source: source, data: data)
+    }
+
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        if let remoteSession {
-            SessionHub.shared.input(remoteSession, data: Data(data))
-            onUserInput?(data)
+        if replying {
+            deliver(data)
             return
         }
-        super.send(source: source, data: data)
+        if let onExitedKey, onExitedKey(data) { return }
+        deliver(data)
         onUserInput?(data)
+    }
+
+    /// The pane's own way to the shell, local or Cloud, without counting as typing.
+    func deliver(_ data: ArraySlice<UInt8>) {
+        if let remoteSession {
+            SessionHub.shared.input(remoteSession, data: Data(data))
+            return
+        }
+        super.send(source: self, data: data)
+    }
+
+    override func interpretKeyEvents(_ eventArray: [NSEvent]) {
+        var rest: [NSEvent] = []
+        for event in eventArray {
+            if event.type == .keyDown, !hasMarkedText(),
+               let bytes = EditingKeys.sequence(keyCode: event.keyCode, flags: event.modifierFlags, optionIsMeta: optionAsMetaKey) {
+                send(bytes)
+            } else {
+                rest.append(event)
+            }
+        }
+        if !rest.isEmpty {
+            super.interpretKeyEvents(rest)
+        }
+    }
+
+    /// SwiftTerm reads `optionAsMetaKey` once per key. For "Left Option is Meta" it is set just before each key
+    /// from the device bits, 0x20 for the left Option key.
+    private static func installOptionMonitor() {
+        guard optionMonitor == nil else { return }
+        optionMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+            MainActor.assumeIsolated {
+                guard let terminal = event.window?.firstResponder as? AetherTerminal, terminal.optionMode == .leftMeta else { return }
+                let left = event.modifierFlags.rawValue & 0x20 != 0
+                terminal.optionAsMetaKey = event.modifierFlags.contains(.option) && left
+            }
+            return event
+        }
+    }
+
+    private func pasteAnyway(_ sender: Any) {
+        super.paste(sender)
+    }
+
+    override func paste(_ sender: Any) {
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        guard PasteGuard.shouldWarn(text, bracketed: terminal.bracketedPasteMode, enabled: warnMultilinePaste), let window else {
+            super.paste(sender)
+            return
+        }
+        let lines = PasteGuard.lineCount(text)
+        let alert = NSAlert()
+        alert.messageText = lines == 1 ? "Paste a line that ends in Return?" : "Paste \(lines) lines?"
+        let preview = text.trimmingCharacters(in: .newlines)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .prefix(5)
+            .map { $0.count > 80 ? String($0.prefix(79)) + "…" : String($0) }
+            .joined(separator: "\n")
+        alert.informativeText = "The shell runs each line as it arrives.\n\n" + preview + (lines > 5 ? "\n…" : "")
+        alert.addButton(withTitle: "Paste")
+        alert.addButton(withTitle: "Paste as One Line")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't ask again"
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if alert.suppressionButton?.state == .on {
+                AppModel.shared.updateSettings { $0.warnMultilinePaste = false }
+            }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.pasteAnyway(sender)
+            case .alertSecondButtonReturn:
+                self.insertText(PasteGuard.oneLine(text), replacementRange: NSRange(location: 0, length: 0))
+            default:
+                break
+            }
+            self.window?.makeFirstResponder(self)
+        }
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -185,6 +306,8 @@ final class PaneChrome: NSView {
     private var appliedRest: FocusRest?
     private var appliedTone: TextTone?
     private var appliedBlur: Double = -1
+    private var appliedBroadcast = false
+    private static let broadcastColor = NSColor(srgbRed: 0.99, green: 0.66, blue: 0.2, alpha: 0.95)
 
     init(paneID: String, font: NSFont) {
         self.paneID = paneID
@@ -282,10 +405,14 @@ final class PaneChrome: NSView {
 
     func setFocused(_ focused: Bool, settings: Settings) {
         let nextBlur = (!focused && settings.focusRest == .blur) ? settings.blurAmount : 0
-        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text, abs(appliedBlur - nextBlur) < 0.01 {
+        let broadcasting = AppModel.shared.isBroadcasting(pane: paneID)
+        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text, abs(appliedBlur - nextBlur) < 0.01,
+           appliedBroadcast == broadcasting {
             return
         }
-        let animate = appliedFocus != nil
+        let animate = appliedFocus != nil && appliedBroadcast == broadcasting
+        appliedBroadcast = broadcasting
+        header.setBroadcasting(broadcasting)
         appliedFocus = focused
         appliedRest = settings.focusRest
         appliedTone = settings.text
@@ -301,8 +428,13 @@ final class PaneChrome: NSView {
         } else {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            outline.layer?.borderWidth = focused ? 1.5 : 0
-            outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.62 : 0).cgColor
+            if broadcasting {
+                outline.layer?.borderWidth = focused ? 2.5 : 2
+                outline.layer?.borderColor = Self.broadcastColor.cgColor
+            } else {
+                outline.layer?.borderWidth = focused ? 1.5 : 0
+                outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.62 : 0).cgColor
+            }
             rest.alphaValue = dim
             CATransaction.commit()
         }
@@ -364,13 +496,13 @@ final class PaneChrome: NSView {
 
     private func animateBorder(_ focused: Bool) {
         guard let layer = outline.layer else { return }
-        let width: CGFloat = focused ? 1.5 : 1
+        let width: CGFloat = appliedBroadcast ? (focused ? 2.5 : 2) : (focused ? 1.5 : 1)
         // borderColor is a CGColor. Animating the presentation layer's color
         // releases a pointer the window server still owns, which crashes in
         // the next autorelease pool drain.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.borderColor = NSColor.white.withAlphaComponent(focused ? 0.55 : 0.2).cgColor
+        layer.borderColor = appliedBroadcast ? Self.broadcastColor.cgColor : NSColor.white.withAlphaComponent(focused ? 0.55 : 0.2).cgColor
         CATransaction.commit()
         let widthAnim = CABasicAnimation(keyPath: "borderWidth")
         widthAnim.fromValue = layer.presentation()?.borderWidth ?? layer.borderWidth
@@ -405,6 +537,12 @@ final class PaneChrome: NSView {
         needsLayout = true
     }
 
+    func showLastRan(_ command: String) {
+        exitBanner.isHidden = false
+        exitBanner.setLastRan(command)
+        needsLayout = true
+    }
+
     func hideExit() {
         exitBanner.isHidden = true
         needsLayout = true
@@ -421,6 +559,7 @@ final class PaneHeader: NSView {
     private var activity = ""
     private var activityState = ""
     private var cloudNote = ""
+    private var broadcasting = false
 
     private let titleField = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
@@ -480,6 +619,12 @@ final class PaneHeader: NSView {
         needsDisplay = true
     }
 
+    func setBroadcasting(_ on: Bool) {
+        guard broadcasting != on else { return }
+        broadcasting = on
+        needsDisplay = true
+    }
+
     func setActivity(state: String, message: String) {
         activityState = state
         activity = message
@@ -523,6 +668,19 @@ final class PaneHeader: NSView {
             color.setFill()
             NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
         }
+        var noteRight = bounds.width - 90
+        if broadcasting {
+            let pill = NSAttributedString(string: "Broadcasting", attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                .foregroundColor: NSColor.black.withAlphaComponent(0.85),
+            ])
+            let size = pill.size()
+            let frame = NSRect(x: bounds.width - 92 - size.width - 14, y: 9, width: size.width + 14, height: 16)
+            NSColor(srgbRed: 0.99, green: 0.66, blue: 0.2, alpha: 0.95).setFill()
+            NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8).fill()
+            pill.draw(at: NSPoint(x: frame.minX + 7, y: frame.minY + (frame.height - size.height) / 2))
+            noteRight = frame.minX - 6
+        }
         guard !cloudNote.isEmpty else { return }
         let style = NSMutableParagraphStyle()
         style.alignment = .right
@@ -532,7 +690,7 @@ final class PaneHeader: NSView {
             .foregroundColor: ink.withAlphaComponent(0.78),
             .paragraphStyle: style,
         ])
-        caption.draw(in: NSRect(x: 72, y: 11, width: max(40, bounds.width - 162), height: 14))
+        caption.draw(in: NSRect(x: 72, y: 11, width: max(40, noteRight - 72), height: 14))
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -572,8 +730,12 @@ final class PaneHeader: NSView {
 @MainActor
 final class ExitBanner: NSView {
     var onRestart: (() -> Void)?
-    private let label = NSTextField(labelWithString: "Process exited")
+    var onClose: (() -> Void)?
+    var onRunAgain: ((String) -> Void)?
+    private(set) var lastRan: String?
+    private let label = NSTextField(labelWithString: "Shell exited")
     private let button = NSButton()
+    private let closeButton = NSButton()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -582,36 +744,72 @@ final class ExitBanner: NSView {
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.textColor = .white
+        label.lineBreakMode = .byTruncatingMiddle
         label.translatesAutoresizingMaskIntoConstraints = true
         addSubview(label)
-        button.isBordered = false
-        button.title = "Restart"
-        button.contentTintColor = .white
-        button.font = .systemFont(ofSize: 12, weight: .semibold)
-        button.target = self
-        button.action = #selector(restart)
-        button.translatesAutoresizingMaskIntoConstraints = true
-        addSubview(button)
+        for (control, action) in [(button, #selector(primary)), (closeButton, #selector(secondary))] {
+            control.isBordered = false
+            control.contentTintColor = .white
+            control.font = .systemFont(ofSize: 12, weight: .semibold)
+            control.target = self
+            control.action = action
+            control.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(control)
+        }
+        closeButton.contentTintColor = NSColor.white.withAlphaComponent(0.75)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
     func setCode(_ code: Int32?) {
-        if let code {
-            label.stringValue = "Exited \(code)"
-        } else {
+        lastRan = nil
+        let failed: Bool
+        switch code {
+        case 0?:
+            label.stringValue = "Shell exited"
+            failed = false
+        case let code?:
+            label.stringValue = "Exited with code \(code)"
+            failed = true
+        case nil:
             label.stringValue = "Process stopped"
+            failed = true
         }
+        let tint = failed ? NSColor(srgbRed: 0.62, green: 0.12, blue: 0.12, alpha: 0.7) : NSColor.black.withAlphaComponent(0.45)
+        layer?.backgroundColor = tint.cgColor
+        button.title = "Restart ↩"
+        closeButton.title = "Close ⎋"
+        needsLayout = true
+    }
+
+    func setLastRan(_ command: String) {
+        lastRan = command
+        label.stringValue = "Last ran `\(command)`"
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        button.title = "Run Again"
+        closeButton.title = "Dismiss"
+        needsLayout = true
     }
 
     override func layout() {
-        label.frame = NSRect(x: 10, y: 4, width: max(0, bounds.width - 90), height: 20)
-        button.frame = NSRect(x: bounds.width - 74, y: 2, width: 66, height: 24)
+        let closeWidth = max(64, closeButton.intrinsicContentSize.width + 12)
+        let buttonWidth = max(74, button.intrinsicContentSize.width + 12)
+        closeButton.frame = NSRect(x: bounds.width - closeWidth - 6, y: 2, width: closeWidth, height: 24)
+        button.frame = NSRect(x: closeButton.frame.minX - buttonWidth, y: 2, width: buttonWidth, height: 24)
+        label.frame = NSRect(x: 10, y: 4, width: max(0, button.frame.minX - 16), height: 20)
     }
 
-    @objc private func restart() {
-        onRestart?()
+    @objc private func primary() {
+        if let lastRan {
+            onRunAgain?(lastRan)
+        } else {
+            onRestart?()
+        }
+    }
+
+    @objc private func secondary() {
+        onClose?()
     }
 }
 
@@ -683,6 +881,11 @@ final class PaneController {
     var cwd: String
     var title: String
     private var didShutdown = false
+    /// The shell is gone and the exit banner is up.
+    private(set) var exited = false
+    private(set) var lastExitCode: Int32?
+    /// Set once the shell reports its directory with OSC 7. Polling then leaves the directory alone.
+    private(set) var reportsDirectory = false
 
     var onUserInput: ((ArraySlice<UInt8>) -> Void)?
     var onFocus: (() -> Void)?
@@ -701,7 +904,6 @@ final class PaneController {
         let folder = URL(fileURLWithPath: cwd).lastPathComponent
         title = command?.split(separator: " ").first.map(String.init) ?? folder
         chrome = PaneChrome(paneID: id, font: PaneController.font(size: settings.fontSize))
-        chrome.terminal.optionAsMetaKey = false
         apply(settings)
         chrome.header.setCaption(caption, tone: settings.text)
         chrome.terminal.processDelegate = DelegateBridge.shared
@@ -719,6 +921,7 @@ final class PaneController {
 
     func launch() {
         if holdsPreview { return }
+        exited = false
         if !AppModel.shared.settings.sessionHost.isEmpty, !AppModel.shared.settings.sessionToken.isEmpty {
             launchRemote()
             return
@@ -774,6 +977,60 @@ final class PaneController {
         }
     }
 
+    /// Clears the screen and the scrollback and keeps the line the cursor is on, as ⌘K does in Terminal.app.
+    /// A shell sitting at its prompt also gets ⌃L, so it redraws the whole prompt with whatever was typed.
+    func clearBuffer() {
+        let view = chrome.terminal
+        guard let term = view.terminal else { return }
+        if term.isCurrentBufferAlternate {
+            term.clearScrollback()
+            return
+        }
+        let cursor = term.getCursorLocation()
+        var sequence = ""
+        if cursor.y > 0 { sequence += "\u{1b}[\(cursor.y)S" }
+        sequence += "\u{1b}[1;\(cursor.x + 1)H"
+        view.feed(text: sequence)
+        term.clearScrollback()
+        if view.remoteSession == nil, !exited, view.process.running, runningCommand() == nil {
+            view.deliver([0x0c][...])
+        }
+    }
+
+    /// What is running in the foreground, or nil for a shell waiting at its prompt.
+    /// Cloud panes report nil, since their processes live on the server.
+    func runningCommand() -> (name: String, line: String)? {
+        let view = chrome.terminal
+        guard view.remoteSession == nil, !exited, let process = view.process, process.running, process.shellPid > 0 else { return nil }
+        let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            let name = trimmed.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? trimmed
+            let line = trimmed.count > 40 ? String(trimmed.prefix(39)) + "…" : trimmed
+            return (URL(fileURLWithPath: name).lastPathComponent, line)
+        }
+        guard process.childfd >= 0 else { return nil }
+        let foreground = tcgetpgrp(process.childfd)
+        guard foreground > 0, foreground != process.shellPid else { return nil }
+        let name = System.processName(pid: foreground) ?? "A command"
+        return (name, System.commandLine(pid: foreground) ?? name)
+    }
+
+    /// A restored pane that last ran a command starts as a plain shell and offers to run it again.
+    func offerRerun(_ command: String) {
+        chrome.showLastRan(command)
+    }
+
+    private func runAgain(_ command: String) {
+        chrome.hideExit()
+        windowFocus()
+        chrome.terminal.send(txt: command + "\r")
+    }
+
+    nonisolated static func closesOnExit(code: Int32?, command: String?, settings: Settings) -> Bool {
+        let plain = command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        return settings.shellExit == .close && code == 0 && plain
+    }
+
     private func launchLocal() {
         let shell = System.userShell()
         let directory = FileManager.default.fileExists(atPath: cwd) ? cwd : System.home()
@@ -789,7 +1046,11 @@ final class PaneController {
             chrome.terminal.startProcess(executable: shell, args: ["-lc", trimmed], environment: environment, currentDirectory: directory)
         }
         chrome.header.setCloud("")
-        chrome.hideExit()
+        exited = false
+        reportsDirectory = false
+        if chrome.exitBanner.lastRan == nil {
+            chrome.hideExit()
+        }
     }
 
     func shutdown() {
@@ -813,6 +1074,9 @@ final class PaneController {
         chrome.setBodyShade(veil.withAlphaComponent(settings.shade))
         chrome.terminal.selectedTextBackgroundColor = foreground.withAlphaComponent(0.22)
         chrome.terminal.appearance = NSAppearance(named: settings.text == .light ? .darkAqua : .aqua)
+        chrome.terminal.optionMode = settings.optionKey
+        chrome.terminal.optionAsMetaKey = settings.optionKey == .meta
+        chrome.terminal.warnMultilinePaste = settings.warnMultilinePaste
         chrome.terminal.workingDirectory = { [weak self] in self?.cwd ?? System.home() }
         chrome.terminal.onStatus = { [weak self] state, message in
             self?.chrome.header.setActivity(state: state, message: message)
@@ -842,8 +1106,17 @@ final class PaneController {
         onDirectory?(directory)
     }
 
+    func noteReportedDirectory(_ directory: String) {
+        reportsDirectory = true
+        noteDirectory(directory)
+    }
+
     func noteExit(_ code: Int32?) {
-        chrome.showExit(code: code)
+        exited = true
+        lastExitCode = code
+        if !Self.closesOnExit(code: code, command: command, settings: AppModel.shared.settings) {
+            chrome.showExit(code: code)
+        }
         onExit?(code)
     }
 
@@ -853,7 +1126,23 @@ final class PaneController {
 
     private func wireChrome() {
         chrome.terminal.onUserInput = { [weak self] data in
-            self?.onUserInput?(data)
+            guard let self else { return }
+            if self.chrome.exitBanner.lastRan != nil, data.contains(13) {
+                self.chrome.hideExit()
+            }
+            self.onUserInput?(data)
+        }
+        chrome.terminal.onExitedKey = { [weak self] data in
+            guard let self, self.exited else { return false }
+            switch Array(data) {
+            case [13], Array("\u{1b}[13u".utf8):
+                self.onRestart?()
+            case [0x1b], Array("\u{1b}[27u".utf8):
+                self.onClose?()
+            default:
+                break
+            }
+            return true
         }
         chrome.terminal.onFocus = { [weak self] in
             self?.onFocus?()
@@ -876,6 +1165,17 @@ final class PaneController {
         chrome.exitBanner.onRestart = { [weak self] in
             self?.onRestart?()
         }
+        chrome.exitBanner.onClose = { [weak self] in
+            guard let self else { return }
+            if self.chrome.exitBanner.lastRan != nil {
+                self.chrome.hideExit()
+            } else {
+                self.onClose?()
+            }
+        }
+        chrome.exitBanner.onRunAgain = { [weak self] command in
+            self?.runAgain(command)
+        }
     }
 
     private func showFind() {
@@ -891,17 +1191,36 @@ final class PaneController {
         chrome.window?.makeFirstResponder(chrome.terminal)
     }
 
+    /// Variables a parent terminal or an earlier Aether left behind. They describe some other session.
+    static let inheritedNoise: Set<String> = [
+        "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID",
+        "ITERM_SESSION_ID", "ITERM_PROFILE", "LC_TERMINAL", "LC_TERMINAL_VERSION",
+        "KITTY_WINDOW_ID", "KITTY_PID", "WEZTERM_PANE", "WEZTERM_EXECUTABLE", "VTE_VERSION", "WT_SESSION",
+        "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR", "GHOSTTY_SHELL_FEATURES",
+        "SHLVL", "PWD", "OLDPWD", "_", "LINES", "COLUMNS", "INSIDE_EMACS", "TMUX", "TMUX_PANE", "STY",
+        "__CFBundleIdentifier", "XPC_SERVICE_NAME", "XPC_FLAGS",
+    ]
+
     static func shellEnvironment(pane: String) -> [String] {
-        var env = Terminal.getEnvironmentVariables(termName: "xterm-256color", trueColor: true)
         let current = ProcessInfo.processInfo.environment
-        for key in ["PATH", "HOME", "SSH_AUTH_SOCK"] {
-            guard let value = current[key] else { continue }
-            env.removeAll { $0.hasPrefix("\(key)=") }
+        var env: [String] = []
+        for (key, value) in current.sorted(by: { $0.key < $1.key }) {
+            if inheritedNoise.contains(key) || key.hasPrefix("AETHER_") { continue }
             env.append("\(key)=\(value)")
         }
-        if let lang = current["LANG"], lang.uppercased().contains("UTF-8") {
-            env.removeAll { $0.hasPrefix("LANG=") }
-            env.append("LANG=\(lang)")
+        env.append("TERM=xterm-256color")
+        env.append("COLORTERM=truecolor")
+        if current["SHELL"] == nil {
+            env.append("SHELL=\(System.userShell())")
+        }
+        if current["TMPDIR"] == nil {
+            env.append("TMPDIR=\(NSTemporaryDirectory())")
+        }
+        if current["HOME"] == nil {
+            env.append("HOME=\(System.home())")
+        }
+        if current["LANG"] == nil, current["LC_ALL"] == nil, current["LC_CTYPE"] == nil {
+            env.append("LANG=en_US.UTF-8")
         }
         env.append("TERM_PROGRAM=Aether")
         env.append("AETHER_PANE=\(pane)")
@@ -961,7 +1280,7 @@ final class DelegateBridge: NSObject, LocalProcessTerminalViewDelegate {
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 guard let terminal = source as? AetherTerminal else { return }
-                DelegateBridge.shared.pane(for: terminal)?.noteDirectory(directory)
+                DelegateBridge.shared.pane(for: terminal)?.noteReportedDirectory(directory)
             }
         }
     }

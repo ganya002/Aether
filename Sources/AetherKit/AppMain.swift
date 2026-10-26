@@ -25,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.perform(row)
         }
         buildMenus()
+        FinishNotifier.install()
+        AetherTerminal.cleanDropStash()
         NotificationCenter.default.addObserver(forName: .aetherBindingsChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.applyKeyBindings()
@@ -102,6 +104,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         model.shutdownAll()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let question = model.quitQuestion() else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = question.title
+        alert.informativeText = question.detail
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        if let window = model.keyWindowForSheets, window.isVisible {
+            guard window.attachedSheet == nil else { return .terminateCancel }
+            window.makeKeyAndOrderFront(nil)
+            alert.beginSheetModal(for: window) { response in
+                NSApp.reply(toApplicationShouldTerminate: response == .alertFirstButtonReturn)
+            }
+            return .terminateLater
+        }
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -120,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(toggleBroadcast):
             menuItem.state = model.keyBroadcast ? .on : .off
             return model.keyDeskID != nil
-        case #selector(closePane), #selector(splitRight), #selector(splitDown), #selector(toggleMaximize),
+        case #selector(closePane), #selector(clearBuffer), #selector(splitRight), #selector(splitDown), #selector(toggleMaximize),
              #selector(equalizeSplits), #selector(focusDirectional(_:)), #selector(resizeDirectional(_:)),
              #selector(cycleLayoutForward), #selector(cycleLayoutBackward):
             return model.keyDeskID != nil
@@ -235,7 +255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         paste.target = nil
         let selectAll = bind(.selectAll, item("Select All", #selector(NSText.selectAll(_:)), "a"))
         selectAll.target = nil
-        main.addItem(menu("Edit", items: [copy, paste, selectAll, .separator(), find, findNext, findPrev]))
+        let clear = bind(.clearBuffer, item("Clear Scrollback", #selector(clearBuffer), "k"))
+        main.addItem(menu("Edit", items: [copy, paste, selectAll, .separator(), clear, .separator(), find, findNext, findPrev]))
         main.addItem(menu("View", items: [
             bind(.focusLeft, arrowItem("Focus Left", #selector(focusDirectional(_:)), .left, [.command, .option], 1)),
             bind(.focusRight, arrowItem("Focus Right", #selector(focusDirectional(_:)), .right, [.command, .option], 2)),
@@ -264,7 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         main.addItem(menu("Window", items: [
             responderItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             responderItem("Zoom", #selector(NSWindow.performZoom(_:)), ""),
-            bind(.launch, item("Launch…", #selector(showPalette), "k")),
+            bind(.launch, item("Launch…", #selector(showPalette), "p")),
             bind(.insertPath, item("Insert Path…", #selector(insertPath), "p", [.command, .shift])),
             item("Dropdown Terminal", #selector(showDropdown), ""),
         ]))
@@ -376,8 +397,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             shortcuts.vaporize()
             return
         }
+        if PathInsert.isKey {
+            PathInsert.dismiss()
+            return
+        }
         closeFocusedPane()
     }
+    @objc private func clearBuffer() { model.clearBuffer() }
     @objc private func toggleMaximize() { model.toggleMaximize(); finish(.fill) }
     @objc private func equalizeSplits() { model.equalize(); finish(.equalize) }
 

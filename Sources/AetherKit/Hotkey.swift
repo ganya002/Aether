@@ -66,6 +66,12 @@ enum HotkeyCenter {
     private static var installed = false
     private static var installedChord: KeyChord?
     private static var installedEnabled = false
+    /// The result of the last registration. eventHotKeyExistsErr means another app holds the shortcut.
+    private(set) static var status: OSStatus = noErr
+
+    static var takenByAnotherApp: Bool {
+        status == OSStatus(eventHotKeyExistsErr)
+    }
 
     static func install() {
         guard !installed else { return }
@@ -81,17 +87,20 @@ enum HotkeyCenter {
         }, 1, &spec, nil, &handler)
     }
 
-    static func apply(enabled: Bool, chord: KeyChord) {
-        if installedEnabled == enabled, installedChord == chord { return }
+    @discardableResult
+    static func apply(enabled: Bool, chord: KeyChord) -> OSStatus {
+        if installedEnabled == enabled, installedChord == chord { return status }
         installedEnabled = enabled
         installedChord = chord
         if let hotKey {
             UnregisterEventHotKey(hotKey)
             self.hotKey = nil
         }
-        guard enabled, chord.keyCode != 0 else { return }
+        status = noErr
+        // The A key is key code 0, so an empty key is what means "no shortcut".
+        guard enabled, !chord.key.isEmpty else { return status }
         let identity = EventHotKeyID(signature: OSType(0x4165_7468), id: 1)
-        RegisterEventHotKey(
+        status = RegisterEventHotKey(
             UInt32(chord.keyCode),
             chord.carbonModifiers,
             identity,
@@ -99,30 +108,66 @@ enum HotkeyCenter {
             0,
             &hotKey
         )
+        if status != noErr { hotKey = nil }
+        return status
     }
 }
 
 @MainActor
 enum FinishNotifier {
-    private static var asked = false
+    private static let delegate = NotificationRouter()
 
-    static func deliver(title: String, body: String) {
+    static func install() {
+        UNUserNotificationCenter.current().delegate = delegate
+    }
+
+    /// Asked when the setting is switched on, so the system prompt follows something the user did.
+    static func requestPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// Someone who never touched the setting gets quiet delivery to Notification Center, with no prompt.
+    static func requestQuietPermissionIfUndecided() {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            center.requestAuthorization(options: [.alert, .provisional]) { _, _ in }
+        }
+    }
+
+    static func deliver(title: String, body: String, pane: String) {
         let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        content.userInfo = ["pane": pane]
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        if asked {
-            center.getNotificationSettings { settings in
-                guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
-                center.add(request)
-            }
-            return
-        }
-        asked = true
-        center.requestAuthorization(options: [.alert]) { granted, _ in
-            guard granted else { return }
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
             center.add(request)
+        }
+    }
+
+    /// "✓ cargo build · 48s", or "✗ cargo build failed (exit 101)". Without an exit code there is no mark.
+    nonisolated static func phrase(command: String, elapsed: TimeInterval, exitCode: Int32?) -> String {
+        let seconds = Int(elapsed.rounded())
+        let span = seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+        guard let exitCode else { return "\(command) finished · \(span)" }
+        if exitCode == 0 { return "✓ \(command) · \(span)" }
+        return "✗ \(command) failed (exit \(exitCode))"
+    }
+}
+
+/// Clicking a finished-command notification brings back the pane it came from.
+final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list]
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard let pane = response.notification.request.content.userInfo["pane"] as? String else { return }
+        await MainActor.run {
+            AppModel.shared.reveal(pane: pane)
         }
     }
 }

@@ -365,6 +365,7 @@ final class ShortcutController: NSWindowController, NSWindowDelegate {
         \(keys.symbol(.closePane))    Close terminal
         \(keys.symbol(.closeWindow))    Close window
         \(keys.symbol(.launch))    Launch a command
+        \(keys.symbol(.clearBuffer))    Clear the terminal
         \(keys.symbol(.find))    Find
         \(keys.symbol(.fill))    Fill the window
         \(keys.symbol(.equalize))    Equalize splits
