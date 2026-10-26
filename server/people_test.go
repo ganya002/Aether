@@ -202,3 +202,14 @@ func TestClaimMissesStayBounded(t *testing.T) {
 		t.Fatalf("guessing was not limited: %v", err)
 	}
 }
+
+func TestWrongCodesFromMadeUpAddressesAreCapped(t *testing.T) {
+	h := &hub{people: map[string]*person{"tok": {Token: "tok"}}, pairs: map[string]pairTicket{}, claimMiss: map[string][]time.Time{}}
+	for i := 0; i < maxClaimMissesGlobal; i++ {
+		_, _ = h.claimPair("NOPE-NOPE", "10.0."+strconv.Itoa(i/256)+"."+strconv.Itoa(i%256))
+	}
+	code, _, _ := h.issuePair("tok")
+	if _, err := h.claimPair(code, "192.0.2.1"); err == nil || err.Error() != "too many wrong codes" {
+		t.Fatalf("guessing from many addresses was not limited: %v", err)
+	}
+}

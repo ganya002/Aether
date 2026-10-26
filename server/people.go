@@ -38,6 +38,9 @@ type person struct {
 	Created int64  `json:"created"`
 	// LastSeen is when this person last connected or used the API.
 	LastSeen int64 `json:"lastSeen,omitempty"`
+	// loaded is when this server read the person from disk. Nobody expires
+	// until a full idle period after a start, whatever people.json says.
+	loaded int64
 }
 
 type enrollHit struct {
@@ -75,7 +78,10 @@ func (h *hub) person(token string) *person {
 	defer h.mu.Unlock()
 	p := h.people[token]
 	if p != nil {
-		p.LastSeen = time.Now().Unix()
+		if now := time.Now().Unix(); p.LastSeen != now {
+			p.LastSeen = now
+			h.seenChanged = true
+		}
 	}
 	return p
 }
@@ -123,6 +129,7 @@ func (h *hub) loadPeople() error {
 		if p.LastSeen == 0 {
 			p.LastSeen = now
 		}
+		p.loaded = now
 		h.people[p.Token] = p
 	}
 	if b, err := os.ReadFile(filepath.Join(stateDir, "devices")); err == nil {
@@ -325,7 +332,14 @@ func (h *hub) claimPair(code, ip string) (string, error) {
 			misses = append(misses, at)
 		}
 	}
-	if len(misses) >= 8 {
+	all := h.claimAll[:0]
+	for _, at := range h.claimAll {
+		if at.After(cutoff) {
+			all = append(all, at)
+		}
+	}
+	h.claimAll = all
+	if len(misses) >= 8 || len(all) >= maxClaimMissesGlobal {
 		h.claimMiss[ip] = misses
 		return "", errors.New("too many wrong codes")
 	}
@@ -333,6 +347,7 @@ func (h *hub) claimPair(code, ip string) (string, error) {
 	if !ok || ticket.exp.Before(time.Now()) {
 		delete(h.pairs, code)
 		h.claimMiss[ip] = append(misses, time.Now())
+		h.claimAll = append(h.claimAll, time.Now())
 		return "", errors.New("that code does not work")
 	}
 	delete(h.pairs, code)
@@ -347,6 +362,11 @@ func (h *hub) claimPair(code, ip string) (string, error) {
 const (
 	claimWindow     = 10 * time.Minute
 	maxClaimMissIPs = 4096
+	// maxClaimMissesGlobal caps wrong codes from everyone together. Cloud
+	// shells reach the server over loopback, where forwarding headers are
+	// believed, so the per-address limit alone can be dodged by making up
+	// addresses. This keeps guessing a live code hopeless either way.
+	maxClaimMissesGlobal = 200
 )
 
 func (h *hub) pruneClaimMisses(now time.Time) {
