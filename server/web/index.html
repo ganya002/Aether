@@ -3,25 +3,44 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#12181b">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#12181b" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#e9eef0" media="(prefers-color-scheme: light)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Aether">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
   <title>Aether</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="icon-32.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="vendor/xterm.css">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <div id="frame" class="frame">
     <main class="glass">
-      <section id="gate" class="gate">
-        <h1>Aether</h1>
-        <form id="enroll-form" method="post" action="#start">
-          <button type="submit" class="text-btn">Start</button>
-        </form>
-        <form id="claim-form" class="claim" method="post" action="#claim">
-          <input id="code" name="code" aria-label="Use a code" placeholder="Use a code" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
-          <button type="submit" class="text-btn">Use a code</button>
-          <button type="button" class="text-btn" id="pair-keep" hidden>Keep the current account</button>
-        </form>
+      <section id="gate" class="gate" aria-labelledby="gate-title">
+        <header class="gate-head">
+          <img class="gate-icon" src="icon-192.png" alt="" width="56" height="56">
+          <h1 id="gate-title">Aether</h1>
+          <p class="gate-lede">Terminals that keep running after you close this page.</p>
+        </header>
+        <div class="choices">
+          <form id="enroll-form" class="choice" method="post" action="#start" aria-labelledby="start-title">
+            <h2 id="start-title">New here?</h2>
+            <p class="choice-text">Create a private shell on this server.</p>
+            <button type="submit" class="text-btn primary">Start</button>
+          </form>
+          <form id="claim-form" class="choice claim" method="post" action="#claim" aria-labelledby="claim-title">
+            <h2 id="claim-title"><label for="code">Have a code?</label></h2>
+            <p id="code-help" class="choice-text">Got a code from Aether on your Mac? Enter it here.</p>
+            <input id="code" name="code" placeholder="ABCD-EFGH" aria-describedby="code-help" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go">
+            <button type="submit" class="text-btn primary">Use a code</button>
+            <button type="button" class="text-btn" id="pair-keep" hidden>Keep the current account</button>
+          </form>
+        </div>
         <p id="gate-note" class="note" role="status"></p>
         <noscript><p class="note">This page needs JavaScript to open a terminal.</p></noscript>
       </section>
@@ -31,8 +50,10 @@
           <div id="sessions" class="sessions" role="list"></div>
           <p id="link" class="link" role="status"></p>
           <div class="rail-actions">
-            <button type="button" class="text-btn" id="new-terminal">New terminal</button>
+            <button type="button" class="text-btn" id="new-terminal" title="Alt+T">New terminal</button>
             <button type="button" class="text-btn" id="pair">Code for another device</button>
+            <button type="button" class="text-btn" id="notify" hidden>Notify me when a terminal needs me</button>
+            <button type="button" class="text-btn desktop-only" id="keys-toggle" aria-pressed="false" aria-controls="keybar">Show keys</button>
             <button type="button" class="text-btn" id="sign-out">Sign out</button>
           </div>
         </aside>
@@ -50,30 +71,62 @@
         <p id="desk-note" class="note" role="status"></p>
 
         <div id="stage" class="stage">
+          <div id="ended" class="ended" hidden>
+            <div class="card" role="group" aria-labelledby="ended-text">
+              <p id="ended-text" class="card-text">This terminal has exited.</p>
+              <div class="card-actions">
+                <button type="button" class="text-btn primary" id="restart">Start again</button>
+                <button type="button" class="text-btn" id="remove">Remove</button>
+              </div>
+            </div>
+          </div>
+          <div id="select-sheet" class="select-sheet" hidden>
+            <div class="select-bar">
+              <span class="select-hint">Select text to copy</span>
+              <button type="button" class="text-btn" id="select-copy">Copy all</button>
+              <button type="button" class="text-btn primary" id="select-done">Done</button>
+            </div>
+            <pre id="select-text" class="select-text" tabindex="0" aria-label="Terminal text"></pre>
+          </div>
           <div id="offline" class="offline" hidden>
-            <div class="offline-card" role="status" aria-live="polite">
-              <p id="offline-text" class="offline-text">Reconnecting…</p>
+            <div class="card offline-card" role="status" aria-live="polite">
+              <p id="offline-text" class="card-text">Reconnecting…</p>
               <button type="button" class="text-btn" id="retry">Retry now</button>
             </div>
           </div>
           <textarea id="keysink" class="keysink" tabindex="-1" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Terminal input" enterkeyhint="send"></textarea>
         </div>
 
-        <div id="keybar" class="keybar" aria-label="Terminal keys">
+        <div id="keybar" class="keybar" role="toolbar" aria-label="Terminal keys">
           <button type="button" data-key="esc">Esc</button>
           <button type="button" data-key="tab">Tab</button>
-          <button type="button" data-key="ctrl" id="ctrl-key" aria-pressed="false">Ctrl</button>
-          <button type="button" data-key="/">/</button>
-          <button type="button" data-key="-">-</button>
-          <button type="button" data-key="left">Left</button>
-          <button type="button" data-key="right">Right</button>
-          <button type="button" data-key="up">Up</button>
-          <button type="button" data-key="down">Down</button>
-          <button type="button" data-key="ctrl-c">Ctrl-C</button>
+          <button type="button" data-key="ctrl" id="ctrl-key" aria-pressed="false" aria-label="Control, applies to the next key">Ctrl</button>
+          <button type="button" data-key="alt" id="alt-key" aria-pressed="false" aria-label="Alt, applies to the next key">Alt</button>
+          <button type="button" data-key="left" aria-label="Left arrow">←</button>
+          <button type="button" data-key="up" aria-label="Up arrow">↑</button>
+          <button type="button" data-key="down" aria-label="Down arrow">↓</button>
+          <button type="button" data-key="right" aria-label="Right arrow">→</button>
+          <button type="button" data-key="ctrl-c" aria-label="Control C, interrupt">⌃C</button>
+          <button type="button" data-key="ctrl-d" aria-label="Control D, end of input">⌃D</button>
+          <button type="button" data-key="ctrl-z" aria-label="Control Z, suspend">⌃Z</button>
+          <button type="button" data-key="ctrl-r" aria-label="Control R, search history">⌃R</button>
+          <button type="button" data-key="|" aria-label="Pipe">|</button>
+          <button type="button" data-key="~" aria-label="Tilde">~</button>
+          <button type="button" data-key="/" aria-label="Slash">/</button>
+          <button type="button" data-key="-" aria-label="Dash">-</button>
+          <button type="button" data-key="home" aria-label="Home">Home</button>
+          <button type="button" data-key="end" aria-label="End">End</button>
+          <button type="button" data-key="pgup" aria-label="Page up">PgUp</button>
+          <button type="button" data-key="pgdn" aria-label="Page down">PgDn</button>
+          <button type="button" data-key="paste">Paste</button>
+          <button type="button" data-key="select" id="select-key" aria-pressed="false" aria-label="Select text">Select</button>
+          <button type="button" data-key="font-down" aria-label="Smaller text">A−</button>
+          <button type="button" data-key="font-up" aria-label="Larger text">A+</button>
         </div>
       </section>
     </main>
   </div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
   <script src="vendor/xterm.js" defer></script>
   <script src="app.js" defer></script>
 </body>
