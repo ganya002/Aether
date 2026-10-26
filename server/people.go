@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -32,6 +35,8 @@ type person struct {
 	UID     uint32 `json:"uid"`
 	GID     uint32 `json:"gid"`
 	Created int64  `json:"created"`
+	// LastSeen is when this person last connected or used the API.
+	LastSeen int64 `json:"lastSeen,omitempty"`
 }
 
 type enrollHit struct {
@@ -74,16 +79,30 @@ func (h *hub) known(token string) bool {
 	return h.person(token) != nil
 }
 
-func (h *hub) loadPeople() {
+var stateDir = "/var/lib/aether"
+
+// loadPeople refuses to go on when people.json is there but unreadable:
+// starting empty would hand out fresh accounts while everyone's real ones sit
+// in a file that the next save would overwrite.
+func (h *hub) loadPeople() error {
 	h.people = map[string]*person{}
+	h.devices = map[string]bool{}
 	h.pairs = map[string]pairTicket{}
 	h.claimMiss = map[string][]time.Time{}
 	var file struct {
 		People []*person `json:"people"`
 	}
-	if b, err := os.ReadFile("/var/lib/aether/people.json"); err == nil {
-		_ = json.Unmarshal(b, &file)
+	path := filepath.Join(stateDir, "people.json")
+	b, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(b, &file); err != nil {
+			return fmt.Errorf("%s is damaged, fix or move it before starting: %w", path, err)
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("could not read %s: %w", path, err)
 	}
+	now := time.Now().Unix()
 	for _, p := range file.People {
 		if p == nil || p.Token == "" || p.User == "" || p.Home == "" {
 			continue
@@ -96,12 +115,19 @@ func (h *hub) loadPeople() {
 				p.GID = uint32(gid)
 			}
 		}
+		if p.LastSeen == 0 {
+			p.LastSeen = now
+		}
 		h.people[p.Token] = p
 	}
-	if b, err := os.ReadFile("/var/lib/aether/devices"); err == nil {
+	if b, err := os.ReadFile(filepath.Join(stateDir, "devices")); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			token := strings.TrimSpace(line)
-			if token == "" || h.people[token] != nil {
+			if token == "" {
+				continue
+			}
+			h.devices[token] = true
+			if h.people[token] != nil {
 				continue
 			}
 			if _, err := h.provision(token); err != nil {
@@ -109,13 +135,15 @@ func (h *hub) loadPeople() {
 			}
 		}
 	}
+	return nil
 }
 
 func (h *hub) savePeople() {
 	h.mu.Lock()
 	list := make([]*person, 0, len(h.people))
 	for _, p := range h.people {
-		list = append(list, p)
+		copy := *p
+		list = append(list, &copy)
 	}
 	h.mu.Unlock()
 	body, err := json.MarshalIndent(struct {
@@ -124,8 +152,16 @@ func (h *hub) savePeople() {
 	if err != nil {
 		return
 	}
-	_ = os.MkdirAll("/var/lib/aether", 0o700)
-	_ = os.WriteFile("/var/lib/aether/people.json", append(body, '\n'), 0o600)
+	_ = os.MkdirAll(stateDir, 0o700)
+	path := filepath.Join(stateDir, "people.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(body, '\n'), 0o600); err != nil {
+		log.Printf("saving people: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("saving people: %v", err)
+	}
 }
 
 func (h *hub) allowEnroll(ip string, now time.Time) bool {
@@ -175,7 +211,7 @@ func (h *hub) enroll(ip string) (*person, error) {
 
 func (h *hub) provision(token string) (*person, error) {
 	name := "ae" + token[:8]
-	home := filepath.Join("/var/lib/aether/homes", name)
+	home := filepath.Join(stateDir, "homes", name)
 	if err := makeUser(name, home); err != nil {
 		return nil, err
 	}
@@ -193,7 +229,7 @@ func (h *hub) provision(token string) (*person, error) {
 	}
 	p := &person{
 		Token: token, User: name, Home: home,
-		UID: uint32(uid), GID: uint32(gid), Created: time.Now().Unix(),
+		UID: uint32(uid), GID: uint32(gid), Created: time.Now().Unix(), LastSeen: time.Now().Unix(),
 	}
 	h.mu.Lock()
 	h.people[token] = p

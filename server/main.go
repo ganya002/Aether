@@ -60,6 +60,7 @@ type subscription struct {
 type hub struct {
 	mu        sync.Mutex
 	people    map[string]*person
+	devices   map[string]bool
 	sessions  map[string]*session
 	macLinks  map[string][]frameWriter
 	waiters   map[string]chan map[string]any
@@ -74,7 +75,9 @@ func main() {
 		macLinks: map[string][]frameWriter{},
 		waiters:  map[string]chan map[string]any{},
 	}
-	h.loadPeople()
+	if err := h.loadPeople(); err != nil {
+		log.Fatal(err)
+	}
 	if legacy := envOr("AETHER_LEGACY_LISTEN", defaultLegacyListen); legacy != "off" {
 		go h.serveLegacy(legacy)
 	}

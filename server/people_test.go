@@ -138,3 +138,40 @@ func TestClientIP(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func useStateDir(t *testing.T) string {
+	dir := t.TempDir()
+	old := stateDir
+	stateDir = dir
+	t.Cleanup(func() { stateDir = old })
+	return dir
+}
+
+func TestLoadPeopleRefusesDamagedFile(t *testing.T) {
+	dir := useStateDir(t)
+	h := &hub{}
+	if err := h.loadPeople(); err != nil {
+		t.Fatalf("missing file should start empty: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "people.json"), []byte(`{"people": [`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.loadPeople(); err == nil {
+		t.Fatal("started with a damaged people.json")
+	}
+	good := `{"people":[{"token":"tok","user":"aenobody","home":"/nowhere","created":1}]}`
+	if err := os.WriteFile(filepath.Join(dir, "people.json"), []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.loadPeople(); err != nil || h.person("tok") == nil {
+		t.Fatalf("good file: %v", err)
+	}
+	if h.person("tok").LastSeen == 0 {
+		t.Fatal("old entries should get a fresh grace period")
+	}
+	h.savePeople()
+	again := &hub{}
+	if err := again.loadPeople(); err != nil || again.person("tok") == nil {
+		t.Fatalf("round trip: %v", err)
+	}
+}
