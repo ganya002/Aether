@@ -145,7 +145,7 @@ func (h *hub) handle(conn net.Conn) {
 	h.addMac(owner, link)
 	defer h.removeMac(owner, link)
 	_ = conn.SetDeadline(time.Time{})
-	_ = link.write(map[string]any{"type": "helloOk", "version": 1})
+	_ = link.write(map[string]any{"type": "helloOk", "version": 1, "echoesReq": true})
 	var subs []subscription
 	defer func() {
 		for _, item := range subs {

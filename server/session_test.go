@@ -238,3 +238,19 @@ func TestSessionTokenOnlyOpensItsOwnSession(t *testing.T) {
 		t.Fatal("empty token accepted")
 	}
 }
+
+func TestRepliesEchoTheRequestTag(t *testing.T) {
+	h := &hub{sessions: map[string]*session{}}
+	w := &nullWriter{}
+	var subs []subscription
+	h.dispatch("tok", w, map[string]any{"type": "attach", "id": "nope", "req": "r7"}, &subs)
+	h.dispatch("tok", w, map[string]any{"type": "attach", "id": "nope"}, &subs)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.msgs) != 2 || w.msgs[0]["req"] != "r7" {
+		t.Fatalf("got %v", w.msgs)
+	}
+	if _, ok := w.msgs[1]["req"]; ok {
+		t.Fatalf("untagged request got a tag: %v", w.msgs[1])
+	}
+}

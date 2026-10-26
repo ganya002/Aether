@@ -61,7 +61,7 @@ func (h *hub) serveWS(w http.ResponseWriter, r *http.Request) {
 		h.addMac(owner, link)
 		defer h.removeMac(owner, link)
 	}
-	if err := link.write(map[string]any{"type": "helloOk", "version": 1}); err != nil {
+	if err := link.write(map[string]any{"type": "helloOk", "version": 1, "echoesReq": true}); err != nil {
 		return
 	}
 	var subs []subscription
