@@ -1,0 +1,146 @@
+package main
+
+import (
+	"errors"
+	"sync"
+	"testing"
+	"time"
+)
+
+type nullWriter struct {
+	mu   sync.Mutex
+	msgs []map[string]any
+	slow time.Duration
+	fail bool
+}
+
+func (w *nullWriter) write(msg map[string]any) error {
+	if w.slow > 0 {
+		time.Sleep(w.slow)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fail {
+		return errors.New("gone")
+	}
+	w.msgs = append(w.msgs, msg)
+	return nil
+}
+
+func (w *nullWriter) types() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]string, 0, len(w.msgs))
+	for _, m := range w.msgs {
+		out = append(out, m["type"].(string))
+	}
+	return out
+}
+
+func newTestSession() *session {
+	return &session{id: "s", subs: map[*subscriber]struct{}{}}
+}
+
+// Viewers coming and going while output, status, and exit race each other
+// used to panic with "send on closed channel" and take the server down.
+func TestBroadcastSurvivesViewersLeaving(t *testing.T) {
+	for round := 0; round < 50; round++ {
+		s := newTestSession()
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				chunk := []byte("hello world\r\n")
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					s.output(chunk)
+					s.broadcastStatus("working", "busy")
+				}
+			}()
+		}
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for j := 0; j < 20; j++ {
+					sub := s.subscribe()
+					w := &nullWriter{}
+					if i%2 == 0 {
+						w.slow = time.Millisecond
+					}
+					done := make(chan struct{})
+					go func() {
+						pump(w, s.id, sub)
+						close(done)
+					}()
+					s.unsubscribe(sub)
+					s.unsubscribe(sub)
+					<-done
+				}
+			}(i)
+		}
+		time.Sleep(2 * time.Millisecond)
+		s.end()
+		close(stop)
+		wg.Wait()
+		s.end()
+	}
+}
+
+func TestSlowViewerIsToldToResync(t *testing.T) {
+	s := newTestSession()
+	sub := s.subscribe()
+	for i := 0; i < 1000; i++ {
+		s.output([]byte("x"))
+	}
+	s.broadcastStatus("done", "ok")
+	var kinds []byte
+	for len(sub.ch) > 0 {
+		kinds = append(kinds, (<-sub.ch)[0])
+	}
+	resync := false
+	for _, k := range kinds {
+		if k == 2 {
+			resync = true
+		}
+	}
+	if !resync {
+		t.Fatalf("no resync after overflow: %v", kinds)
+	}
+	if kinds[len(kinds)-1] != 1 {
+		t.Fatalf("status was lost: %v", kinds)
+	}
+}
+
+func TestEndedSessionClosesViewers(t *testing.T) {
+	s := newTestSession()
+	sub := s.subscribe()
+	w := &nullWriter{}
+	done := make(chan struct{})
+	go func() {
+		pump(w, s.id, sub)
+		close(done)
+	}()
+	s.output([]byte("bye"))
+	s.end()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pump did not stop after the session ended")
+	}
+	got := w.types()
+	if len(got) != 2 || got[0] != "output" || got[1] != "closed" {
+		t.Fatalf("got %v", got)
+	}
+	late := s.subscribe()
+	if c := <-late.ch; c[0] != 3 {
+		t.Fatalf("late viewer got %v", c)
+	}
+	s.unsubscribe(late)
+}

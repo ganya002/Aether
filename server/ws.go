@@ -65,7 +65,7 @@ func (h *hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	var subs []subscription
 	defer func() {
 		for _, item := range subs {
-			item.s.unsubscribe(item.ch)
+			item.s.unsubscribe(item.sub)
 		}
 	}()
 	for {

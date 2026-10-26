@@ -41,12 +41,13 @@ type session struct {
 	title  string
 	state  string
 	msg    string
-	subs   map[chan []byte]struct{}
+	subs   map[*subscriber]struct{}
+	ended  bool
 }
 
 type subscription struct {
-	s  *session
-	ch chan []byte
+	s   *session
+	sub *subscriber
 }
 
 type hub struct {
@@ -113,7 +114,7 @@ func (h *hub) handle(conn net.Conn) {
 	var subs []subscription
 	defer func() {
 		for _, item := range subs {
-			item.s.unsubscribe(item.ch)
+			item.s.unsubscribe(item.sub)
 		}
 	}()
 	for {
@@ -155,9 +156,9 @@ func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs 
 			_ = link.write(map[string]any{"type": "error", "message": err.Error()})
 			return
 		}
-		ch := s.subscribe()
-		*subs = append(*subs, subscription{s, ch})
-		go pump(link, s.id, ch)
+		sub := s.subscribe()
+		*subs = append(*subs, subscription{s, sub})
+		go pump(link, s.id, sub)
 		_ = link.write(map[string]any{"type": "created", "id": s.id, "title": s.title})
 		s.sendScroll(link)
 	case "attach":
@@ -168,9 +169,9 @@ func (h *hub) dispatch(owner string, link frameWriter, msg map[string]any, subs 
 		}
 		s.resize(intNum(msg, "cols"), intNum(msg, "rows"))
 		if !subscribed(*subs, s.id) {
-			ch := s.subscribe()
-			*subs = append(*subs, subscription{s, ch})
-			go pump(link, s.id, ch)
+			sub := s.subscribe()
+			*subs = append(*subs, subscription{s, sub})
+			go pump(link, s.id, sub)
 		}
 		s.mu.Lock()
 		title, state, note := s.title, s.state, s.msg
@@ -211,8 +212,14 @@ func subscribed(subs []subscription, id string) bool {
 	return false
 }
 
-func pump(conn frameWriter, id string, sub chan []byte) {
-	for chunk := range sub {
+func pump(conn frameWriter, id string, sub *subscriber) {
+	for {
+		var chunk []byte
+		select {
+		case chunk = <-sub.ch:
+		case <-sub.done:
+			return
+		}
 		if len(chunk) == 0 {
 			continue
 		}
@@ -304,7 +311,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 	}
 	s := &session{
 		id: id, owner: owner, cmd: cmd, master: master, cols: cols, rows: rows, cwd: dir,
-		title: "shell", state: "idle", subs: map[chan []byte]struct{}{},
+		title: "shell", state: "idle", subs: map[*subscriber]struct{}{},
 	}
 	h.mu.Lock()
 	h.sessions[id] = s
@@ -317,7 +324,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		s.msg = "exited"
 		s.mu.Unlock()
 		s.broadcastStatus("done", "exited")
-		s.broadcast(nil)
+		s.end()
 		h.mu.Lock()
 		delete(h.sessions, id)
 		h.mu.Unlock()
@@ -337,13 +344,7 @@ func (s *session) readLoop() {
 				_, _ = s.master.Write([]byte("\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\"))
 			}
 			if len(clean) > 0 {
-				s.mu.Lock()
-				s.scroll = append(s.scroll, clean...)
-				if len(s.scroll) > 1<<20 {
-					s.scroll = append([]byte(nil), s.scroll[len(s.scroll)-1<<20:]...)
-				}
-				s.mu.Unlock()
-				s.broadcast(clean)
+				s.output(clean)
 			}
 			for _, report := range reports {
 				s.mu.Lock()
@@ -362,6 +363,18 @@ func (s *session) readLoop() {
 	}
 }
 
+// output records p in the scrollback and fans it out under one lock, so a
+// viewer that attaches in between never sees a chunk twice or not at all.
+func (s *session) output(p []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scroll = append(s.scroll, p...)
+	if len(s.scroll) > 1<<20 {
+		s.scroll = append([]byte(nil), s.scroll[len(s.scroll)-1<<20:]...)
+	}
+	s.broadcastLocked(append([]byte{0}, p...))
+}
+
 func (s *session) write(p []byte) {
 	_, _ = s.master.Write(p)
 }
@@ -376,88 +389,87 @@ func (s *session) resize(cols, rows int) {
 	_ = pty.Setsize(s.master, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
-func (s *session) subscribe() chan []byte {
-	ch := make(chan []byte, 128)
+// subscriber carries one viewer's copy of a session's output. Its data
+// channel is never closed, so senders can't panic; viewers that leave close
+// done instead, and senders only touch ch while holding s.mu.
+type subscriber struct {
+	ch   chan []byte
+	done chan struct{}
+	once sync.Once
+}
+
+func (sub *subscriber) stop() {
+	sub.once.Do(func() { close(sub.done) })
+}
+
+func (s *session) subscribe() *subscriber {
+	sub := &subscriber{ch: make(chan []byte, 128), done: make(chan struct{})}
 	s.mu.Lock()
-	s.subs[ch] = struct{}{}
+	if s.ended {
+		s.mu.Unlock()
+		sub.ch <- []byte{3}
+		return sub
+	}
+	s.subs[sub] = struct{}{}
 	s.mu.Unlock()
-	return ch
+	return sub
 }
 
-func (s *session) unsubscribe(ch chan []byte) {
+func (s *session) unsubscribe(sub *subscriber) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.subs[ch]; ok {
-		delete(s.subs, ch)
-		close(ch)
-	}
+	delete(s.subs, sub)
+	s.mu.Unlock()
+	sub.stop()
 }
 
-func (s *session) subscribers() []chan []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	chans := make([]chan []byte, 0, len(s.subs))
-	for ch := range s.subs {
-		chans = append(chans, ch)
-	}
-	return chans
-}
-
-func (s *session) offer(ch chan []byte, msg []byte) {
-	defer func() { _ = recover() }()
+// deliverLocked hands msg to sub without blocking. A viewer that has fallen
+// behind loses its queued output and is told to resync from the scrollback.
+// Callers hold s.mu, which makes this the only sender, so the drain always
+// leaves room.
+func (s *session) deliverLocked(sub *subscriber, msg []byte) {
 	select {
-	case ch <- msg:
+	case sub.ch <- msg:
+		return
 	default:
-		for i := 0; i < 128; i++ {
-			select {
-			case _, ok := <-ch:
-				if !ok {
-					return
-				}
-			default:
-				select {
-				case ch <- msg:
-				default:
-					s.unsubscribe(ch)
-				}
-				return
-			}
+	}
+drain:
+	for {
+		select {
+		case <-sub.ch:
+		default:
+			break drain
 		}
-		s.unsubscribe(ch)
+	}
+	sub.ch <- []byte{2}
+	if msg[0] != 0 {
+		sub.ch <- msg
+	}
+}
+
+func (s *session) broadcastLocked(msg []byte) {
+	for sub := range s.subs {
+		s.deliverLocked(sub, msg)
 	}
 }
 
 func (s *session) broadcastStatus(state, msg string) {
 	body := append([]byte{1}, []byte(state+"\n"+msg)...)
-	for _, ch := range s.subscribers() {
-		select {
-		case ch <- body:
-		default:
-			s.offer(ch, []byte{2})
-		}
-	}
+	s.mu.Lock()
+	s.broadcastLocked(body)
+	s.mu.Unlock()
 }
 
-func (s *session) broadcast(p []byte) {
-	if p == nil {
-		for _, ch := range s.subscribers() {
-			s.offer(ch, []byte{3})
-		}
-		s.mu.Lock()
-		for ch := range s.subs {
-			close(ch)
-			delete(s.subs, ch)
-		}
-		s.mu.Unlock()
+// end tells every viewer the session is gone and forgets them.
+func (s *session) end() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ended {
 		return
 	}
-	msg := append([]byte{0}, p...)
-	for _, ch := range s.subscribers() {
-		select {
-		case ch <- msg:
-		default:
-			s.offer(ch, []byte{2})
-		}
+	s.ended = true
+	for sub := range s.subs {
+		s.deliverLocked(sub, []byte{3})
+		delete(s.subs, sub)
 	}
 }
 
