@@ -24,9 +24,16 @@ import (
 )
 
 const (
-	port    = ":7391"
-	apiPort = ":7392"
+	defaultListen       = "127.0.0.1:7392"
+	defaultLegacyListen = "127.0.0.1:7391"
 )
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
 
 type session struct {
 	id     string
@@ -68,12 +75,20 @@ func main() {
 		waiters:  map[string]chan map[string]any{},
 	}
 	h.loadPeople()
-	go h.serveAPI()
-	ln, err := net.Listen("tcp", port)
+	if legacy := envOr("AETHER_LEGACY_LISTEN", defaultLegacyListen); legacy != "off" {
+		go h.serveLegacy(legacy)
+	}
+	h.serveAPI(envOr("AETHER_LISTEN", defaultListen))
+}
+
+// serveLegacy speaks the old length-prefixed protocol on raw TCP. It stays on
+// loopback unless AETHER_LEGACY_LISTEN says otherwise, since it has no TLS.
+func (h *hub) serveLegacy(addr string) {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("aether-sessiond listening on %s", port)
+	log.Printf("aether-sessiond listening on %s", addr)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -675,7 +690,7 @@ func writePublic(w http.ResponseWriter, token string) {
 	})
 }
 
-func (h *hub) serveAPI() {
+func (h *hub) serveAPI(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -832,8 +847,9 @@ func (h *hub) serveAPI() {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	})
 	mux.Handle("/", webHandler())
-	log.Printf("agent api on %s", apiPort)
-	_ = http.ListenAndServe(apiPort, mux)
+	log.Printf("agent api on %s", addr)
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func (h *hub) authorized(r *http.Request) bool {

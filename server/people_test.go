@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -84,19 +86,55 @@ func TestPairCodeIsSingleUse(t *testing.T) {
 	}
 }
 
+func usePublicFiles(t *testing.T) (urlFile, envFile string) {
+	dir := t.TempDir()
+	publicURLFile = filepath.Join(dir, "public.url")
+	publicEnvFile = filepath.Join(dir, "public.env")
+	t.Cleanup(func() { publicURLFile, publicEnvFile = defaultPublicURLFile, defaultPublicEnvFile })
+	return publicURLFile, publicEnvFile
+}
+
 func TestPublicEndpoint(t *testing.T) {
+	urlFile, envFile := usePublicFiles(t)
 	t.Setenv("AETHER_PUBLIC_URL", "https://cloud.example/")
 	web, ws, host := publicEndpoint()
 	if web != "https://cloud.example" || ws != "wss://cloud.example/ws" || host != "cloud.example" {
 		t.Fatalf("got %s %s %s", web, ws, host)
 	}
+	if err := os.WriteFile(envFile, []byte("AETHER_PUBLIC_URL=https://env-file.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if web, _, _ := publicEndpoint(); web != "https://env-file.example" {
+		t.Fatalf("env file ignored: %s", web)
+	}
+	if err := os.WriteFile(urlFile, []byte("https://fresh.trycloudflare.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if web, _, _ := publicEndpoint(); web != "https://fresh.trycloudflare.com" {
+		t.Fatalf("stale address: %s", web)
+	}
+	if err := os.WriteFile(urlFile, []byte("https://newer.trycloudflare.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if web, _, _ := publicEndpoint(); web != "https://newer.trycloudflare.com" {
+		t.Fatalf("address was cached: %s", web)
+	}
 }
 
 func TestClientIP(t *testing.T) {
-	if got := clientIP("127.0.0.1:9", "198.51.100.4, 10.0.0.1", ""); got != "198.51.100.4" {
+	if got := clientIP("127.0.0.1:9", "198.51.100.4, 10.0.0.1", ""); got != "10.0.0.1" {
 		t.Fatal(got)
 	}
 	if got := clientIP("127.0.0.1:9", "10.0.0.1", "203.0.113.9"); got != "203.0.113.9" {
+		t.Fatal(got)
+	}
+	if got := clientIP("[::1]:9", "", "203.0.113.9"); got != "203.0.113.9" {
+		t.Fatal(got)
+	}
+	if got := clientIP("198.51.100.7:5000", "1.1.1.1", "2.2.2.2"); got != "198.51.100.7" {
+		t.Fatalf("trusted headers from a remote caller: %s", got)
+	}
+	if got := clientIP("[2001:db8::1]:443", "", "2.2.2.2"); got != "2001:db8::1" {
 		t.Fatal(got)
 	}
 }

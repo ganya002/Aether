@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -35,7 +36,7 @@ func (w *wsLink) write(msg map[string]any) error {
 
 func (h *hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
+		OriginPatterns: originPatterns(),
 	})
 	if err != nil {
 		return
@@ -79,6 +80,19 @@ func (h *hub) serveWS(w http.ResponseWriter, r *http.Request) {
 		}
 		h.dispatch(owner, link, msg, &subs)
 	}
+}
+
+// originPatterns lists the pages allowed to open a socket from a browser:
+// the published address and this machine. Same-host pages are always allowed.
+// Until the address is known every origin is let through, because the token
+// still has to arrive in the first message.
+func originPatterns() []string {
+	web, _, _ := publicEndpoint()
+	u, err := url.Parse(web)
+	if web == "" || err != nil || u.Host == "" {
+		return []string{"*"}
+	}
+	return []string{u.Host, "localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*"}
 }
 
 func webHandler() http.Handler {

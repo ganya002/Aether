@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -295,34 +296,65 @@ func (h *hub) claimPair(code, ip string) (string, error) {
 	return ticket.token, nil
 }
 
+// clientIP names the caller for rate limits. Forwarding headers are only
+// believed when the request came from this machine, which is where the tunnel
+// runs; anyone else could set them to dodge the limits.
 func clientIP(remoteAddr, forwarded, cloudflare string) string {
-	if ip := strings.TrimSpace(cloudflare); ip != "" {
-		return ip
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
 	}
-	if forwarded != "" {
-		first := strings.TrimSpace(strings.Split(forwarded, ",")[0])
-		if first != "" {
-			return first
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if ip := strings.TrimSpace(cloudflare); ip != "" {
+			return ip
+		}
+		if forwarded != "" {
+			parts := strings.Split(forwarded, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
+			}
 		}
 	}
-	host, _, ok := strings.Cut(remoteAddr, ":")
-	if ok && host != "" {
-		return host
-	}
-	if remoteAddr == "" {
+	if host == "" {
 		return "unknown"
 	}
-	return remoteAddr
+	return host
+}
+
+const (
+	defaultPublicURLFile = "/etc/aether/public.url"
+	defaultPublicEnvFile = "/etc/aether/public.env"
+)
+
+var (
+	publicURLFile = defaultPublicURLFile
+	publicEnvFile = defaultPublicEnvFile
+)
+
+// publicURL is read fresh on every call. The tunnel gets a new address each
+// time it restarts and rewrites these files, while the environment was fixed
+// when the server started, so the files win.
+func publicURL() string {
+	if b, err := os.ReadFile(publicURLFile); err == nil {
+		if raw := strings.TrimSpace(string(b)); raw != "" {
+			return raw
+		}
+	}
+	if b, err := os.ReadFile(publicEnvFile); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if ok && strings.TrimSpace(key) == "AETHER_PUBLIC_URL" {
+				if raw := strings.Trim(strings.TrimSpace(val), `"'`); raw != "" {
+					return raw
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(os.Getenv("AETHER_PUBLIC_URL"))
 }
 
 func publicEndpoint() (web, ws, host string) {
-	raw := strings.TrimSpace(os.Getenv("AETHER_PUBLIC_URL"))
-	if raw == "" {
-		if b, err := os.ReadFile("/etc/aether/public.url"); err == nil {
-			raw = strings.TrimSpace(string(b))
-		}
-	}
-	raw = strings.TrimRight(raw, "/")
+	raw := strings.TrimRight(publicURL(), "/")
 	if raw == "" {
 		return "", "", ""
 	}
