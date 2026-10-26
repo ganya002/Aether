@@ -16,8 +16,26 @@ let files: [(Int, String)] = [
 ]
 
 for (size, name) in files {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
+    // Draw into a bitmap with an explicit pixel size. lockFocus renders at the screen's
+    // backing scale, so on a Retina Mac every PNG came out twice as large as its name says.
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: size,
+        pixelsHigh: size,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+        fputs("Could not draw \(size)\n", stderr)
+        exit(1)
+    }
+    bitmap.size = NSSize(width: size, height: size)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
     let rect = NSRect(x: 0, y: 0, width: size, height: size)
     let scale = CGFloat(size) / 1024
     let path = NSBezierPath(roundedRect: rect.insetBy(dx: 80 * scale, dy: 80 * scale), xRadius: 220 * scale, yRadius: 220 * scale)
@@ -50,9 +68,10 @@ for (size, name) in files {
         at: NSPoint(x: (CGFloat(size) - textSize.width) / 2 - 20 * scale, y: (CGFloat(size) - textSize.height) / 2 - 10 * scale),
         withAttributes: attributes
     )
-    image.unlockFocus()
+    context.flushGraphics()
+    NSGraphicsContext.restoreGraphicsState()
 
-    guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else {
+    guard let png = bitmap.representation(using: .png, properties: [:]) else {
         fputs("Could not draw \(size)\n", stderr)
         exit(1)
     }

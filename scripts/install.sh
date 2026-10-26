@@ -4,7 +4,7 @@
 set -euo pipefail
 
 RETRY='curl -fsSL https://raw.githubusercontent.com/ganya002/Aether/main/scripts/install.sh | bash'
-ARCHIVE_URL='https://github.com/ganya002/Aether/archive/refs/heads/main.tar.gz'
+REPO='ganya002/Aether'
 LOG="${TMPDIR:-/tmp}/aether-install.log"
 : >"$LOG"
 
@@ -223,6 +223,31 @@ WORKDIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
+# Pin the commit first, then download exactly that commit, so the stamp in the app matches its source.
+# Without a stamp a curl install is "dev", and the app thinks every GitHub release is newer.
+meta="$WORKDIR/commit.json"
+commit=''
+build=''
+if curl -fsSL --retry 2 --retry-delay 1 -H "Accept: application/vnd.github+json" -H "User-Agent: Aether" \
+  -o "$meta" "https://api.github.com/repos/$REPO/commits/main" 2>>"$LOG"; then
+  commit="$(plutil -extract sha raw -o - "$meta" 2>/dev/null || true)"
+  committed="$(plutil -extract commit.committer.date raw -o - "$meta" 2>/dev/null || true)"
+  if [[ -n "$committed" ]]; then
+    build="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$committed" +%s 2>/dev/null || true)"
+  fi
+fi
+if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+  ARCHIVE_URL="https://github.com/$REPO/archive/$commit.tar.gz"
+  export AETHER_COMMIT="$commit"
+  if [[ "$build" =~ ^[0-9]+$ ]]; then
+    export AETHER_BUILD="$build"
+  fi
+else
+  # GitHub's API is rate limited. The source still downloads; this copy just won't update itself.
+  commit=''
+  ARCHIVE_URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
+fi
+
 archive="$WORKDIR/aether.tar.gz"
 set +e
 curl -fsSL --retry 3 --retry-delay 1 -o "$archive" "$ARCHIVE_URL" &
@@ -251,7 +276,7 @@ draw_bar "Downloading" 100
 step_done "Downloaded"
 
 tar -xzf "$archive" -C "$WORKDIR"
-SRC="$WORKDIR/Aether-main"
+SRC="$WORKDIR/Aether-${commit:-main}"
 if [[ ! -d "$SRC" ]]; then
   die "The download was incomplete." \
     "The archive did not contain Aether. Run the installer again." \
@@ -262,14 +287,6 @@ export SWIFT
 export PATH="$(dirname "$SWIFT"):/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 export AETHER_BUILD_LOG="$LOG"
 hash -r
-
-# Without this, a curl install is stamped "dev" and the app thinks every GitHub release is newer.
-commit="$(curl -fsSL --retry 2 --retry-delay 1 -H "Accept: application/vnd.github+json" -H "User-Agent: Aether" \
-  "https://api.github.com/repos/ganya002/Aether/commits/main" \
-  | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1 || true)"
-if [[ -n "$commit" ]]; then
-  export AETHER_COMMIT="$commit"
-fi
 
 set +e
 AETHER_BUILD_LOG="$LOG" "$SRC/scripts/build-app.sh" &
@@ -298,6 +315,19 @@ step_done "Built"
 
 draw_bar "Installing" 40
 DEST="$HOME/Downloads/Aether.app"
+is_running() {
+  pgrep -f -- "$1/Contents/MacOS/Aether" >/dev/null 2>&1
+}
+replaced_running=0
+if is_running "$DEST"; then
+  # Deleting the copy that is open would pull the app out from under its terminals.
+  replaced_running=1
+  n=2
+  while [[ -e "$HOME/Downloads/Aether $n.app" ]] || is_running "$HOME/Downloads/Aether $n.app"; do
+    n=$((n + 1))
+  done
+  DEST="$HOME/Downloads/Aether $n.app"
+fi
 rm -rf "$DEST"
 cp -R "$SRC/dist/Aether.app" "$DEST"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
@@ -308,6 +338,13 @@ if ! codesign --force --sign - "$DEST/Contents/MacOS/Aether" >>"$LOG" 2>&1 || ! 
 fi
 draw_bar "Installing" 100
 step_done "Installed in Downloads"
+
+if [[ "$replaced_running" -eq 1 ]]; then
+  printf '\n  Aether is open from Downloads, so the new copy is %b%s%b.\n' "$C_BOLD" "$(basename "$DEST")" "$C_OFF"
+  printf '  Quit Aether, then drag the new copy into Applications.\n\n'
+  open -R "$DEST"
+  exit 0
+fi
 
 printf '\n  Drag Aether into Applications when it opens.\n\n'
 open "$DEST"
