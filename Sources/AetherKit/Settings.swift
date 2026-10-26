@@ -101,6 +101,7 @@ public struct Settings: Codable, Equatable, Sendable {
     public var keys: KeyMap
     /// Public host of aether-sessiond. Empty keeps shells on this Mac.
     public var sessionHost: String
+    /// Kept in the keychain. The JSON files only carry it when the keychain refuses it.
     public var sessionToken: String
     /// WebSocket URL for Cloud. Empty falls back to the older TCP port.
     public var sessionWS: String
@@ -113,6 +114,8 @@ public struct Settings: Codable, Equatable, Sendable {
     public var baseFontSize: Double
     /// A command has to run at least this long before it posts a notification.
     public var notifyAfterSeconds: Double
+    /// Local or Cloud. Turning Cloud off keeps the account above so it can come back.
+    public var cloudEnabled: Bool
 
     public static let currentVersion = 2
 
@@ -139,7 +142,8 @@ public struct Settings: Codable, Equatable, Sendable {
         shellExit: ShellExit = .close,
         warnMultilinePaste: Bool = true,
         baseFontSize: Double = 13,
-        notifyAfterSeconds: Double = 10
+        notifyAfterSeconds: Double = 10,
+        cloudEnabled: Bool? = nil
     ) {
         self.shade = shade
         self.glass = glass
@@ -164,6 +168,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.warnMultilinePaste = warnMultilinePaste
         self.baseFontSize = baseFontSize
         self.notifyAfterSeconds = notifyAfterSeconds
+        self.cloudEnabled = cloudEnabled ?? !sessionHost.isEmpty
     }
 
     /// Each field falls back on its own, so one bad value in config.json does not throw away the rest.
@@ -195,6 +200,7 @@ public struct Settings: Codable, Equatable, Sendable {
         warnMultilinePaste = field(.warnMultilinePaste, true)
         baseFontSize = field(.baseFontSize, 13.0)
         notifyAfterSeconds = field(.notifyAfterSeconds, 10.0)
+        cloudEnabled = field(.cloudEnabled, !sessionHost.isEmpty)
         clamp()
     }
 

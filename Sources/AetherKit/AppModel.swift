@@ -8,6 +8,8 @@ struct PaneState: Codable, Equatable {
     var command: String?
     var title: String
     var exitCode: Int32?
+    /// The Cloud terminal this pane shows, so it can be attached again after Aether restarts.
+    var remoteSession: String?
 }
 
 struct Desk: Equatable {
@@ -99,6 +101,8 @@ final class AppModel {
             settings = portable
         }
         settings.clamp()
+        let fileToken = settings.sessionToken.isEmpty ? (snapshot?.settings.sessionToken ?? "") : settings.sessionToken
+        settings.sessionToken = TokenVault.shared.adopt(fileToken: fileToken)
         if portable == nil, (snapshot?.version ?? 0) < Settings.currentVersion, settings.glass == .clear {
             settings.glass = .regular
         }
@@ -416,6 +420,7 @@ final class AppModel {
     func deskWindowClosed(_ deskID: String) {
         if let desk = desks[deskID] {
             for paneID in desk.panes.keys {
+                panes[paneID]?.endRemoteSession()
                 panes[paneID]?.shutdown()
                 panes[paneID] = nil
             }
@@ -598,6 +603,9 @@ final class AppModel {
 
     func restart(_ paneID: String) {
         guard let deskID = deskID(containing: paneID) else { return }
+        if let pane = panes[paneID], !pane.remoteResumable {
+            pane.endRemoteSession()
+        }
         panes[paneID]?.launch()
         if var desk = desks[deskID] {
             desk.panes[paneID]?.exitCode = nil
@@ -739,8 +747,19 @@ final class AppModel {
         refreshDirectories()
     }
 
+    func noteRemote(_ paneID: String, session: String?) {
+        guard let deskID = deskID(containing: paneID), let state = desks[deskID]?.panes[paneID], state.remoteSession != session else { return }
+        desks[deskID]?.panes[paneID]?.remoteSession = session
+        scheduleSave()
+    }
+
     func shutdownAll() {
-        for pane in panes.values { pane.shutdown() }
+        // Saved panes keep their Cloud terminals for next launch. The dropdown is not saved, so its terminal ends.
+        let unsaved = Set(dropdownID.flatMap { desks[$0]?.panes.keys }.map(Array.init) ?? [])
+        for (id, pane) in panes {
+            if unsaved.contains(id) { pane.endRemoteSession() }
+            pane.shutdown()
+        }
         saveNow()
     }
 
@@ -940,6 +959,7 @@ final class AppModel {
     private func makePane(_ state: PaneState, settings: Settings) {
         let pane = PaneController(id: state.id, cwd: state.cwd, command: state.command, settings: settings)
         pane.title = state.title
+        pane.resumeRemote = state.remoteSession
         panes[state.id] = pane
     }
 
@@ -1177,10 +1197,11 @@ enum ConfigStore {
         return try? JSONDecoder().decode(Settings.self, from: data)
     }
 
+    @MainActor
     static func save(_ settings: Settings) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(settings) else { return }
+        guard let data = try? encoder.encode(settings.forDisk()) else { return }
         try? data.write(to: fileURL(), options: .atomic)
     }
 }
@@ -1196,8 +1217,11 @@ enum SessionStore {
         return try? JSONDecoder().decode(Snapshot.self, from: data)
     }
 
+    @MainActor
     static func save(_ snapshot: Snapshot) {
         let url = fileURL()
+        var snapshot = snapshot
+        snapshot.settings = snapshot.settings.forDisk()
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: url, options: .atomic)
     }

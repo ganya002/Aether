@@ -10,12 +10,40 @@ enum CloudCatalog {
 
     static func published() async -> Endpoint? {
         guard let url = await enrollURL() else { return nil }
-        let scheme = url.scheme == "http" ? "ws" : "wss"
-        var host = url.host ?? ""
+        return endpoint(for: url)
+    }
+
+    static func endpoint(for url: URL) -> Endpoint? {
+        guard url.scheme?.lowercased() == "https", let name = url.host, !name.isEmpty else { return nil }
+        var host = name
         if let port = url.port {
             host += ":\(port)"
         }
-        return Endpoint(enroll: url, sessionHost: url.host ?? "", sessionPort: url.port ?? 7391, ws: "\(scheme)://\(host)/ws")
+        return Endpoint(enroll: url, sessionHost: name, sessionPort: url.port ?? 7391, ws: "wss://\(host)/ws")
+    }
+
+    /// Enrolling hands out a token, so it only happens over https.
+    static func enrollURL(from raw: String) -> URL? {
+        guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme?.lowercased() == "https",
+              let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
+
+    /// The token rides on this socket. Plain ws is only allowed to this Mac, for running the server locally.
+    static func socketURL(from raw: String) -> URL? {
+        guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let host = url.host, !host.isEmpty else { return nil }
+        switch url.scheme?.lowercased() {
+        case "wss": return url
+        case "ws": return isLoopback(host) ? url : nil
+        default: return nil
+        }
+    }
+
+    static func isLoopback(_ host: String) -> Bool {
+        let bare = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        return bare == "localhost" || bare == "::1" || bare.hasPrefix("127.")
     }
 
     static func enroll(at endpoint: Endpoint) async throws -> (host: String, token: String, ws: String) {
@@ -36,14 +64,15 @@ enum CloudCatalog {
         let ws = (json["ws"] as? String) ?? ""
         guard !host.isEmpty || !ws.isEmpty else { throw SessionError.server("The Cloud service did not name a host.") }
         guard !ws.isEmpty else { throw SessionError.server("Cloud isn't publicly available yet.") }
-        return (host, token, ws)
+        guard let socket = socketURL(from: ws) else { throw SessionError.server("The Cloud service gave an address that isn't secure.") }
+        return (host, token, socket.absoluteString)
     }
 
     static func pair(token: String, ws: String) async throws -> (code: String, url: String) {
-        guard var parts = URLComponents(string: ws), parts.scheme == "wss" || parts.scheme == "ws" else {
+        guard let socket = socketURL(from: ws), var parts = URLComponents(url: socket, resolvingAgainstBaseURL: false) else {
             throw SessionError.server("Cloud has no public address yet.")
         }
-        parts.scheme = parts.scheme == "wss" ? "https" : "http"
+        parts.scheme = parts.scheme?.lowercased() == "wss" ? "https" : "http"
         parts.path = "/pair"
         parts.query = nil
         guard let url = parts.url else { throw SessionError.server("Cloud has no public address yet.") }
@@ -75,15 +104,14 @@ enum CloudCatalog {
               let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = json["enroll"] as? String else { return nil }
-        return URL(string: raw)
+        return enrollURL(from: raw)
     }
 
     private static func bundledEnroll() -> URL? {
         guard let url = Bundle.main.url(forResource: "cloud", withExtension: "json"),
               let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let raw = json["enroll"] as? String,
-              let enroll = URL(string: raw), !raw.isEmpty else { return nil }
-        return enroll
+              let raw = json["enroll"] as? String else { return nil }
+        return enrollURL(from: raw)
     }
 }
