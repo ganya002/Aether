@@ -1280,8 +1280,9 @@ extension AppModel {
         case "/notify":
             let message = body["message"] as? String ?? ""
             guard !message.isEmpty else { return failure("Say what to notify.") }
-            let title = (try? resolved.get()).flatMap { panes[$0.pane]?.title } ?? "Aether"
-            FinishNotifier.deliver(title: title, body: message)
+            let source = try? resolved.get()
+            let title = source.flatMap { panes[$0.pane]?.title } ?? "Aether"
+            FinishNotifier.deliver(title: title, body: message, pane: source?.pane ?? "")
             return ["ok": true]
         case "/close":
             guard case .success(let caller) = resolved, caller.explicit else {
@@ -1316,6 +1317,10 @@ extension AppModel {
             desk.layout = Self.layout(for: Layout.visualIDs(desk.layout) + [paneID], kind: desk.kind)
         }
         guard desk.layout != before, desk.layout.panes.contains(paneID) else { return nil }
+        guard desk.kind == .stack || hasRoom(target.desk, desk.layout, ids: zone == nil ? nil : [target.pane, paneID]) else {
+            refuseNoRoom(target.desk, "No room for another pane")
+            return nil
+        }
         if focus { desk.focusedID = paneID }
         desk.maximizedID = nil
         desk.panes[paneID] = PaneState(id: paneID, cwd: directory, command: command, title: Self.initialTitle(command: command, cwd: directory), exitCode: nil)
