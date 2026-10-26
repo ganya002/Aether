@@ -328,11 +328,15 @@ def request(path, body, pane):
     import socket, urllib.error, urllib.request
     if pane:
         body["pane"] = pane
+    wait = 8
     session = os.environ.get("AETHER_SESSION", "")
     if session:
         body["session"] = session
         payload = {"path": path, "body": body, "session": session}
         url = "http://127.0.0.1:7392/agent"
+        # Commands and pane lists wait for the person at the Mac to allow them.
+        if body.get("command") or path == "/view":
+            wait = 125
         headers = {"Authorization": "Bearer " + os.environ.get("AETHER_TOKEN", ""), "Content-Type": "application/json"}
     else:
         port, token = credentials()
@@ -341,7 +345,7 @@ def request(path, body, pane):
         headers = {"Authorization": token, "Content-Type": "application/json"}
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with urllib.request.urlopen(req, timeout=wait) as response:
             raw = response.read()
     except urllib.error.HTTPError as error:
         raw = error.read()

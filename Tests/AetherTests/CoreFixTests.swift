@@ -108,6 +108,9 @@ import Testing
     #expect(EditingKeys.sequence(keyCode: left, flags: .command, optionIsMeta: false) == [0x01])
     #expect(EditingKeys.sequence(keyCode: right, flags: .command, optionIsMeta: false) == [0x05])
     #expect(EditingKeys.sequence(keyCode: delete, flags: .command, optionIsMeta: false) == [0x15])
+    #expect(EditingKeys.sequence(keyCode: left, flags: .command, optionIsMeta: false, alternateScreen: true) == nil)
+    #expect(EditingKeys.sequence(keyCode: delete, flags: .command, optionIsMeta: false, alternateScreen: true) == nil)
+    #expect(EditingKeys.sequence(keyCode: left, flags: .option, optionIsMeta: false, alternateScreen: true) == [0x1b, 0x62])
     // SwiftTerm already handles Option as Meta. Other chords keep their menu meaning.
     #expect(EditingKeys.sequence(keyCode: left, flags: .option, optionIsMeta: true) == nil)
     #expect(EditingKeys.sequence(keyCode: left, flags: [.command, .option], optionIsMeta: false) == nil)

@@ -245,15 +245,19 @@ enum AgentArgs {
         var explicit: Bool
     }
 
-    /// The pane a request is about: the one it names, else the one running its Cloud session,
-    /// else the focused pane of the front window.
-    static func target(pane: String?, session: String?, desks: [String: Desk], sessions: [String: String], keyDesk: String?) -> Result<Target, AgentError> {
+    static let cloudTerminalMissing = "That Cloud terminal isn't open on this Mac."
+
+    /// The pane a request is about: the one running its Cloud session, else the one it names,
+    /// else the focused pane of the front window. Without `allowFocusedFallback`, as for requests
+    /// from Cloud, only the session counts: a request never reaches a pane it doesn't run in.
+    static func target(pane: String?, session: String?, desks: [String: Desk], sessions: [String: String], keyDesk: String?, allowFocusedFallback: Bool = true) -> Result<Target, AgentError> {
         func desk(holding id: String) -> String? {
             desks.first { $0.value.panes[id] != nil }?.key
         }
         if let session, !session.isEmpty, let id = sessions.first(where: { $0.value == session })?.key, let deskID = desk(holding: id) {
             return .success(Target(desk: deskID, pane: id, explicit: true))
         }
+        guard allowFocusedFallback else { return .failure(AgentError(cloudTerminalMissing)) }
         if let pane, !pane.isEmpty {
             guard let deskID = desk(holding: pane) else { return .failure(AgentError("No pane \(pane).")) }
             return .success(Target(desk: deskID, pane: pane, explicit: true))
@@ -612,11 +616,15 @@ enum AgentCLI {
         import socket, urllib.error, urllib.request
         if pane:
             body["pane"] = pane
+        wait = 8
         session = os.environ.get("AETHER_SESSION", "")
         if session:
             body["session"] = session
             payload = {"path": path, "body": body, "session": session}
             url = "http://127.0.0.1:7392/agent"
+            # Commands and pane lists wait for the person at the Mac to allow them.
+            if body.get("command") or path == "/view":
+                wait = 125
             headers = {"Authorization": "Bearer " + os.environ.get("AETHER_TOKEN", ""), "Content-Type": "application/json"}
         else:
             port, token = credentials()
@@ -625,7 +633,7 @@ enum AgentCLI {
             headers = {"Authorization": token, "Content-Type": "application/json"}
         req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=8) as response:
+            with urllib.request.urlopen(req, timeout=wait) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
             raw = error.read()

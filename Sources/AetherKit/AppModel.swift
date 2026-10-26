@@ -10,6 +10,8 @@ struct PaneState: Codable, Equatable {
     var exitCode: Int32?
     /// The Cloud terminal this pane shows, so it can be attached again after Aether restarts.
     var remoteSession: String?
+    /// A restored pane's old command, offered again until it is run or dismissed.
+    var lastRan: String? = nil
 }
 
 struct Desk: Equatable {
@@ -105,6 +107,7 @@ final class AppModel {
         settings.clamp()
         let fileToken = settings.sessionToken.isEmpty ? (snapshot?.settings.sessionToken ?? "") : settings.sessionToken
         settings.sessionToken = TokenVault.shared.adopt(fileToken: fileToken)
+        noteKeychainProblem()
         if portable == nil, (snapshot?.version ?? 0) < Settings.currentVersion, settings.glass == .clear {
             settings.glass = .regular
         }
@@ -348,7 +351,7 @@ final class AppModel {
 
     /// The question to ask before quitting, or nil to quit right away.
     func quitQuestion() -> (title: String, detail: String)? {
-        if quitConfirmed { return nil }
+        if quitConfirmed || panes.isEmpty { return nil }
         let running = panes.values.filter { $0.runningCommand() != nil }
         switch settings.confirmClose {
         case .never:
@@ -362,7 +365,7 @@ final class AppModel {
             return ("Quit Aether?", "Every terminal closes.")
         }
         if running.count == 1, let name = running.first?.runningCommand()?.name {
-            return ("Quit Aether?", "`\(name)` is still running.")
+            return ("Quit Aether?", Self.stillRunning(name))
         }
         return ("Quit Aether?", "\(running.count) terminals are running commands.")
     }
@@ -389,9 +392,13 @@ final class AppModel {
             return ("Close \(noun)?", "The shell will end.")
         }
         if running.count == 1, let name = running.first?.name {
-            return ("Close \(noun)?", "`\(name)` is still running.")
+            return ("Close \(noun)?", Self.stillRunning(name))
         }
         return ("Close \(noun)?", "\(running.count) terminals are running commands.")
+    }
+
+    static func stillRunning(_ name: String) -> String {
+        name.hasPrefix(PaneController.cloudBusyPrefix) ? "\(name)." : "`\(name)` is still running."
     }
 
     private func ask(_ question: (title: String, detail: String), confirmTitle: String, key: String, window: NSWindow?, then: @escaping () -> Void) {
@@ -756,6 +763,13 @@ final class AppModel {
         scheduleSave()
     }
 
+    /// The pane's offer to run its old command again was taken or dismissed.
+    func forgetLastRan(_ paneID: String) {
+        guard let deskID = deskID(containing: paneID), desks[deskID]?.panes[paneID]?.lastRan != nil else { return }
+        desks[deskID]?.panes[paneID]?.lastRan = nil
+        scheduleSave()
+    }
+
     func shutdownAll() {
         // Saved panes keep their Cloud terminals for next launch. The dropdown is not saved, so its terminal ends.
         let unsaved = Set(dropdownID.flatMap { desks[$0]?.panes.keys }.map(Array.init) ?? [])
@@ -937,12 +951,13 @@ final class AppModel {
                 plain.title = Self.initialTitle(command: nil, cwd: pane.cwd)
             }
             makePane(plain, settings: settings)
-            let last = pane.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let last = (pane.command ?? pane.lastRan)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !last.isEmpty {
                 self.panes[pane.id]?.offerRerun(last)
             }
         }
         for (id, pane) in panes where pane.command != nil {
+            desks[saved.id]?.panes[id]?.lastRan = pane.command
             desks[saved.id]?.panes[id]?.command = nil
             desks[saved.id]?.panes[id]?.title = Self.initialTitle(command: nil, cwd: pane.cwd)
         }
@@ -1231,9 +1246,16 @@ enum SessionStore {
 }
 
 extension AppModel {
-    func agent(path: String, body: [String: Any]) -> [String: Any] {
+    /// The pane showing the Cloud terminal a Cloud request came from. Never any other pane.
+    func cloudTarget(_ body: [String: Any]) -> Result<AgentArgs.Target, AgentError> {
         let sessions = panes.compactMapValues { $0.chrome.terminal.remoteSession }
-        let resolved = AgentArgs.target(pane: body["pane"] as? String, session: body["session"] as? String, desks: desks, sessions: sessions, keyDesk: keyDeskID)
+        return AgentArgs.target(pane: nil, session: body["session"] as? String, desks: desks, sessions: sessions, keyDesk: keyDeskID, allowFocusedFallback: false)
+    }
+
+    func agent(path: String, body: [String: Any], fromCloud: Bool = false) -> [String: Any] {
+        let sessions = panes.compactMapValues { $0.chrome.terminal.remoteSession }
+        let resolved = fromCloud ? cloudTarget(body) : AgentArgs.target(pane: body["pane"] as? String, session: body["session"] as? String, desks: desks, sessions: sessions, keyDesk: keyDeskID)
+        if fromCloud, case .failure(let error) = resolved { return failure(error.message) }
         switch path {
         case "/tab", "/split":
             var zone: Zone?
@@ -1266,7 +1288,7 @@ extension AppModel {
                 return failure("Could not split that pane.")
             }
             guard let controller = panes[pane], controller.chrome.showPreview(kind: kind, source: source) else {
-                closePane(pane)
+                closePane(pane, confirm: false)
                 return failure(kind == "pdf" ? "Could not open \(source)." : "Could not open that page.")
             }
             controller.holdsPreview = true
@@ -1321,7 +1343,7 @@ extension AppModel {
                 return failure("You can only close panes you opened.")
             }
             AgentDesk.shared.openedBy[victim] = nil
-            closePane(victim)
+            closePane(victim, confirm: false)
             return ["ok": true, "pane": victim]
         default:
             return failure("Unknown request.")

@@ -157,7 +157,7 @@ final class AetherTerminal: LocalProcessTerminalView {
         var rest: [NSEvent] = []
         for event in eventArray {
             if event.type == .keyDown, !hasMarkedText(),
-               let bytes = EditingKeys.sequence(keyCode: event.keyCode, flags: event.modifierFlags, optionIsMeta: optionAsMetaKey) {
+               let bytes = EditingKeys.sequence(keyCode: event.keyCode, flags: event.modifierFlags, optionIsMeta: optionAsMetaKey, alternateScreen: terminal.isCurrentBufferAlternate) {
                 send(bytes)
             } else {
                 rest.append(event)
@@ -573,7 +573,7 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
     var onClose: (() -> Void)?
     var onFind: (() -> Void)?
     private var activity = ""
-    private var activityState = ""
+    private(set) var activityState = ""
     private var cloudNote = ""
     private var broadcasting = false
 
@@ -756,6 +756,8 @@ final class ExitBanner: NSView {
     var onClose: (() -> Void)?
     var onRunAgain: ((String) -> Void)?
     private(set) var lastRan: String?
+    /// Showing a connection notice, whose keys work while the shell is still alive.
+    private(set) var notice = false
     private let label = NSTextField(labelWithString: "Shell exited")
     private let button = NSButton()
     private let closeButton = NSButton()
@@ -787,6 +789,7 @@ final class ExitBanner: NSView {
 
     func setNotice(_ text: String, action: String) {
         lastRan = nil
+        notice = true
         label.stringValue = text
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
         button.title = action
@@ -796,6 +799,7 @@ final class ExitBanner: NSView {
 
     func setCode(_ code: Int32?) {
         lastRan = nil
+        notice = false
         let failed: Bool
         switch code {
         case 0?:
@@ -817,6 +821,7 @@ final class ExitBanner: NSView {
 
     func setLastRan(_ command: String) {
         lastRan = command
+        notice = false
         label.stringValue = "Last ran `\(command)`"
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
         button.title = "Run Again"
@@ -963,8 +968,18 @@ final class PaneController {
             launchRemote()
             return
         }
-        if resumeRemote != nil {
+        // Cloud was turned off. The Cloud terminal keeps running on the server, but this pane
+        // lets go of it, so typing reaches the new local shell.
+        let attached = chrome.terminal.remoteSession
+        if attached != nil || resumeRemote != nil {
+            remoteTicket += 1
+            remoteResumable = false
+            chrome.terminal.remoteSession = nil
             resumeRemote = nil
+            if let attached {
+                SessionHub.shared.detach(attached)
+                chrome.header.setActivity(state: "", message: "")
+            }
             AppModel.shared.noteRemote(id, session: nil)
         }
         launchLocal()
@@ -974,7 +989,7 @@ final class PaneController {
         remoteTicket += 1
         let ticket = remoteTicket
         chrome.header.setCloud("Connecting")
-        chrome.hideExit()
+        hideNotices()
         if chrome.terminal.process.running {
             chrome.terminal.terminate()
         }
@@ -1059,8 +1074,15 @@ final class PaneController {
                 self.chrome.showNotice("This Cloud terminal is gone", action: "Restart")
             }
         }
-        chrome.hideExit()
+        hideNotices()
         chrome.terminal.syncRemoteSize()
+    }
+
+    /// Hides exit and connection banners, but keeps a restored pane's offer to run its command again.
+    private func hideNotices() {
+        if chrome.exitBanner.lastRan == nil {
+            chrome.hideExit()
+        }
     }
 
     private func resetRemoteScreen() {
@@ -1106,11 +1128,21 @@ final class PaneController {
         }
     }
 
+    static let cloudBusyPrefix = "A Cloud terminal"
+
     /// What is running in the foreground, or nil for a shell waiting at its prompt.
-    /// Cloud panes report nil, since their processes live on the server.
+    /// A Cloud pane's processes live on the server, so it counts as busy while it reports working or blocked.
     func runningCommand() -> (name: String, line: String)? {
         let view = chrome.terminal
-        guard view.remoteSession == nil, !exited, let process = view.process, process.running, process.shellPid > 0 else { return nil }
+        if view.remoteSession != nil {
+            guard !exited else { return nil }
+            switch chrome.header.activityState {
+            case "working": return ("\(Self.cloudBusyPrefix) is still working", "Cloud terminal")
+            case "blocked": return ("\(Self.cloudBusyPrefix) is waiting for an answer", "Cloud terminal")
+            default: return nil
+            }
+        }
+        guard !exited, let process = view.process, process.running, process.shellPid > 0 else { return nil }
         let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmed.isEmpty {
             let name = trimmed.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? trimmed
@@ -1131,6 +1163,7 @@ final class PaneController {
 
     private func runAgain(_ command: String) {
         chrome.hideExit()
+        AppModel.shared.forgetLastRan(id)
         windowFocus()
         chrome.terminal.send(txt: command + "\r")
     }
@@ -1239,18 +1272,22 @@ final class PaneController {
             guard let self else { return }
             if self.chrome.exitBanner.lastRan != nil, data.contains(13) {
                 self.chrome.hideExit()
+                AppModel.shared.forgetLastRan(self.id)
             }
             self.onUserInput?(data)
         }
         chrome.terminal.onExitedKey = { [weak self] data in
-            guard let self, self.exited else { return false }
+            guard let self else { return false }
+            let notice = self.chrome.exitBanner.notice && !self.chrome.exitBanner.isHidden
+            guard self.exited || notice else { return false }
             switch Array(data) {
             case [13], Array("\u{1b}[13u".utf8):
                 self.onRestart?()
             case [0x1b], Array("\u{1b}[27u".utf8):
                 self.onClose?()
             default:
-                break
+                // A notice leaves other keys to the terminal, which reconnects when typed into.
+                return !notice || self.exited
             }
             return true
         }
@@ -1279,6 +1316,7 @@ final class PaneController {
             guard let self else { return }
             if self.chrome.exitBanner.lastRan != nil {
                 self.chrome.hideExit()
+                AppModel.shared.forgetLastRan(self.id)
             } else {
                 self.onClose?()
             }
