@@ -67,6 +67,28 @@ func TestPageSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestPageServesAppFiles(t *testing.T) {
+	for path, want := range map[string]string{
+		"/manifest.webmanifest":  "application/manifest+json",
+		"/apple-touch-icon.png":  "image/png",
+		"/icon-192.png":          "image/png",
+		"/icon-512.png":          "image/png",
+		"/icon-maskable-512.png": "image/png",
+		"/icon-32.png":           "image/png",
+	} {
+		rec := httptest.NewRecorder()
+		securityHeaders(webHandler()).ServeHTTP(rec, httptest.NewRequest("GET", "http://cloud.example"+path, nil))
+		if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), want) {
+			t.Fatalf("%s: %d %q", path, rec.Code, rec.Header().Get("Content-Type"))
+		}
+	}
+	rec := httptest.NewRecorder()
+	securityHeaders(webHandler()).ServeHTTP(rec, httptest.NewRequest("GET", "http://cloud.example/", nil))
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "manifest-src 'self'") {
+		t.Fatal("the policy blocks the manifest")
+	}
+}
+
 func TestSocketAnswersPing(t *testing.T) {
 	usePublicFiles(t)
 	t.Setenv("AETHER_PUBLIC_URL", "")

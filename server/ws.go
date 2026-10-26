@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"sync"
@@ -132,7 +133,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		}
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data:; font-src 'self'; connect-src "+connect+"; object-src 'none'; base-uri 'none'; "+
+			"img-src 'self' data:; font-src 'self'; manifest-src 'self'; connect-src "+connect+"; object-src 'none'; base-uri 'none'; "+
 			"form-action 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
@@ -154,6 +155,8 @@ func safeHost(host string) bool {
 }
 
 func webHandler() http.Handler {
+	// Go doesn't know this one, and the system table may not either.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 	sub, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		log.Printf("web files: %v", err)
