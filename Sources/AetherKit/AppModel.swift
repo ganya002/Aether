@@ -36,6 +36,8 @@ final class AppModel {
     private var closing: Set<String> = []
     private var lastKeyDesk: String?
     private var dropdownID: String?
+    private var dropdownReturnApp: NSRunningApplication?
+    private var focusHistory: [String: [String]] = [:]
     private var busySince: [String: Date] = [:]
 
     private init() {
@@ -48,15 +50,36 @@ final class AppModel {
 
     var keyDeskID: String? {
         if let window = NSApp.keyWindow {
-            for (id, controller) in controllers where controller.window === window {
+            for (id, controller) in controllers where controller.window === window && !closing.contains(id) {
                 lastKeyDesk = id
                 return id
             }
         }
-        if let lastKeyDesk, desks[lastKeyDesk] != nil, controllers[lastKeyDesk]?.window?.isVisible == true {
+        if let lastKeyDesk, desks[lastKeyDesk] != nil, !closing.contains(lastKeyDesk), controllers[lastKeyDesk]?.window?.isVisible == true {
             return lastKeyDesk
         }
-        return order.last { controllers[$0]?.window?.isVisible == true }
+        return order.last { !closing.contains($0) && controllers[$0]?.window?.isVisible == true }
+    }
+
+    /// The window's close animation has started; commands should stop landing in it.
+    func noteClosing(_ deskID: String) {
+        closing.insert(deskID)
+    }
+
+    /// Dock icon clicked. Bring back the most recent window, or open one if none is left.
+    func reopen() {
+        let normal = order.filter { desks[$0]?.dropdown == false && !closing.contains($0) }
+        let windows = normal.compactMap { controllers[$0]?.window }
+        guard !windows.isEmpty else {
+            newWindow()
+            return
+        }
+        if windows.contains(where: { $0.isVisible && !$0.isMiniaturized }) { return }
+        let recent = lastKeyDesk.flatMap { id in normal.contains(id) ? controllers[id]?.window : nil } ?? windows.last!
+        if recent.isMiniaturized {
+            recent.deminiaturize(nil)
+        }
+        recent.makeKeyAndOrderFront(nil)
     }
 
     func noteKey(_ deskID: String) {
@@ -116,17 +139,14 @@ final class AppModel {
     func toggleDropdown() {
         guard settings.dropdownEnabled else { return }
         if let id = dropdownID, let controller = controllers[id] {
-            if controller.window?.isVisible == true, (controller.window?.alphaValue ?? 0) > 0.4 {
-                controller.dismissDropdown()
+            if let window = controller.window, window.isVisible, window.alphaValue > 0.4, window.isKeyWindow, NSApp.isActive {
+                controller.dismissDropdown(restoreFocus: true)
             } else {
-                controller.presentDropdown()
+                showDropdown(controller)
             }
             return
         }
-        let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
-        let width = min(980, screen.width - 36)
-        let height = min(460, max(320, screen.height * 0.44))
-        let frame = CGRect(x: screen.midX - width / 2, y: screen.maxY - height - 8, width: width, height: height)
+        let frame = DeskController.dropdownFrame(on: DeskController.screenUnderMouse())
         let id = UUID().uuidString
         let paneID = UUID().uuidString
         let directory = focusedDirectory() ?? System.home()
@@ -147,13 +167,33 @@ final class AppModel {
         let controller = makeController(desk)
         makePane(desk.panes[paneID]!, settings: settings)
         controller.sync()
-        controller.presentDropdown()
+        showDropdown(controller)
         startSoon(paneID)
     }
 
-    func noteDropdownHidden(_ deskID: String) {
-        guard dropdownID == deskID, lastKeyDesk == deskID else { return }
-        lastKeyDesk = order.last { $0 != deskID && controllers[$0]?.window?.isVisible == true }
+    /// Remembers which app had focus, then takes keyboard focus so typing lands in the dropdown.
+    private func showDropdown(_ controller: DeskController) {
+        let front = NSWorkspace.shared.frontmostApplication
+        dropdownReturnApp = front?.processIdentifier == getpid() ? nil : front
+        NSApp.activate()
+        controller.presentDropdown()
+    }
+
+    /// `restoreFocus` is false when the dropdown hid because the user clicked elsewhere;
+    /// focus is already where they want it.
+    func noteDropdownHidden(_ deskID: String, restoreFocus: Bool) {
+        guard dropdownID == deskID else { return }
+        let returnApp = dropdownReturnApp
+        dropdownReturnApp = nil
+        if lastKeyDesk == deskID {
+            lastKeyDesk = order.last { $0 != deskID && controllers[$0]?.window?.isVisible == true }
+        }
+        guard restoreFocus else { return }
+        if let returnApp, !returnApp.isTerminated {
+            NSApp.yieldActivation(to: returnApp)
+            returnApp.activate()
+            return
+        }
         if let lastKeyDesk, let window = controllers[lastKeyDesk]?.window {
             window.makeKeyAndOrderFront(nil)
         }
@@ -169,14 +209,22 @@ final class AppModel {
         let previous = desk.focusedID
         var ids = Layout.visualIDs(desk.layout)
         ids.append(paneID)
+        let layout: LayoutNode
+        if desk.kind == .splits {
+            layout = Layout.insert(desk.layout, target: previous, zone: .right, newID: paneID)
+        } else {
+            layout = Self.layout(for: ids, kind: desk.kind)
+        }
+        let checked: Set<String>? = desk.kind == .splits ? [previous, paneID] : nil
+        guard desk.kind == .stack || hasRoom(deskID, layout, ids: checked) else {
+            refuseNoRoom(deskID, "No room for another pane")
+            return
+        }
+        desk.layout = layout
+        noteFocusLeaving(deskID, previous)
         desk.focusedID = paneID
         desk.maximizedID = nil
         desk.panes[paneID] = PaneState(id: paneID, cwd: directory, command: command, title: Self.initialTitle(command: command, cwd: directory), exitCode: nil)
-        if desk.kind == .splits {
-            desk.layout = Layout.insert(desk.layout, target: previous, zone: .right, newID: paneID)
-        } else {
-            desk.layout = Self.layout(for: ids, kind: desk.kind)
-        }
         desks[deskID] = desk
         makePane(desk.panes[paneID]!, settings: settings)
         controllers[deskID]?.sync(animated: true)
@@ -191,8 +239,14 @@ final class AppModel {
         }
         let directory = desk.panes[desk.focusedID]?.cwd ?? System.home()
         let paneID = UUID().uuidString
+        let layout = Layout.insert(desk.layout, target: desk.focusedID, zone: zone, newID: paneID)
+        guard hasRoom(deskID, layout, ids: [desk.focusedID, paneID]) else {
+            refuseNoRoom(deskID, "No room to split")
+            return
+        }
         desk.kind = .splits
-        desk.layout = Layout.insert(desk.layout, target: desk.focusedID, zone: zone, newID: paneID)
+        desk.layout = layout
+        noteFocusLeaving(deskID, desk.focusedID)
         desk.focusedID = paneID
         desk.maximizedID = nil
         desk.panes[paneID] = PaneState(id: paneID, cwd: directory, command: command, title: Self.initialTitle(command: command, cwd: directory), exitCode: nil)
@@ -201,6 +255,25 @@ final class AppModel {
         controllers[deskID]?.sync(animated: true)
         startSoon(paneID)
         scheduleSave()
+    }
+
+    private func hasRoom(_ deskID: String, _ layout: LayoutNode, ids: Set<String>?) -> Bool {
+        guard let area = controllers[deskID]?.contentArea(), area.width > 0, area.height > 0 else { return true }
+        return Layout.fits(layout, in: area, gap: CGFloat(settings.gap), ids: ids)
+    }
+
+    private func refuseNoRoom(_ deskID: String, _ message: String) {
+        NSSound.beep()
+        controllers[deskID]?.flashLayout(message)
+    }
+
+    private func noteFocusLeaving(_ deskID: String, _ paneID: String) {
+        var history = focusHistory[deskID] ?? []
+        history.removeAll { $0 == paneID }
+        history.append(paneID)
+        if history.count > 16 { history.removeFirst(history.count - 16) }
+        focusHistory[deskID] = history
+        focusHistory = focusHistory.filter { desks[$0.key] != nil }
     }
 
     func closePane(_ paneID: String) {
@@ -217,7 +290,7 @@ final class AppModel {
             return
         }
         if desk.focusedID == paneID {
-            desk.focusedID = remaining[0]
+            desk.focusedID = Layout.successor(Layout.layoutRects(desk.layout), of: paneID, history: focusHistory[deskID] ?? []).flatMap { remaining.contains($0) ? $0 : nil } ?? remaining[0]
         }
         if desk.kind == .splits, let next = Layout.remove(desk.layout, paneID) {
             desk.layout = next
@@ -259,6 +332,7 @@ final class AppModel {
             controllers[deskID]?.canvas.refreshFocus()
             return
         }
+        noteFocusLeaving(deskID, desk.focusedID)
         desk.focusedID = paneID
         desks[deskID] = desk
         controllers[deskID]?.sync()
@@ -276,7 +350,8 @@ final class AppModel {
             return
         }
         let rects = Layout.layoutRects(desk.layout)
-        guard let next = Layout.neighbor(rects, id: desk.focusedID, direction: direction) else { return }
+        guard let next = Layout.neighbor(rects, id: desk.focusedID, direction: direction, history: focusHistory[deskID] ?? []) else { return }
+        noteFocusLeaving(deskID, desk.focusedID)
         desk.focusedID = next
         // A hidden pane can still become first responder. Showing the neighbor
         // means keystrokes never land in a shell the user cannot see.
@@ -348,7 +423,10 @@ final class AppModel {
         let screen = controllers[keyDeskID ?? ""]?.window?.screen?.visibleFrame
             ?? NSScreen.main?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1200, height: 800)
-        let ids = order.filter { desks[$0] != nil && desks[$0]?.dropdown != true }
+        let ids = order.filter { id in
+            guard desks[id]?.dropdown == false, !closing.contains(id), let window = controllers[id]?.window else { return false }
+            return window.isVisible && !window.isMiniaturized && !window.styleMask.contains(.fullScreen)
+        }
         let rects = Layout.tidyRects(ids, gap: 0.018)
         for id in ids {
             guard let norm = rects[id], let window = controllers[id]?.window else { continue }
@@ -429,11 +507,12 @@ final class AppModel {
         return Layout.ratio(of: splitID, in: desk.layout)
     }
 
-    func setRatio(deskID: String, splitID: String, ratio: Double) {
+    func setRatio(deskID: String, splitID: String, ratio: Double, bounds: ClosedRange<Double>? = nil) {
         guard var desk = desks[deskID] else { return }
-        desk.layout = Layout.setRatio(desk.layout, splitID: splitID, ratio: ratio)
+        desk.layout = Layout.setRatio(desk.layout, splitID: splitID, ratio: ratio, bounds: bounds)
         desks[deskID] = desk
         controllers[deskID]?.sync()
+        scheduleSave()
     }
 
     func noteFrame(_ deskID: String, _ frame: CGRect) {
@@ -446,10 +525,13 @@ final class AppModel {
             controllers.first { $0.value.window === window }?.key
         }
         for deskID in frontToBack {
-            guard let controller = controllers[deskID], let window = controller.window, window.frame.contains(screenPoint) else { continue }
+            guard let controller = controllers[deskID], let window = controller.window, window.isVisible, !closing.contains(deskID), window.frame.contains(screenPoint) else { continue }
             let local = controller.canvas.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
             guard let desk = desks[deskID] else { continue }
-            var best: (id: String, distance: CGFloat)?
+            if desk.dropdown, desks[deskID]?.panes[paneID] == nil {
+                return .refused(desk: deskID)
+            }
+            var best: (id: String, distance: CGFloat, zone: Zone)?
             for id in desk.layout.panes {
                 guard let frame = controller.canvas.frameOfPane(id) else { continue }
                 if frame.contains(local) {
@@ -466,15 +548,21 @@ final class AppModel {
                 let dy = max(frame.minY - local.y, local.y - frame.maxY, 0)
                 let distance = hypot(dx, dy)
                 if best == nil || distance < best!.distance {
-                    best = (id, distance)
+                    let zone: Zone
+                    if dx >= dy {
+                        zone = local.x < frame.minX ? .left : .right
+                    } else {
+                        zone = local.y > frame.maxY ? .top : .bottom
+                    }
+                    best = (id, distance, zone)
                 }
             }
             if let best, best.id != paneID, best.distance < 40 {
-                return .onto(pane: best.id, zone: .right)
+                return .onto(pane: best.id, zone: best.zone)
             }
             return nil
         }
-        return .detach(origin: NSPoint(x: screenPoint.x - 80, y: screenPoint.y - 300))
+        return .detach(origin: NSPoint(x: screenPoint.x - 80, y: screenPoint.y - 300), cursor: screenPoint)
     }
 
     func showHighlight(_ target: DropTarget?, dragging paneID: String) {
@@ -491,10 +579,13 @@ final class AppModel {
 
     func performDrop(paneID: String, target: DropTarget, from sourceDeskID: String) {
         switch target {
-        case .detach(let origin):
-            detach(paneID, at: origin, from: sourceDeskID)
+        case .detach(let origin, let cursor):
+            detach(paneID, at: origin, cursor: cursor, from: sourceDeskID)
         case .onto(let targetID, let zone):
             move(paneID, onto: targetID, zone: zone)
+        case .refused(let deskID):
+            NSSound.beep()
+            controllers[deskID]?.flashLayout("Panes can’t move into the dropdown")
         }
     }
 
@@ -521,6 +612,11 @@ final class AppModel {
             return
         }
         if zone == .center {
+            if desks[sourceID]?.dropdown == true || desks[targetDeskID]?.dropdown == true {
+                NSSound.beep()
+                controllers[targetDeskID]?.flashLayout("Panes can’t move into the dropdown")
+                return
+            }
             swap(paneID, with: targetID)
             return
         }
@@ -568,6 +664,8 @@ final class AppModel {
         target.panes[paneID] = sourceRecord
         if source.focusedID == paneID { source.focusedID = targetID }
         if target.focusedID == targetID { target.focusedID = paneID }
+        if source.maximizedID == paneID { source.maximizedID = nil }
+        if target.maximizedID == targetID { target.maximizedID = nil }
         desks[sourceID] = source
         desks[targetDeskID] = target
         controllers[sourceID]?.sync(animated: true)
@@ -575,17 +673,20 @@ final class AppModel {
         scheduleSave()
     }
 
-    private func detach(_ paneID: String, at origin: CGPoint, from sourceID: String) {
+    private func detach(_ paneID: String, at origin: CGPoint, cursor: CGPoint, from sourceID: String) {
         guard var source = desks[sourceID], let record = source.panes[paneID] else { return }
+        let screen = (NSScreen.screens.first { NSMouseInRect(cursor, $0.frame, false) } ?? NSScreen.main)?.visibleFrame
         if Layout.count(source.layout) < 2 {
-            let screen = controllers[sourceID]?.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
-            var frame = source.frame
+            guard !source.dropdown, let window = controllers[sourceID]?.window, !window.styleMask.contains(.fullScreen) else { return }
+            var frame = window.frame
             frame.origin = origin
             if let screen {
+                frame.size.width = min(frame.width, screen.width)
+                frame.size.height = min(frame.height, screen.height)
                 frame.origin.x = min(max(frame.origin.x, screen.minX), screen.maxX - frame.width)
                 frame.origin.y = min(max(frame.origin.y, screen.minY), screen.maxY - frame.height)
             }
-            controllers[sourceID]?.window?.setFrame(frame, display: true, animate: true)
+            window.setFrame(frame, display: true, animate: true)
             noteFrame(sourceID, frame)
             return
         }
@@ -598,7 +699,7 @@ final class AppModel {
 
         let deskID = UUID().uuidString
         var frame = CGRect(x: origin.x, y: origin.y, width: 680, height: 440)
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(origin) })?.visibleFrame ?? NSScreen.main?.visibleFrame {
+        if let screen {
             frame.size.width = min(frame.width, screen.width - 40)
             frame.size.height = min(frame.height, screen.height - 40)
             frame.origin.x = min(max(frame.origin.x, screen.minX), screen.maxX - frame.width)
@@ -821,7 +922,7 @@ final class AppModel {
         guard !CommandLine.arguments.contains("--smoke") else { return }
         let saved = order.compactMap { id -> SavedDesk? in
             guard let desk = desks[id], !desk.dropdown else { return nil }
-            let frame = controllers[id]?.window?.frame ?? desk.frame
+            let frame = controllers[id]?.restorableFrame ?? desk.frame
             return SavedDesk(
                 id: desk.id,
                 x: frame.minX,

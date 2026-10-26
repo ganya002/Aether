@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import SwiftTerm
 
 enum Motion {
     /// Fast out, soft landing. Used for presses and focus.
@@ -42,7 +43,9 @@ enum Motion {
 
 enum DropTarget: Equatable {
     case onto(pane: String, zone: Zone)
-    case detach(origin: CGPoint)
+    case detach(origin: CGPoint, cursor: CGPoint)
+    /// Over a window that does not accept panes (the dropdown).
+    case refused(desk: String)
 }
 
 @MainActor
@@ -57,7 +60,15 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     private var settlingResize = false
     private var acceptingClose = false
     private var dropdownGeneration = 0
-    private var dropdownRest: CGRect?
+    private var dropdownSize: CGSize?
+    private var dropdownAnimating = false
+    private var dragWatch: Timer?
+    private var fullScreenTransition = false
+    private var lastDividerSync: CFTimeInterval = 0
+
+    // TODO: move to Settings (dropdownHeightPercent, dropdownHideOnFocusLoss) once the settings owner adds them.
+    static let dropdownHeightFraction: CGFloat = 0.44
+    static let dropdownHidesOnFocusLoss = true
 
     init(deskID: String, frame: NSRect) {
         self.deskID = deskID
@@ -146,40 +157,71 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         })
     }
 
+    static func screenUnderMouse() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+    }
+
+    /// Top-center of `screen`, hanging from the menu bar.
+    static func dropdownFrame(on screen: NSScreen?, size: CGSize? = nil) -> CGRect {
+        let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
+        let width = min(size?.width ?? 980, visible.width - 36)
+        let height = min(size?.height ?? min(460, max(320, visible.height * dropdownHeightFraction)), visible.height - 16)
+        return CGRect(x: visible.midX - width / 2, y: visible.maxY - height, width: width, height: height)
+    }
+
     func presentDropdown() {
         guard let window else { return }
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .managed]
-        let screen = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
-        let width = min(980, screen.width - 36)
-        let height = min(460, max(320, screen.height * 0.44))
-        let fallback = CGRect(x: screen.midX - width / 2, y: screen.maxY - height - 8, width: width, height: height)
-        let target = dropdownRest ?? fallback
-        dropdownRest = target
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(kind)?.isHidden = true
+        }
+        let target = Self.dropdownFrame(on: Self.screenUnderMouse(), size: dropdownSize)
         dropdownGeneration += 1
-        window.alphaValue = 0
-        window.setFrame(target.offsetBy(dx: 0, dy: 14), display: false)
+        let generation = dropdownGeneration
+        dropdownAnimating = true
+        // Mid-dismiss, turn around from where it is; otherwise slide down from the top edge.
+        if !window.isVisible || window.alphaValue < 0.05 {
+            window.alphaValue = 0
+            window.setFrame(target.offsetBy(dx: 0, dy: min(24, target.height)), display: false)
+        }
         window.makeKeyAndOrderFront(nil)
-        Motion.group(Motion.snap) {
+        window.orderFrontRegardless()
+        Motion.group(Motion.snap, {
             window.animator().setFrame(target, display: true)
             window.animator().alphaValue = 1
-        }
+        }, done: { [weak self] in
+            guard let self, self.dropdownGeneration == generation else { return }
+            self.dropdownAnimating = false
+        })
     }
 
-    func dismissDropdown() {
+    func dismissDropdown(restoreFocus: Bool) {
         guard let window else { return }
         dropdownGeneration += 1
         let generation = dropdownGeneration
-        dropdownRest = window.frame
+        dropdownAnimating = true
         let frame = window.frame
         Motion.group(Motion.close, {
             window.animator().alphaValue = 0
             window.animator().setFrame(frame.offsetBy(dx: 0, dy: 12), display: true)
         }, done: { [weak self] in
             guard let self, let window = self.window, self.dropdownGeneration == generation else { return }
+            self.dropdownAnimating = false
             window.orderOut(nil)
-            AppModel.shared.noteDropdownHidden(self.deskID)
+            AppModel.shared.noteDropdownHidden(self.deskID, restoreFocus: restoreFocus)
         })
+    }
+
+    private var isDropdown: Bool {
+        AppModel.shared.desks[deskID]?.dropdown == true
+    }
+
+    /// The frame worth saving: nil while fullscreen or mid-animation.
+    var restorableFrame: CGRect? {
+        guard let window, !fullScreenTransition, !window.styleMask.contains(.fullScreen), !acceptingClose else { return nil }
+        return window.frame
     }
 
     func flashLayout(_ title: String) {
@@ -230,6 +272,13 @@ final class DeskController: NSWindowController, NSWindowDelegate {
             self?.finishWindowDrag()
             return event
         }
+        // The mouse-up can land outside the app; never leave the monitor behind.
+        dragWatch = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard NSEvent.pressedMouseButtons & 0x1 == 0 else { return }
+                self?.finishWindowDrag()
+            }
+        }
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
@@ -243,6 +292,9 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     func windowDidResize(_ notification: Notification) {
         canvas.frame = glass.bounds
         sync()
+        if liveResizing {
+            showGridSize()
+        }
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -258,12 +310,41 @@ final class DeskController: NSWindowController, NSWindowDelegate {
             let settings = AppModel.shared.settings
             self.glass.style = settings.glass == .clear ? .clear : .regular
         }
+        if isDropdown, !dropdownAnimating, let size = window?.frame.size {
+            dropdownSize = size
+        }
         rememberFrame()
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        fullScreenTransition = true
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        fullScreenTransition = false
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        fullScreenTransition = false
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        fullScreenTransition = true
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        fullScreenTransition = false
+        rememberFrame()
+    }
+
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        fullScreenTransition = false
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if acceptingClose { return true }
         acceptingClose = true
+        AppModel.shared.noteClosing(deskID)
         Motion.group(Motion.close, {
             sender.animator().alphaValue = 0
             let frame = sender.frame
@@ -275,34 +356,48 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        if let dragMonitor {
-            NSEvent.removeMonitor(dragMonitor)
-            self.dragMonitor = nil
-        }
+        stopWatchingWindowDrag()
         AppModel.shared.deskWindowClosed(deskID)
     }
 
     func windowDidResignKey(_ notification: Notification) {
         canvas.refreshFocus()
+        guard isDropdown, Self.dropdownHidesOnFocusLoss else { return }
+        // Wait a turn so the new key window is known. Aether's own panels and alerts
+        // (palette, settings, confirmations) keep the dropdown open.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window, window.isVisible, window.alphaValue > 0.05,
+                  !window.isKeyWindow, window.attachedSheet == nil else { return }
+            if let key = NSApp.keyWindow, !(key.windowController is DeskController) { return }
+            self.dismissDropdown(restoreFocus: false)
+        }
     }
 
-    private func finishWindowDrag() {
+    private func stopWatchingWindowDrag() {
         if let dragMonitor {
             NSEvent.removeMonitor(dragMonitor)
             self.dragMonitor = nil
         }
-        guard let window, !snapping else {
+        dragWatch?.invalidate()
+        dragWatch = nil
+    }
+
+    private func finishWindowDrag() {
+        stopWatchingWindowDrag()
+        guard let window, !snapping, !isDropdown, restorableFrame != nil else {
             rememberFrame()
             return
         }
         let settings = AppModel.shared.settings
         let option = NSEvent.modifierFlags.contains(.option)
-        if settings.snapWindows, !option, let screen = window.screen?.visibleFrame {
-            let others = AppModel.shared.controllers.values.compactMap { controller -> CGRect? in
-                guard controller !== self, let frame = controller.window?.frame else { return nil }
-                return frame
+        if settings.snapWindows, !option {
+            let others = AppModel.shared.controllers.compactMap { id, controller -> CGRect? in
+                guard controller !== self, AppModel.shared.desks[id]?.dropdown != true, let other = controller.window,
+                      other.isVisible, !other.isMiniaturized, other.isOnActiveSpace, other.alphaValue > 0.5 else { return nil }
+                return other.frame
             }
-            let snapped = Layout.snapFrame(window.frame, others: others, screen: screen, threshold: 12)
+            let screens = NSScreen.screens.map(\.visibleFrame)
+            let snapped = Layout.snapFrame(window.frame, others: others, screens: screens, threshold: 12)
             if !nearlyEqual(snapped, window.frame) {
                 snapping = true
                 window.setFrame(snapped, display: true, animate: false)
@@ -313,21 +408,65 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     }
 
     private func rememberFrame() {
-        guard let frame = window?.frame else { return }
+        guard let frame = restorableFrame else { return }
         AppModel.shared.noteFrame(deskID, frame)
+    }
+
+    private func showGridSize() {
+        guard let desk = AppModel.shared.desks[deskID], let pane = AppModel.shared.panes[desk.focusedID] else { return }
+        let terminal: Terminal = pane.chrome.terminal.getTerminal()
+        guard terminal.cols > 0, terminal.rows > 0 else { return }
+        canvas.flash("\(terminal.cols) × \(terminal.rows)", linger: 0.7)
+    }
+
+    /// Waits for the next drag event. Returns nil once the button is up even if the
+    /// mouse-up never arrived, and `.keyDown` for Escape so callers can cancel.
+    private func nextDragEvent(timeout: TimeInterval) -> (event: NSEvent?, ended: Bool) {
+        let event = NSApp.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+            until: Date(timeIntervalSinceNow: timeout),
+            inMode: .eventTracking,
+            dequeue: true
+        )
+        if event == nil, NSEvent.pressedMouseButtons & 0x1 == 0 {
+            return (nil, true)
+        }
+        return (event, false)
     }
 
     func trackDivider(_ grip: DividerGrip, _ start: NSEvent) {
         let origin = start.locationInWindow
         guard let ratio = AppModel.shared.ratio(deskID: deskID, splitID: grip.splitID) else { return }
         let span = max(grip.span, 1)
+        let bounds = Layout.dragBounds(span: span, current: ratio)
+        let frameInterval = 1.0 / Double(max(window?.screen?.maximumFramesPerSecond ?? 60, 30))
+        var pending: Double?
+        func apply(_ value: Double) {
+            AppModel.shared.setRatio(deskID: deskID, splitID: grip.splitID, ratio: value, bounds: bounds)
+            lastDividerSync = CACurrentMediaTime()
+            pending = nil
+        }
         while true {
-            guard let event = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: nil, inMode: .eventTracking, dequeue: true) else { continue }
+            let (event, ended) = nextDragEvent(timeout: pending == nil ? 0.25 : frameInterval)
+            if ended { break }
+            guard let event else {
+                if let value = pending, CACurrentMediaTime() - lastDividerSync >= frameInterval { apply(value) }
+                continue
+            }
+            if event.type == .keyDown {
+                if event.keyCode == 53 {
+                    apply(ratio)
+                    return
+                }
+                continue
+            }
             let now = event.locationInWindow
             let delta: CGFloat = grip.axis == .row ? (now.x - origin.x) : (origin.y - now.y)
-            AppModel.shared.setRatio(deskID: deskID, splitID: grip.splitID, ratio: ratio + Double(delta / span))
+            pending = ratio + Double(delta / span)
             if event.type == .leftMouseUp { break }
+            if let value = pending, CACurrentMediaTime() - lastDividerSync >= frameInterval { apply(value) }
         }
+        if let value = pending { apply(value) }
     }
 
     func trackPaneDrag(_ paneID: String, _ start: NSEvent) {
@@ -344,7 +483,13 @@ final class DeskController: NSWindowController, NSWindowDelegate {
             AppModel.shared.hideHighlights()
         }
         while true {
-            guard let event = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: nil, inMode: .eventTracking, dequeue: true) else { continue }
+            let (event, ended) = nextDragEvent(timeout: 0.25)
+            if ended { break }
+            guard let event else { continue }
+            if event.type == .keyDown {
+                if event.keyCode == 53 { return }
+                continue
+            }
             let point = NSEvent.mouseLocation
             if hypot(point.x - startPoint.x, point.y - startPoint.y) > 5 { moved = true }
             preview.place(at: point)
@@ -414,10 +559,10 @@ final class DeskCanvas: NSView {
         let placed: (panes: [PlacedPane], dividers: [PlacedDivider])
         let onlyFocused = desk.kind == .stack && desk.maximizedID == nil
         if let maximized = desk.maximizedID, desk.layout.panes.contains(maximized) {
-            let inset = area.insetBy(dx: CGFloat(settings.gap) / 2, dy: CGFloat(settings.gap) / 2)
+            let inset = Layout.inset(area, by: CGFloat(settings.gap) / 2)
             placed = ([PlacedPane(id: maximized, frame: inset)], [])
         } else if onlyFocused {
-            let inset = area.insetBy(dx: CGFloat(settings.gap) / 2, dy: CGFloat(settings.gap) / 2)
+            let inset = Layout.inset(area, by: CGFloat(settings.gap) / 2)
             placed = ([PlacedPane(id: desk.focusedID, frame: inset)], [])
         } else {
             placed = Layout.place(desk.layout, in: area, gap: CGFloat(settings.gap))
@@ -552,18 +697,21 @@ final class DeskCanvas: NSView {
         })
     }
 
-    func flash(_ title: String) {
+    func flash(_ title: String, linger: TimeInterval = 0.85) {
         hudToken += 1
         let token = hudToken
         hud.setTitle(title)
-        let width = min(bounds.width - 24, max(88, CGFloat(title.count) * 9 + 36))
+        let width = min(bounds.width - 24, max(88, hud.fittingWidth))
         hud.frame = CGRect(x: (bounds.width - width) / 2, y: bounds.height - 58, width: width, height: 32)
-        hud.alphaValue = 0
-        addSubview(hud)
+        // Repeated flashes (live resize) update in place instead of blinking.
+        if hud.superview !== self || hud.alphaValue < 0.05 {
+            hud.alphaValue = 0
+            addSubview(hud)
+        }
         Motion.group(Motion.close) {
             self.hud.animator().alphaValue = 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + linger) { [weak self] in
             guard let self, self.hudToken == token else { return }
             Motion.group(Motion.close, {
                 self.hud.animator().alphaValue = 0
@@ -704,6 +852,11 @@ final class LayoutHUD: NSView {
 
     func setTitle(_ title: String) {
         label.stringValue = title
+        needsLayout = true
+    }
+
+    var fittingWidth: CGFloat {
+        ceil(label.intrinsicContentSize.width) + 36
     }
 
     override func layout() {

@@ -107,8 +107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { model.newWindow() }
-        return true
+        model.reopen()
+        return false
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

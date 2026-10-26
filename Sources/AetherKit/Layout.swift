@@ -142,6 +142,10 @@ public enum Layout {
 
     public static let minRatio = 0.08
     public static let maxRatio = 0.92
+    /// Smallest pane a split or a new pane may produce, after gaps.
+    public static let minPaneSize = CGSize(width: 80, height: 60)
+    /// Smallest extent a divider drag may squeeze a side to.
+    public static let minDragPoints: CGFloat = 40
 
     public static func clamp(_ value: Double, _ lo: Double, _ hi: Double) -> Double {
         min(hi, max(lo, value))
@@ -218,18 +222,23 @@ public enum Layout {
         }
     }
 
-    public static func setRatio(_ node: LayoutNode, splitID: String, ratio: Double) -> LayoutNode {
+    /// Without `bounds`, the ratio stays within `minRatio...maxRatio`, widened to
+    /// include the current value so a split that already sits outside (13+ columns)
+    /// never jumps when nudged or dragged.
+    public static func setRatio(_ node: LayoutNode, splitID: String, ratio: Double, bounds: ClosedRange<Double>? = nil) -> LayoutNode {
         switch node {
         case .pane:
             return node
         case .split(let id, let axis, let current, let a, let b):
             if id == splitID {
-                let next = clamp(ratio, minRatio, maxRatio)
+                let lo = bounds?.lowerBound ?? min(minRatio, current)
+                let hi = bounds?.upperBound ?? max(maxRatio, current)
+                let next = clamp(ratio, lo, hi)
                 if next == current { return node }
                 return .split(id: id, axis: axis, ratio: next, a: a, b: b)
             }
-            let nextA = setRatio(a, splitID: splitID, ratio: ratio)
-            let nextB = setRatio(b, splitID: splitID, ratio: ratio)
+            let nextA = setRatio(a, splitID: splitID, ratio: ratio, bounds: bounds)
+            let nextB = setRatio(b, splitID: splitID, ratio: ratio, bounds: bounds)
             if nextA == a, nextB == b { return node }
             return .split(id: id, axis: axis, ratio: current, a: nextA, b: nextB)
         }
@@ -304,6 +313,8 @@ public enum Layout {
         }
     }
 
+    /// Each side gets room in proportion to how many panes sit side by side along
+    /// the split's axis, so every column (or row) ends up the same size.
     public static func equalize(_ node: LayoutNode) -> LayoutNode {
         switch node {
         case .pane:
@@ -311,9 +322,63 @@ public enum Layout {
         case .split(let id, let axis, let ratio, let a, let b):
             let nextA = equalize(a)
             let nextB = equalize(b)
-            let nextRatio = Double(count(nextA)) / Double(count(nextA) + count(nextB))
+            let weightA = Double(extent(nextA, along: axis))
+            let weightB = Double(extent(nextB, along: axis))
+            let nextRatio = weightA / (weightA + weightB)
             if nextA == a, nextB == b, abs(nextRatio - ratio) < 1e-6 { return node }
             return .split(id: id, axis: axis, ratio: nextRatio, a: nextA, b: nextB)
+        }
+    }
+
+    /// How many panes line up along `axis` inside `node`.
+    public static func extent(_ node: LayoutNode, along axis: Axis) -> Int {
+        switch node {
+        case .pane:
+            return 1
+        case .split(_, let splitAxis, _, let a, let b):
+            if splitAxis == axis {
+                return extent(a, along: axis) + extent(b, along: axis)
+            }
+            return max(extent(a, along: axis), extent(b, along: axis))
+        }
+    }
+
+    /// Ratio limits for a divider drag: a side may shrink to `minDragPoints`, but never
+    /// past where the split already sits.
+    public static func dragBounds(span: CGFloat, current: Double) -> ClosedRange<Double> {
+        let base = clamp(Double(minDragPoints / max(span, 1)), 0.005, minRatio)
+        return min(base, current)...max(1 - base, current)
+    }
+
+    /// True when every pane in `ids` (or every pane) gets at least `minimum` points.
+    public static func fits(
+        _ node: LayoutNode,
+        in area: CGRect,
+        gap: CGFloat,
+        ids: Set<String>? = nil,
+        minimum: CGSize = minPaneSize
+    ) -> Bool {
+        let placed = place(node, in: area, gap: gap).panes
+        return placed.allSatisfy { pane in
+            guard ids?.contains(pane.id) ?? true else { return true }
+            return pane.frame.width >= minimum.width && pane.frame.height >= minimum.height
+        }
+    }
+
+    /// The pane focus should land on when `id` goes away: its closest neighbor.
+    public static func successor(_ rects: [String: NormRect], of id: String, history: [String] = []) -> String? {
+        guard let me = rects[id] else { return nil }
+        let candidates = [Direction.left, .up, .right, .down].compactMap { neighbor(rects, id: id, direction: $0, history: history) }
+        let pool = candidates.isEmpty ? rects.keys.filter { $0 != id } : candidates
+        func distance(_ other: String) -> Double {
+            guard let rect = rects[other] else { return .infinity }
+            return hypot((rect.x + rect.w / 2) - (me.x + me.w / 2), (rect.y + rect.h / 2) - (me.y + me.h / 2))
+        }
+        func recency(_ other: String) -> Int { history.lastIndex(of: other) ?? -1 }
+        return pool.sorted().min { lhs, rhs in
+            let ld = distance(lhs), rd = distance(rhs)
+            if abs(ld - rd) > 1e-6 { return ld < rd }
+            return recency(lhs) > recency(rhs)
         }
     }
 
@@ -334,8 +399,40 @@ public enum Layout {
         return node
     }
 
-    public static func neighbor(_ rects: [String: NormRect], id: String, direction: Direction) -> String? {
+    /// Prefers panes that share an edge with `id` in `direction`; among equally close
+    /// ones, the most recently focused (last in `history`) wins, then the top/left one.
+    public static func neighbor(_ rects: [String: NormRect], id: String, direction: Direction, history: [String] = []) -> String? {
         guard let me = rects[id] else { return nil }
+        let eps = 0.001
+        let horizontal = direction == .left || direction == .right
+        var adjacent: [(id: String, gap: Double, overlap: Double, offset: Double)] = []
+        for otherID in rects.keys where otherID != id {
+            let rect = rects[otherID]!
+            let gap: Double
+            switch direction {
+            case .left: gap = me.x - (rect.x + rect.w)
+            case .right: gap = rect.x - (me.x + me.w)
+            case .up: gap = me.y - (rect.y + rect.h)
+            case .down: gap = rect.y - (me.y + me.h)
+            }
+            guard gap >= -eps else { continue }
+            let overlap = horizontal
+                ? min(me.y + me.h, rect.y + rect.h) - max(me.y, rect.y)
+                : min(me.x + me.w, rect.x + rect.w) - max(me.x, rect.x)
+            guard overlap > eps else { continue }
+            adjacent.append((otherID, max(gap, 0), overlap, horizontal ? rect.y : rect.x))
+        }
+        if let nearest = adjacent.map(\.gap).min() {
+            let tied = adjacent.filter { $0.gap - nearest < eps }
+            func recency(_ id: String) -> Int { history.lastIndex(of: id) ?? -1 }
+            return tied.min { lhs, rhs in
+                let lr = recency(lhs.id), rr = recency(rhs.id)
+                if lr != rr { return lr > rr }
+                if abs(lhs.overlap - rhs.overlap) > eps { return lhs.overlap > rhs.overlap }
+                if abs(lhs.offset - rhs.offset) > eps { return lhs.offset < rhs.offset }
+                return lhs.id < rhs.id
+            }?.id
+        }
         let cx = me.x + me.w / 2
         let cy = me.y + me.h / 2
         var best: String?
@@ -431,9 +528,19 @@ public enum Layout {
 
     /// On mouse-up, pull a window toward a screen edge or a sibling when it is already close.
     public static func snapFrame(_ frame: CGRect, others: [CGRect], screen: CGRect, threshold: CGFloat) -> CGRect {
+        snapFrame(frame, others: others, screens: [screen], threshold: threshold)
+    }
+
+    /// Height of the strip at the top of a window the user grabs to move it.
+    public static let titleBarHeight: CGFloat = 28
+
+    /// Snaps to the edges of every screen and sibling. The window may span monitors or
+    /// hang partly off-screen; it is only pulled back when its title bar would be out
+    /// of reach on every screen.
+    public static func snapFrame(_ frame: CGRect, others: [CGRect], screens: [CGRect], threshold: CGFloat) -> CGRect {
         var next = frame
-        let xLines = [screen.minX, screen.maxX] + others.flatMap { [$0.minX, $0.maxX] }
-        let yLines = [screen.minY, screen.maxY] + others.flatMap { [$0.minY, $0.maxY] }
+        let xLines = screens.flatMap { [$0.minX, $0.maxX] } + others.flatMap { [$0.minX, $0.maxX] }
+        let yLines = screens.flatMap { [$0.minY, $0.maxY] } + others.flatMap { [$0.minY, $0.maxY] }
         if let line = closest(next.minX, to: xLines, threshold: threshold) {
             next.origin.x = line
         } else if let line = closest(next.maxX, to: xLines, threshold: threshold) {
@@ -444,19 +551,33 @@ public enum Layout {
         } else if let line = closest(next.maxY, to: yLines, threshold: threshold) {
             next.origin.y = line - next.height
         }
-        if next.maxX > screen.maxX + threshold {
-            next.origin.x = screen.maxX - next.width
-        }
-        if next.minX < screen.minX - threshold {
-            next.origin.x = screen.minX
-        }
-        if next.maxY > screen.maxY + threshold {
-            next.origin.y = screen.maxY - next.height
-        }
-        if next.minY < screen.minY - threshold {
-            next.origin.y = screen.minY
-        }
+        guard !screens.isEmpty, !titleBarReachable(next, screens: screens) else { return next }
+        let home = screens.max { overlapArea($0, next) < overlapArea($1, next) || (overlapArea($0, next) == overlapArea($1, next) && centerDistance($0, next) > centerDistance($1, next)) }!
+        if next.maxY > home.maxY { next.origin.y = home.maxY - next.height }
+        if next.maxY - titleBarHeight < home.minY { next.origin.y = home.minY + titleBarHeight - next.height }
+        let reach: CGFloat = min(80, next.width)
+        if next.maxX < home.minX + reach { next.origin.x = home.minX + reach - next.width }
+        if next.minX > home.maxX - reach { next.origin.x = home.maxX - reach }
         return next
+    }
+
+    /// True when at least a grabbable piece of the title bar lies on some screen.
+    public static func titleBarReachable(_ frame: CGRect, screens: [CGRect]) -> Bool {
+        let bar = CGRect(x: frame.minX, y: frame.maxY - titleBarHeight, width: frame.width, height: titleBarHeight)
+        let need = min(40, frame.width)
+        return screens.contains { screen in
+            let piece = screen.intersection(bar)
+            return !piece.isNull && piece.width >= need && piece.height >= titleBarHeight / 2
+        }
+    }
+
+    private static func overlapArea(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let piece = a.intersection(b)
+        return piece.isNull ? 0 : piece.width * piece.height
+    }
+
+    private static func centerDistance(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        hypot(a.midX - b.midX, a.midY - b.midY)
     }
 
     private struct Step {
@@ -587,9 +708,7 @@ public enum Layout {
     ) {
         switch node {
         case .pane(let id):
-            let inset = gap / 2
-            let frame = area.insetBy(dx: inset, dy: inset)
-            panes.append(PlacedPane(id: id, frame: frame.standardized))
+            panes.append(PlacedPane(id: id, frame: inset(area, by: max(0, gap / 2))))
         case .split(let id, let axis, let ratio, let a, let b):
             let portion = CGFloat(ratio)
             let thickness = max(gap, 12)
@@ -620,6 +739,17 @@ public enum Layout {
                 place(b, in: bottom, gap: gap, panes: &panes, dividers: &dividers)
             }
         }
+    }
+
+    /// Insets without ever producing a null, empty, or negative rect: once the area is
+    /// thinner than the gap, the pane keeps at least one point centered in its slot.
+    public static func inset(_ area: CGRect, by amount: CGFloat) -> CGRect {
+        let area = area.isNull || area.isInfinite ? .zero : area.standardized
+        let dx = min(amount, max(0, (area.width - 1) / 2))
+        let dy = min(amount, max(0, (area.height - 1) / 2))
+        let width = max(1, area.width - 2 * dx)
+        let height = max(1, area.height - 2 * dy)
+        return CGRect(x: area.midX - width / 2, y: area.midY - height / 2, width: width, height: height)
     }
 
     private static func closest(_ value: CGFloat, to lines: [CGFloat], threshold: CGFloat) -> CGFloat? {
