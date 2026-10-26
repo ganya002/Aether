@@ -1,265 +1,802 @@
 import AppKit
 
+/// Theme names for the Appearance popup. Themes wires the real list in:
+/// `SettingsThemeSource.names = { Themes.all.map(\.name) }`.
 @MainActor
-final class SettingsController: NSWindowController, NSWindowDelegate {
+enum SettingsThemeSource {
+    static var names: () -> [String] = { ["Aether"] }
+}
+
+enum SettingsTab: String, CaseIterable, Sendable {
+    case general
+    case appearance
+    case terminal
+    case windows
+    case keys
+    case cloud
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .appearance: "Appearance"
+        case .terminal: "Terminal"
+        case .windows: "Windows"
+        case .keys: "Keys"
+        case .cloud: "Cloud"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .appearance: "paintpalette"
+        case .terminal: "terminal"
+        case .windows: "macwindow.on.rectangle"
+        case .keys: "keyboard"
+        case .cloud: "cloud"
+        }
+    }
+
+    var identifier: NSToolbarItem.Identifier {
+        NSToolbarItem.Identifier("aether.settings.\(rawValue)")
+    }
+
+    init?(identifier: NSToolbarItem.Identifier) {
+        guard let tab = Self.allCases.first(where: { $0.identifier == identifier }) else { return nil }
+        self = tab
+    }
+}
+
+/// How Settings writes numbers for people: "24 %", "13 pt", "1.2×".
+enum SettingsFormat {
+    static func percent(_ value: Double) -> String {
+        "\(Int((value * 100).rounded())) %"
+    }
+
+    static func points(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        if rounded == rounded.rounded() { return "\(Int(rounded)) pt" }
+        return String(format: "%.1f pt", rounded)
+    }
+
+    static func multiplier(_ value: Double) -> String {
+        let hundredths = Int((value * 100).rounded())
+        if hundredths % 10 == 0 { return String(format: "%.1f×", Double(hundredths) / 100) }
+        return String(format: "%.2f×", Double(hundredths) / 100)
+    }
+
+    static func duration(_ seconds: Double) -> String {
+        let whole = max(0, Int(seconds.rounded()))
+        if whole >= 60, whole % 60 == 0 {
+            let minutes = whole / 60
+            return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+        }
+        return whole == 1 ? "1 second" : "\(whole) seconds"
+    }
+
+    static let unlimitedScrollback = 1_000_000
+    static let scrollbackChoices = [1_000, 10_000, 100_000, unlimitedScrollback]
+    static let notifyChoices: [Double] = [5, 10, 30, 60, 300]
+
+    static func scrollback(_ lines: Int, locale: Locale = .current) -> String {
+        if lines >= unlimitedScrollback { return "Unlimited" }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.locale = locale
+        let number = formatter.string(from: NSNumber(value: lines)) ?? String(lines)
+        return lines == 1 ? "1 line" : "\(number) lines"
+    }
+
+    /// The standard choices, plus the current value when config.json holds something else.
+    static func choices<T: Comparable>(_ base: [T], including current: T) -> [T] {
+        base.contains(current) ? base : (base + [current]).sorted()
+    }
+
+    static func snap(_ value: Double, step: Double) -> Double {
+        guard step > 0 else { return value }
+        return ((value / step).rounded() * step * 10_000).rounded() / 10_000
+    }
+}
+
+extension Settings {
+    /// Everything back to how Aether ships, except the Cloud account.
+    func resetKeepingCloud() -> Settings {
+        var fresh = Settings()
+        fresh.sessionHost = sessionHost
+        fresh.sessionToken = sessionToken
+        fresh.sessionWS = sessionWS
+        fresh.cloudEnabled = cloudEnabled
+        return fresh
+    }
+}
+
+/// Monospaced families for the Font popup. Hidden system families start with a dot.
+@MainActor
+enum SettingsFonts {
+    private static var cached: [String]?
+
+    static func monospacedFamilies() -> [String] {
+        if let cached { return cached }
+        let manager = NSFontManager.shared
+        let fixed = NSFontTraitMask.fixedPitchFontMask.rawValue
+        let families = manager.availableFontFamilies.filter { family in
+            guard !family.hasPrefix("."), let members = manager.availableMembers(ofFontFamily: family) else { return false }
+            return members.contains { member in
+                guard member.count > 3, let traits = (member[3] as? NSNumber)?.uintValue else { return false }
+                return traits & fixed != 0
+            }
+        }
+        let sorted = families.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        cached = sorted
+        return sorted
+    }
+}
+
+final class SettingsWindow: NSWindow {
+    var onTab: ((Int) -> Void)?
+    var onClose: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let held = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if held == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
+            if key == "w" {
+                onClose?()
+                return true
+            }
+            if let number = Int(key), (1...SettingsTab.allCases.count).contains(number) {
+                onTab?(number - 1)
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        onClose?()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            onClose?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+/// A slider with its value written out beside it.
+@MainActor
+private final class SliderField {
+    let slider = NSSlider()
+    let value = NSTextField(labelWithString: "")
+    let view: NSStackView
+    private let step: Double
+    private let format: (Double) -> String
+
+    init(_ name: String, min: Double, max: Double, step: Double, format: @escaping (Double) -> String) {
+        self.step = step
+        self.format = format
+        slider.cell = GlassSliderCell()
+        slider.minValue = min
+        slider.maxValue = max
+        slider.isContinuous = true
+        slider.altIncrementValue = step
+        slider.setAccessibilityLabel(name)
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        slider.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        value.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        value.textColor = .secondaryLabelColor
+        value.setAccessibilityElement(false)
+        value.translatesAutoresizingMaskIntoConstraints = false
+        value.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        view = NSStackView(views: [slider, value])
+        view.orientation = .horizontal
+        view.alignment = .centerY
+        view.spacing = 10
+    }
+
+    var doubleValue: Double {
+        get { SettingsFormat.snap(slider.doubleValue, step: step) }
+        set {
+            slider.doubleValue = newValue
+            paint()
+        }
+    }
+
+    var isEnabled: Bool {
+        get { slider.isEnabled }
+        set {
+            slider.isEnabled = newValue
+            value.textColor = newValue ? .secondaryLabelColor : .tertiaryLabelColor
+        }
+    }
+
+    func paint() {
+        let text = format(doubleValue)
+        value.stringValue = text
+        slider.setAccessibilityValueDescription(text)
+    }
+}
+
+/// Two columns: labels on the right edge of the first, controls in the second.
+@MainActor
+private final class SettingsForm {
+    let grid = NSGridView(numberOfColumns: 2, rows: 0)
+    private var spaceNext = false
+
+    init() {
+        grid.rowSpacing = 10
+        grid.columnSpacing = 12
+        grid.rowAlignment = .firstBaseline
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 176
+        grid.column(at: 1).xPlacement = .leading
+        grid.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    @discardableResult
+    func row(_ title: String, _ control: NSView, centered: Bool = false) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .labelColor
+        label.alignment = .right
+        let titled = control is NSButton && !(control is NSPopUpButton)
+        if !title.isEmpty, !titled, control.accessibilityLabel()?.isEmpty ?? true {
+            control.setAccessibilityLabel(title.replacingOccurrences(of: ":", with: ""))
+        }
+        let added = grid.addRow(with: [label, control])
+        if centered {
+            added.rowAlignment = .none
+            added.yPlacement = .center
+        }
+        if spaceNext {
+            added.topPadding = 12
+            spaceNext = false
+        }
+        return label
+    }
+
+    @discardableResult
+    func note(_ text: String) -> NSTextField {
+        let label = SettingsController.note(text)
+        let added = grid.addRow(with: [NSGridCell.emptyContentView, label])
+        added.topPadding = -4
+        return label
+    }
+
+    @discardableResult
+    func view(_ view: NSView) -> NSGridRow {
+        let added = grid.addRow(with: [NSGridCell.emptyContentView, view])
+        added.topPadding = -2
+        return added
+    }
+
+    func section() {
+        spaceNext = true
+    }
+}
+
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// One tab's content and the height it would like.
+@MainActor
+private final class SettingsPage {
+    let view: NSView
+    let preferredHeight: () -> CGFloat
+    weak var firstResponder: NSView?
+
+    init(view: NSView, preferredHeight: @escaping () -> CGFloat) {
+        self.view = view
+        self.preferredHeight = preferredHeight
+    }
+
+    static func scrolling(_ form: SettingsForm) -> SettingsPage {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = document
+        document.addSubview(form.grid)
+        let clip = scroll.contentView
+        NSLayoutConstraint.activate([
+            document.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
+            document.topAnchor.constraint(equalTo: clip.topAnchor),
+            form.grid.topAnchor.constraint(equalTo: document.topAnchor, constant: 22),
+            form.grid.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
+            form.grid.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor, constant: -24),
+            form.grid.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24),
+        ])
+        return SettingsPage(view: scroll) { [weak grid = form.grid] in
+            (grid?.fittingSize.height ?? 300) + 46
+        }
+    }
+}
+
+@MainActor
+final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSSearchFieldDelegate {
+    private static let tabKey = "aether.settings.tab"
+    private static let keysHeightKey = "aether.settings.keysHeight"
+    private static let width: CGFloat = 640
+
     private let glassView = NSGlassEffectView()
-    private let shade = NSSlider()
-    private let radius = NSSlider()
-    private let gap = NSSlider()
-    private let font = NSSlider()
-    private let blur = NSSlider()
-    private let shadeValue = NSTextField(labelWithString: "")
-    private let radiusValue = NSTextField(labelWithString: "")
-    private let gapValue = NSTextField(labelWithString: "")
-    private let fontValue = NSTextField(labelWithString: "")
-    private let blurValue = NSTextField(labelWithString: "")
-    private let glass = NSSegmentedControl(labels: GlassStyle.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
-    private let text = NSSegmentedControl(labels: TextTone.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
-    private let rest = NSSegmentedControl(labels: FocusRest.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
-    private let snap = NSButton(checkboxWithTitle: "Snap windows when you let go", target: nil, action: nil)
+    private let pageHolder = NSView()
+    private var pages: [SettingsTab: SettingsPage] = [:]
+    private var current: SettingsTab = .general
+    private let recorder = ShortcutRecorder()
+
+    // General
+    private let updates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
+    private let checkNow = NSButton(title: "Check Now", target: nil, action: nil)
+    private let updateStatus = NSTextField(labelWithString: "")
+    private let versionLine = NSTextField(labelWithString: "")
     private let notify = NSButton(checkboxWithTitle: "Notify when a command finishes in the background", target: nil, action: nil)
-    private let dropdown = NSButton(checkboxWithTitle: "Dropdown terminal    ⌃⌘`", target: nil, action: nil)
-    private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
-    private let updates = NSButton(checkboxWithTitle: "Look for updates in the background", target: nil, action: nil)
-    private let hotkeyTaken = NSTextField(labelWithString: "This shortcut is used by another app.")
+    private let notifyAfter = NSPopUpButton(frame: .zero, pullsDown: false)
     private let confirmClose = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let dock = NSButton(checkboxWithTitle: "Hide the Dock icon", target: nil, action: nil)
+
+    // Appearance
+    private let toneOrder: [TextTone] = [.automatic, .light, .dark]
+    private let glassOrder: [GlassStyle] = [.regular, .clear]
+    private lazy var text = NSSegmentedControl(labels: toneOrder.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private lazy var glass = NSSegmentedControl(labels: glassOrder.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private let shade = SliderField("Shade", min: 0, max: 0.82, step: 0.01, format: SettingsFormat.percent)
+    private let theme = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let contrast = SliderField("Minimum contrast", min: 0, max: 1, step: 0.01, format: SettingsFormat.percent)
+    private let fontFamily = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let fontSize = SliderField("Text size", min: 10, max: 24, step: 0.5, format: SettingsFormat.points)
+    private let lineHeight = SliderField("Line height", min: 0.8, max: 2, step: 0.05, format: SettingsFormat.multiplier)
+    private let cursorShape = NSSegmentedControl(labels: CursorShape.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private let cursorBlink = NSButton(checkboxWithTitle: "Blink", target: nil, action: nil)
+    private let rest = NSSegmentedControl(labels: FocusRest.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private let blur = SliderField("Blur amount", min: 0, max: 1, step: 0.01, format: SettingsFormat.percent)
+    private var blurLabel: NSTextField?
+
+    // Terminal
     private let optionKey = NSPopUpButton(frame: .zero, pullsDown: false)
     private let shellExit = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let pasteWarning = NSButton(checkboxWithTitle: "Ask before pasting several lines", target: nil, action: nil)
-    private let tabs = NSSegmentedControl(labels: ["Look", "Window", "Terminal", "Cloud", "Updates"], trackingMode: .selectOne, target: nil, action: nil)
-    private var pages: [NSStackView] = []
-    private let updateStatus = NSTextField(labelWithString: "")
-    private let keybinds = KeybindBoard()
+    private let pasteWarning = NSButton(checkboxWithTitle: "Warn before pasting several lines", target: nil, action: nil)
+    private let copyOnSelect = NSButton(checkboxWithTitle: "Copy text as soon as it's selected", target: nil, action: nil)
+    private let bell = NSSegmentedControl(labels: BellStyle.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private let scrollback = NSPopUpButton(frame: .zero, pullsDown: false)
+
+    // Windows
+    private let radius = SliderField("Corner radius", min: 8, max: 32, step: 1, format: SettingsFormat.points)
+    private let gap = SliderField("Gap", min: 4, max: 22, step: 1, format: SettingsFormat.points)
+    private let snap = NSButton(checkboxWithTitle: "Snap windows into place when you let go", target: nil, action: nil)
+    private let dropdown = NSButton(checkboxWithTitle: "Enabled", target: nil, action: nil)
+    private lazy var dropdownKey = ShortcutButton(action: .dropdown, recorder: recorder)
+    private let hotkeyTaken = NSTextField(labelWithString: "This shortcut is used by another app.")
+    private let dropdownHeight = SliderField("Dropdown height", min: 0.2, max: 1, step: 0.01, format: SettingsFormat.percent)
+    private let dropdownHide = NSButton(checkboxWithTitle: "Hide the dropdown when it loses focus", target: nil, action: nil)
+    private let windowsNote = ShortcutNoteBar()
+    private var hotkeyRow: NSGridRow?
+    private var windowsNoteRow: NSGridRow?
+
+    // Keys
+    private let search = NSSearchField()
+    private lazy var keybinds = KeybindBoard(recorder: recorder)
+    private let keysNote = ShortcutNoteBar()
+
+    // Cloud
     private let sessionWhere = NSSegmentedControl(labels: ["Local", "Cloud"], trackingMode: .selectOne, target: nil, action: nil)
     private let cloudStatus = NSTextField(wrappingLabelWithString: "")
     private var cloudChosen = false
     private let pairButton = NSButton(title: "Code for another device", target: nil, action: nil)
     private let signOutButton = NSButton(title: "Sign Out of Cloud…", target: nil, action: nil)
+
     private var prompting = false
     private var applying = false
-    private var escMonitor: Any?
-    private var vaporToken = 0
+    private var writing = false
+    private var fitting = false
 
     init() {
-        let panel = VaporPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 740),
-            styleMask: [.borderless, .fullSizeContentView],
+        let window = SettingsWindow(
+            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 480),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Settings"
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-        super.init(window: panel)
-        panel.delegate = self
+        window.title = "Settings"
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.isExcludedFromWindowsMenu = true
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.minSize = NSSize(width: Self.width, height: 240)
+        window.maxSize = NSSize(width: Self.width, height: 4000)
+        window.autorecalculatesKeyViewLoop = true
+        super.init(window: window)
+        window.delegate = self
+        window.onClose = { [weak self] in self?.vaporize() }
+        window.onTab = { [weak self] index in self?.select(SettingsTab.allCases[index], animate: true) }
 
         glassView.autoresizingMask = [.width, .height]
-        glassView.frame = panel.contentView?.bounds ?? .zero
+        glassView.frame = window.contentView?.bounds ?? .zero
         glassView.style = .regular
-        glassView.cornerRadius = 22
         glassView.enableInteractiveGlass()
         let host = NSView(frame: glassView.bounds)
         host.autoresizingMask = [.width, .height]
         glassView.contentView = host
-        GlassPanel.mount(glassView, on: panel, radius: 22)
+        GlassPanel.mount(glassView, on: window, radius: 24)
 
-        let title = NSTextField(labelWithString: "Settings")
-        title.font = .systemFont(ofSize: 20, weight: .semibold)
-        title.textColor = .labelColor
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.detachesHiddenViews = true
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(stack)
-
-        let look = page()
-        add(labeled("Glass", glass), to: look)
-        add(labeled("Text", text), to: look)
-        add(sliderRow("Shade", shade, shadeValue, min: 0, max: 0.82), to: look)
-        add(sliderRow("Font", font, fontValue, min: 10, max: 24), to: look)
-        add(labeled("Unfocused", rest), to: look)
-        add(note("Dim softens them. Blur frosts them by the amount below. As is leaves them alone."), to: look)
-        add(sliderRow("Blur", blur, blurValue, min: 0, max: 1), to: look)
-
-        let windowPage = page()
-        add(sliderRow("Corners", radius, radiusValue, min: 8, max: 32), to: windowPage)
-        add(sliderRow("Gap", gap, gapValue, min: 4, max: 22), to: windowPage)
-        add(snap, to: windowPage)
-        add(dropdown, to: windowPage)
-        hotkeyTaken.font = .systemFont(ofSize: 11)
-        hotkeyTaken.textColor = .systemOrange
-        add(hotkeyTaken, to: windowPage)
-        add(dock, to: windowPage)
-
-        let terminalPage = page()
-        add(notify, to: terminalPage)
-        add(note("A finished command in a pane you are not looking at can post a notification."), to: terminalPage)
-        confirmClose.addItems(withTitles: ConfirmClose.allCases.map(\.title))
-        optionKey.addItems(withTitles: OptionKey.allCases.map(\.title))
-        shellExit.addItems(withTitles: ShellExit.allCases.map(\.title))
-        add(labeled("Confirm close", confirmClose), to: terminalPage)
-        add(labeled("Option key", optionKey), to: terminalPage)
-        add(labeled("Shell exits", shellExit), to: terminalPage)
-        add(note("A shell that exits cleanly closes its terminal. A command, or an error, keeps it open with Restart."), to: terminalPage)
-        add(pasteWarning, to: terminalPage)
-
-        let cloudPage = page()
-        add(sessionWhere, to: cloudPage)
-        cloudStatus.font = .systemFont(ofSize: 12)
-        cloudStatus.textColor = .secondaryLabelColor
-        cloudStatus.preferredMaxLayoutWidth = 560
-        add(cloudStatus, to: cloudPage)
-        pairButton.target = self
-        pairButton.action = #selector(pairDevice)
-        pairButton.bezelStyle = .rounded
-        pairButton.font = .systemFont(ofSize: 12, weight: .medium)
-        add(pairButton, to: cloudPage)
-        add(note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer. Local keeps your Cloud account for later."), to: cloudPage)
-        signOutButton.target = self
-        signOutButton.action = #selector(signOut)
-        signOutButton.bezelStyle = .rounded
-        signOutButton.font = .systemFont(ofSize: 12, weight: .medium)
-        add(signOutButton, to: cloudPage)
-        let reveal = NSButton(title: "Show Config in Finder", target: self, action: #selector(revealConfig))
-        reveal.bezelStyle = .rounded
-        reveal.font = .systemFont(ofSize: 12, weight: .medium)
-        add(reveal, to: cloudPage)
-
-        let updatePage = page()
-        add(updates, to: updatePage)
-        add(note("Off, Aether does not look unless you ask. A download still waits for Install now."), to: updatePage)
-        let check = NSButton(title: "Check for updates", target: self, action: #selector(checkForUpdates))
-        check.bezelStyle = .rounded
-        check.font = .systemFont(ofSize: 12, weight: .medium)
-        add(check, to: updatePage)
-        updateStatus.font = .systemFont(ofSize: 11)
-        updateStatus.textColor = .tertiaryLabelColor
-        updateStatus.stringValue = ""
-        add(updateStatus, to: updatePage)
-
-        pages = [look, windowPage, terminalPage, cloudPage, updatePage]
-        tabs.selectedSegment = 0
-        tabs.target = self
-        tabs.action = #selector(selectTab)
-        tabs.segmentDistribution = .fillEqually
-
-        let keysLabel = NSTextField(labelWithString: "Keys")
-        keysLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        keysLabel.textColor = .labelColor
-        let keyScroll = NSScrollView()
-        keyScroll.translatesAutoresizingMaskIntoConstraints = false
-        keyScroll.drawsBackground = false
-        keyScroll.borderType = .noBorder
-        keyScroll.hasVerticalScroller = true
-        keyScroll.autohidesScrollers = true
-        keybinds.translatesAutoresizingMaskIntoConstraints = false
-        keyScroll.documentView = keybinds
-
-        stack.addArrangedSubview(title)
-        stack.addArrangedSubview(tabs)
-        for page in pages {
-            stack.addArrangedSubview(page)
-        }
-        stack.addArrangedSubview(keysLabel)
-        stack.addArrangedSubview(note("Click a shortcut, then press the new keys. Esc cancels. Reset puts that one shortcut back."))
-        stack.addArrangedSubview(keyScroll)
-        showPage(0)
-
+        pageHolder.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(pageHolder)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 26),
-            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -26),
-            stack.topAnchor.constraint(equalTo: host.topAnchor, constant: 22),
-            stack.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -16),
-            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            keyScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            keyScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
-            keybinds.leadingAnchor.constraint(equalTo: keyScroll.contentView.leadingAnchor),
-            keybinds.trailingAnchor.constraint(equalTo: keyScroll.contentView.trailingAnchor),
-            keybinds.topAnchor.constraint(equalTo: keyScroll.contentView.topAnchor),
+            pageHolder.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            pageHolder.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            pageHolder.topAnchor.constraint(equalTo: host.safeAreaLayoutGuide.topAnchor),
+            pageHolder.bottomAnchor.constraint(equalTo: host.bottomAnchor),
         ])
-        for page in pages {
-            page.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        }
-        keyScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
-        keyScroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
-        for control in [glass, text, rest, sessionWhere] {
-            control.target = self
-            control.action = #selector(changed)
-            control.segmentDistribution = .fillEqually
-        }
-        for popup in [confirmClose, optionKey, shellExit] {
-            popup.target = self
-            popup.action = #selector(changed)
-            popup.font = .systemFont(ofSize: 13)
-        }
-        for box in [snap, notify, dropdown, dock, updates, pasteWarning] {
-            box.target = self
-            box.action = #selector(changed)
-            box.font = .systemFont(ofSize: 13)
-        }
-        for slider in [shade, radius, gap, font, blur] {
-            slider.target = self
-            slider.action = #selector(changed)
-            slider.isContinuous = true
-        }
-        for value in [shadeValue, radiusValue, gapValue, fontValue, blurValue] {
-            value.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-            value.textColor = .secondaryLabelColor
-            value.alignment = .right
-            value.widthAnchor.constraint(equalToConstant: 36).isActive = true
-        }
-    }
+        pages[.general] = generalPage()
+        pages[.appearance] = appearancePage()
+        pages[.terminal] = terminalPage()
+        pages[.windows] = windowsPage()
+        pages[.keys] = keysPage()
+        pages[.cloud] = cloudPage()
 
-    @objc private func selectTab() {
-        showPage(tabs.selectedSegment)
-    }
+        let toolbar = NSToolbar(identifier: "AetherSettings")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconAndLabel
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .preference
 
-    private func showPage(_ index: Int) {
-        let animate = window?.isVisible == true
-        for (item, page) in pages.enumerated() {
-            let show = item == index
-            guard show != !page.isHidden else { continue }
-            if show {
-                page.alphaValue = animate ? 0 : 1
-                page.isHidden = false
-                if animate {
-                    Motion.group(Motion.close) { page.animator().alphaValue = 1 }
-                }
-            } else {
-                page.isHidden = true
-                page.alphaValue = 1
+        recorder.window = window
+        recorder.observe { [weak self] in self?.recorderChanged() }
+
+        wire()
+        NotificationCenter.default.addObserver(forName: .aetherBindingsChanged, object: nil, queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.settingsChangedElsewhere()
             }
         }
-    }
 
-    private func page() -> NSStackView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        return stack
-    }
-
-    private func add(_ row: NSView, to page: NSStackView) {
-        row.translatesAutoresizingMaskIntoConstraints = false
-        page.addArrangedSubview(row)
-        row.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
+        let saved = UserDefaults.standard.string(forKey: Self.tabKey).flatMap(SettingsTab.init(rawValue:)) ?? .general
+        select(saved, animate: false)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    // MARK: Pages
+
+    private func generalPage() -> SettingsPage {
+        let form = SettingsForm()
+        form.row("Updates:", updates)
+        checkNow.bezelStyle = .push
+        checkNow.target = self
+        checkNow.action = #selector(checkForUpdates)
+        updateStatus.font = .systemFont(ofSize: 12)
+        updateStatus.textColor = .secondaryLabelColor
+        updateStatus.lineBreakMode = .byTruncatingTail
+        let checkRow = NSStackView(views: [checkNow, updateStatus])
+        checkRow.orientation = .horizontal
+        checkRow.alignment = .centerY
+        checkRow.spacing = 10
+        form.view(checkRow)
+        versionLine.font = .systemFont(ofSize: 12)
+        versionLine.textColor = .secondaryLabelColor
+        versionLine.isSelectable = true
+        form.view(versionLine)
+
+        form.section()
+        form.row("Notifications:", notify)
+        notifyAfter.controlSize = .regular
+        let after = NSStackView(views: [NSTextField(labelWithString: "when it ran longer than"), notifyAfter])
+        after.orientation = .horizontal
+        after.alignment = .firstBaseline
+        after.spacing = 8
+        notifyAfter.setAccessibilityLabel("Notify when a command ran longer than")
+        form.view(after)
+
+        form.section()
+        confirmClose.addItems(withTitles: ConfirmClose.allCases.map(\.title))
+        form.row("Confirm before closing:", confirmClose)
+        form.row("Dock:", dock)
+        form.note("Without the Dock icon, open Aether with the dropdown shortcut or from Spotlight.")
+
+        form.section()
+        let reveal = NSButton(title: "Show config.json in Finder", target: self, action: #selector(revealConfig))
+        reveal.bezelStyle = .push
+        let reset = NSButton(title: "Reset All Settings…", target: self, action: #selector(resetAll))
+        reset.bezelStyle = .push
+        let buttons = NSStackView(views: [reveal, reset])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        form.row("Configuration:", buttons, centered: true)
+        return SettingsPage.scrolling(form)
+    }
+
+    private func appearancePage() -> SettingsPage {
+        let form = SettingsForm()
+        form.row("Text:", text)
+        form.note("Automatic follows macOS: light text in Dark Mode, dark text in Light Mode.")
+        form.row("Glass:", glass)
+        form.row("Shade:", shade.view, centered: true)
+
+        form.section()
+        form.row("Theme:", theme)
+        form.row("Minimum contrast:", contrast.view, centered: true)
+        form.note("Raises colors that would be hard to read against the glass.")
+
+        form.section()
+        form.row("Font:", fontFamily)
+        form.row("Text size:", fontSize.view, centered: true)
+        form.row("Line height:", lineHeight.view, centered: true)
+        let cursor = NSStackView(views: [cursorShape, cursorBlink])
+        cursor.orientation = .horizontal
+        cursor.alignment = .centerY
+        cursor.spacing = 14
+        cursorShape.setAccessibilityLabel("Cursor shape")
+        cursorBlink.setAccessibilityLabel("Blink the cursor")
+        form.row("Cursor:", cursor, centered: true)
+
+        form.section()
+        form.row("Unfocused panes:", rest)
+        blurLabel = form.row("Blur amount:", blur.view, centered: true)
+        form.note("Dim softens other panes. Blur frosts them by the amount above. As is leaves them alone.")
+        return SettingsPage.scrolling(form)
+    }
+
+    private func terminalPage() -> SettingsPage {
+        let form = SettingsForm()
+        optionKey.addItems(withTitles: OptionKey.allCases.map(\.title))
+        shellExit.addItems(withTitles: ShellExit.allCases.map(\.title))
+        form.row("Option key:", optionKey)
+        form.row("When the shell exits:", shellExit)
+        form.note("A shell that exits cleanly closes its terminal. A command, or an error, keeps it open with Restart.")
+
+        form.section()
+        form.row("Paste:", pasteWarning)
+        form.note("Only when the shell would run each line as it arrives.")
+        form.row("Selection:", copyOnSelect)
+        form.row("Bell:", bell)
+        form.row("Scrollback:", scrollback)
+        return SettingsPage.scrolling(form)
+    }
+
+    private func windowsPage() -> SettingsPage {
+        let form = SettingsForm()
+        form.row("Corner radius:", radius.view, centered: true)
+        form.row("Gap:", gap.view, centered: true)
+        form.row("Snapping:", snap)
+
+        form.section()
+        let line = NSStackView(views: [dropdown, dropdownKey])
+        line.orientation = .horizontal
+        line.alignment = .centerY
+        line.spacing = 12
+        dropdown.setAccessibilityLabel("Dropdown terminal")
+        form.row("Dropdown terminal:", line, centered: true)
+        hotkeyTaken.font = .systemFont(ofSize: 12)
+        hotkeyTaken.textColor = .systemOrange
+        hotkeyRow = form.view(hotkeyTaken)
+        windowsNote.onUndo = { [weak self] in self?.recorder.undo() }
+        windowsNoteRow = form.view(windowsNote)
+        windowsNoteRow?.isHidden = true
+        form.row("Height:", dropdownHeight.view, centered: true)
+        form.row("", dropdownHide)
+        return SettingsPage.scrolling(form)
+    }
+
+    private func keysPage() -> SettingsPage {
+        let page = NSView()
+        page.translatesAutoresizingMaskIntoConstraints = false
+        search.placeholderString = "Search shortcuts"
+        search.delegate = self
+        search.target = self
+        search.action = #selector(searchChanged)
+        search.sendsSearchStringImmediately = true
+        search.setAccessibilityLabel("Search shortcuts")
+        let restore = NSButton(title: "Restore Defaults", target: self, action: #selector(restoreDefaults))
+        restore.bezelStyle = .push
+        restore.toolTip = "Put every shortcut back the way Aether ships"
+        let top = NSStackView(views: [search, restore])
+        top.orientation = .horizontal
+        top.spacing = 10
+        top.translatesAutoresizingMaskIntoConstraints = false
+        search.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let help = Self.note("Click a shortcut, then press the new keys. Delete removes it. Esc cancels.")
+        help.translatesAutoresizingMaskIntoConstraints = false
+        keysNote.onUndo = { [weak self] in self?.recorder.undo() }
+        keysNote.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        keybinds.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = keybinds
+
+        let column = NSStackView(views: [top, help, keysNote, scroll])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 10
+        column.detachesHiddenViews = true
+        column.translatesAutoresizingMaskIntoConstraints = false
+        page.addSubview(column)
+        NSLayoutConstraint.activate([
+            column.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 24),
+            column.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -24),
+            column.topAnchor.constraint(equalTo: page.topAnchor, constant: 18),
+            column.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -16),
+            top.widthAnchor.constraint(equalTo: column.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: column.widthAnchor),
+            keybinds.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            keybinds.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            keybinds.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+        ])
+        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        scroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        let result = SettingsPage(view: page) {
+            let saved = UserDefaults.standard.double(forKey: Self.keysHeightKey)
+            return saved > 0 ? saved : 560
+        }
+        result.firstResponder = search
+        return result
+    }
+
+    private func cloudPage() -> SettingsPage {
+        let form = SettingsForm()
+        form.row("New terminals run:", sessionWhere)
+        cloudStatus.font = .systemFont(ofSize: 12)
+        cloudStatus.textColor = .secondaryLabelColor
+        cloudStatus.preferredMaxLayoutWidth = 380
+        form.view(cloudStatus)
+        form.note("Cloud gives you a terminal of your own. The shell stays up after you quit. The code opens it on a phone or another computer. Local keeps your Cloud account for later.")
+
+        form.section()
+        pairButton.target = self
+        pairButton.action = #selector(pairDevice)
+        pairButton.bezelStyle = .push
+        signOutButton.target = self
+        signOutButton.action = #selector(signOut)
+        signOutButton.bezelStyle = .push
+        form.row("Devices:", pairButton, centered: true)
+        form.row("Account:", signOutButton, centered: true)
+        return SettingsPage.scrolling(form)
+    }
+
+    private func wire() {
+        for control in [text, glass, rest, cursorShape, bell] {
+            control.target = self
+            control.action = #selector(changed)
+        }
+        sessionWhere.target = self
+        sessionWhere.action = #selector(changed)
+        sessionWhere.segmentDistribution = .fillEqually
+        for popup in [notifyAfter, confirmClose, theme, fontFamily, optionKey, shellExit, scrollback] {
+            popup.target = self
+            popup.action = #selector(changed)
+        }
+        for box in [updates, notify, dock, cursorBlink, pasteWarning, copyOnSelect, snap, dropdown, dropdownHide] {
+            box.target = self
+            box.action = #selector(changed)
+        }
+        for field in [shade, contrast, fontSize, lineHeight, blur, radius, gap, dropdownHeight] {
+            field.slider.target = self
+            field.slider.action = #selector(changed)
+        }
+    }
+
+    static func note(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.preferredMaxLayoutWidth = 380
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    // MARK: Tabs
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        SettingsTab.allCases.map(\.identifier)
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        SettingsTab.allCases.map(\.identifier)
+    }
+
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        SettingsTab.allCases.map(\.identifier)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard let tab = SettingsTab(identifier: itemIdentifier) else { return nil }
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        item.label = tab.title
+        item.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: tab.title)
+        let index = (SettingsTab.allCases.firstIndex(of: tab) ?? 0) + 1
+        item.toolTip = "\(tab.title) (⌘\(index))"
+        item.target = self
+        item.action = #selector(toolbarPicked(_:))
+        return item
+    }
+
+    @objc private func toolbarPicked(_ sender: NSToolbarItem) {
+        guard let tab = SettingsTab(identifier: sender.itemIdentifier) else { return }
+        select(tab, animate: true)
+    }
+
+    private func select(_ tab: SettingsTab, animate: Bool) {
+        guard let window, let page = pages[tab] else { return }
+        let changing = tab != current || page.view.superview == nil
+        if tab != current {
+            recorder.stop()
+            recorder.clearNote()
+        }
+        current = tab
+        UserDefaults.standard.set(tab.rawValue, forKey: Self.tabKey)
+        window.toolbar?.selectedItemIdentifier = tab.identifier
+        window.title = tab.title
+        guard changing else { return }
+        pageHolder.subviews.forEach { $0.removeFromSuperview() }
+        let view = page.view
+        view.translatesAutoresizingMaskIntoConstraints = false
+        pageHolder.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: pageHolder.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: pageHolder.trailingAnchor),
+            view.topAnchor.constraint(equalTo: pageHolder.topAnchor),
+            view.bottomAnchor.constraint(equalTo: pageHolder.bottomAnchor),
+        ])
+        let motion = animate && window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if motion {
+            view.alphaValue = 0
+            Motion.group(Motion.close) { view.animator().alphaValue = 1 }
+        } else {
+            view.alphaValue = 1
+        }
+        fit(animate: motion)
+        if window.isVisible {
+            window.makeFirstResponder(page.firstResponder ?? window.contentView)
+        }
+    }
+
+    /// Each tab gets the height it needs, kept on screen. Keys keeps whatever height it was dragged to.
+    private func fit(animate: Bool) {
+        guard let window, let page = pages[current] else { return }
+        pageHolder.layoutSubtreeIfNeeded()
+        page.view.layoutSubtreeIfNeeded()
+        let chrome = window.frame.height - window.contentLayoutRect.height
+        var height = page.preferredHeight() + chrome
+        if let screen = (window.screen ?? NSScreen.main)?.visibleFrame {
+            height = min(height, screen.height - 40)
+        }
+        height = max(height, window.minSize.height)
+        var frame = window.frame
+        guard abs(frame.height - height) > 0.5 || frame.width != Self.width else { return }
+        frame.origin.y = frame.maxY - height
+        frame.size = NSSize(width: Self.width, height: height)
+        fitting = true
+        window.setFrame(frame, display: true, animate: animate)
+        fitting = false
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard current == .keys, !fitting, let window else { return }
+        let chrome = window.frame.height - window.contentLayoutRect.height
+        UserDefaults.standard.set(window.frame.height - chrome, forKey: Self.keysHeightKey)
+    }
+
+    // MARK: Showing
+
     func show() {
-        vaporToken += 1
         load()
         UpdateCenter.shared.onStatus = { [weak self] message in
             self?.updateStatus.stringValue = message
@@ -269,7 +806,6 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             self?.cloudStatus.textColor = {
                 switch link {
                 case .failed, .unavailable: return .systemRed
-                case .connected: return .secondaryLabelColor
                 default: return .secondaryLabelColor
                 }
             }()
@@ -283,68 +819,123 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
                 break
             }
         }
-        window?.center()
         guard let window else { return }
-        GlassMotion.present(window)
-        if escMonitor == nil {
-            escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, event.window === self.window, event.keyCode == 53 else { return event }
-                self.vaporize()
-                return nil
-            }
+        if window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            return
         }
+        window.toolbar?.selectedItemIdentifier = current.identifier
+        fit(animate: false)
+        window.center()
+        GlassMotion.present(window)
+        window.makeFirstResponder(pages[current]?.firstResponder ?? window.contentView)
+    }
+
+    /// Closes Settings. The name stays because the menus call it for ⌘W.
+    func vaporize() {
+        recorder.stop()
+        recorder.clearNote()
+        guard let window, window.isVisible, window.attachedSheet == nil else { return }
+        window.close()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !prompting else { return }
-        vaporize()
+        recorder.stop()
     }
 
-    func vaporize() {
-        keybinds.stopRecording()
-        guard let window, window.isVisible, window.alphaValue > 0.2 else { return }
-        vaporToken += 1
-        let token = vaporToken
-        GlassMotion.vaporize(window) { [weak self] in self?.vaporToken == token }
+    func windowWillClose(_ notification: Notification) {
+        recorder.stop()
+        recorder.clearNote()
     }
+
+    private func settingsChangedElsewhere() {
+        guard !writing, window?.isVisible == true else { return }
+        load()
+    }
+
+    private func recorderChanged() {
+        let note = recorder.note
+        keysNote.show(note)
+        windowsNote.show(current == .windows ? note : nil)
+        windowsNoteRow?.isHidden = windowsNote.isHidden
+        paintDropdownKey()
+        if current == .keys, window?.isVisible == true {
+            keysNote.superview?.layoutSubtreeIfNeeded()
+        }
+    }
+
+    private func paintDropdownKey() {
+        let settings = AppModel.shared.settings
+        dropdownKey.refresh(settings.keys.chord(.dropdown), recording: recorder.recording == .dropdown)
+        hotkeyRow?.isHidden = !(settings.dropdownEnabled && HotkeyCenter.takenByAnotherApp)
+    }
+
+    // MARK: Writing
 
     @objc private func changed() {
         guard !applying else { return }
-        paintValues()
         let wantsCloud = sessionWhere.selectedSegment == 1
-        let switched = wantsCloud != cloudChosen
+        let switched = wantsCloud != cloudChosen && !prompting
         let wasNotifying = AppModel.shared.settings.notifyOnFinish
+        writing = true
         AppModel.shared.updateSettings { settings in
-            settings.shade = shade.doubleValue
-            settings.cornerRadius = radius.doubleValue
-            settings.gap = gap.doubleValue
-            if abs(settings.fontSize - font.doubleValue) > 0.01 {
-                settings.fontSize = font.doubleValue
-                settings.baseFontSize = font.doubleValue
-            }
-            settings.glass = GlassStyle.allCases[glass.selectedSegment]
-            settings.text = TextTone.allCases[text.selectedSegment]
-            settings.focusRest = FocusRest.allCases[rest.selectedSegment]
-            settings.blurAmount = blur.doubleValue
-            settings.snapWindows = snap.state == .on
-            settings.notifyOnFinish = notify.state == .on
             settings.checkForUpdates = updates.state == .on
-            settings.dropdownEnabled = dropdown.state == .on
-            settings.hideDockIcon = dock.state == .on
+            settings.notifyOnFinish = notify.state == .on
+            if let seconds = notifyAfter.selectedItem?.representedObject as? Double {
+                settings.notifyAfterSeconds = seconds
+            }
             settings.confirmClose = ConfirmClose.allCases[max(0, confirmClose.indexOfSelectedItem)]
+            settings.hideDockIcon = dock.state == .on
+
+            settings.text = toneOrder[max(0, text.selectedSegment)]
+            settings.glass = glassOrder[max(0, glass.selectedSegment)]
+            settings.shade = shade.doubleValue
+            if let name = theme.titleOfSelectedItem {
+                settings.themeName = name
+            }
+            settings.minimumContrast = contrast.doubleValue
+            if let family = fontFamily.selectedItem?.representedObject as? String {
+                settings.fontFamily = family
+            }
+            if abs(settings.fontSize - fontSize.doubleValue) > 0.01 {
+                settings.fontSize = fontSize.doubleValue
+                settings.baseFontSize = fontSize.doubleValue
+            }
+            settings.lineHeight = lineHeight.doubleValue
+            settings.cursorShape = CursorShape.allCases[max(0, cursorShape.selectedSegment)]
+            settings.cursorBlink = cursorBlink.state == .on
+            settings.focusRest = FocusRest.allCases[max(0, rest.selectedSegment)]
+            settings.blurAmount = blur.doubleValue
+
             settings.optionKey = OptionKey.allCases[max(0, optionKey.indexOfSelectedItem)]
             settings.shellExit = ShellExit.allCases[max(0, shellExit.indexOfSelectedItem)]
             settings.warnMultilinePaste = pasteWarning.state == .on
+            settings.copyOnSelect = copyOnSelect.state == .on
+            settings.bell = BellStyle.allCases[max(0, bell.selectedSegment)]
+            if let lines = scrollback.selectedItem?.representedObject as? Int {
+                settings.scrollbackLines = lines
+            }
+
+            settings.cornerRadius = radius.doubleValue
+            settings.gap = gap.doubleValue
+            settings.snapWindows = snap.state == .on
+            settings.dropdownEnabled = dropdown.state == .on
+            settings.dropdownHeight = dropdownHeight.doubleValue
+            settings.dropdownHideOnFocusLoss = dropdownHide.state == .on
+
             if switched && !wantsCloud {
                 // Local stops using the account. It does not forget it.
                 settings.cloudEnabled = false
             }
         }
+        writing = false
+        paintValues()
+        enableDependents()
         glassView.style = AppModel.shared.settings.glass == .clear ? .clear : .regular
         if !wasNotifying, AppModel.shared.settings.notifyOnFinish {
             FinishNotifier.requestPermission()
         }
-        hotkeyTaken.isHidden = !(AppModel.shared.settings.dropdownEnabled && HotkeyCenter.takenByAnotherApp)
+        paintDropdownKey()
         guard switched else { return }
         if wantsCloud {
             Task { await self.chooseCloud() }
@@ -354,6 +945,45 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             refreshCloudControls()
         }
     }
+
+    @objc private func searchChanged() {
+        keybinds.filter(search.stringValue)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === search, commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        if search.stringValue.isEmpty {
+            vaporize()
+        } else {
+            search.stringValue = ""
+            searchChanged()
+        }
+        return true
+    }
+
+    @objc private func restoreDefaults() {
+        recorder.restoreAll()
+    }
+
+    @objc private func resetAll() {
+        Task {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Reset all settings?"
+            alert.informativeText = "Look, terminal, window, and shortcut settings go back to how Aether ships. Your Cloud account stays."
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Reset")
+            guard await confirm(alert) == .alertSecondButtonReturn else { return }
+            recorder.stop()
+            recorder.clearNote()
+            AppModel.shared.updateSettings { settings in
+                settings = settings.resetKeepingCloud()
+            }
+            load()
+        }
+    }
+
+    // MARK: Cloud
 
     private func chooseCloud() async {
         if !AppModel.shared.settings.hasCloudAccount {
@@ -376,7 +1006,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
             }
         }
         cloudChosen = true
+        writing = true
         AppModel.shared.updateSettings { $0.cloudEnabled = true }
+        writing = false
         refreshCloudControls()
         await connectCloud()
     }
@@ -450,6 +1082,12 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    // MARK: General actions
+
+    private var updatesOff: Bool {
+        System.isDev || !BuildStamp.current.isRelease
+    }
+
     @objc private func checkForUpdates() {
         updateStatus.stringValue = "Checking…"
         Task {
@@ -463,113 +1101,152 @@ final class SettingsController: NSWindowController, NSWindowDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([ConfigStore.fileURL()])
     }
 
+    // MARK: Reading
+
     private func load() {
         applying = true
+        defer { applying = false }
         let settings = AppModel.shared.settings
+
+        updates.state = settings.checkForUpdates ? .on : .off
+        updates.isEnabled = !updatesOff
+        checkNow.isEnabled = !updatesOff
+        let stamp = BuildStamp.current
+        if updatesOff {
+            updateStatus.stringValue = UpdateCenter.devBuild
+            versionLine.stringValue = stamp.version.isEmpty ? "Aether, development build" : "Aether \(stamp.version), development build"
+        } else {
+            versionLine.stringValue = "Aether \(stamp.version) (\(stamp.shortCommit))"
+        }
+        notify.state = settings.notifyOnFinish ? .on : .off
+        fill(notifyAfter, SettingsFormat.choices(SettingsFormat.notifyChoices, including: settings.notifyAfterSeconds), current: settings.notifyAfterSeconds, title: SettingsFormat.duration)
+        confirmClose.selectItem(at: ConfirmClose.allCases.firstIndex(of: settings.confirmClose) ?? 0)
+        dock.state = settings.hideDockIcon ? .on : .off
+
+        text.selectedSegment = toneOrder.firstIndex(of: settings.text) ?? 0
+        glass.selectedSegment = glassOrder.firstIndex(of: settings.glass) ?? 0
         shade.doubleValue = settings.shade
-        radius.doubleValue = settings.cornerRadius
-        gap.doubleValue = settings.gap
-        font.doubleValue = settings.fontSize
-        glass.selectedSegment = GlassStyle.allCases.firstIndex(of: settings.glass) ?? 0
-        text.selectedSegment = TextTone.allCases.firstIndex(of: settings.text) ?? 0
+        loadThemes(settings.themeName)
+        contrast.doubleValue = settings.minimumContrast
+        loadFonts(settings.fontFamily)
+        fontSize.doubleValue = settings.fontSize
+        lineHeight.doubleValue = settings.lineHeight
+        cursorShape.selectedSegment = CursorShape.allCases.firstIndex(of: settings.cursorShape) ?? 0
+        cursorBlink.state = settings.cursorBlink ? .on : .off
         rest.selectedSegment = FocusRest.allCases.firstIndex(of: settings.focusRest) ?? 0
         blur.doubleValue = settings.blurAmount
-        snap.state = settings.snapWindows ? .on : .off
-        updates.state = settings.checkForUpdates ? .on : .off
-        notify.state = settings.notifyOnFinish ? .on : .off
-        dropdown.state = settings.dropdownEnabled ? .on : .off
-        dock.state = settings.hideDockIcon ? .on : .off
-        confirmClose.selectItem(at: ConfirmClose.allCases.firstIndex(of: settings.confirmClose) ?? 0)
+
         optionKey.selectItem(at: OptionKey.allCases.firstIndex(of: settings.optionKey) ?? 0)
         shellExit.selectItem(at: ShellExit.allCases.firstIndex(of: settings.shellExit) ?? 0)
         pasteWarning.state = settings.warnMultilinePaste ? .on : .off
-        hotkeyTaken.isHidden = !(settings.dropdownEnabled && HotkeyCenter.takenByAnotherApp)
-        dropdown.title = "Dropdown terminal    \(settings.keys.symbol(.dropdown))"
-        sessionWhere.selectedSegment = settings.usesCloud ? 1 : 0
-        cloudChosen = sessionWhere.selectedSegment == 1
+        copyOnSelect.state = settings.copyOnSelect ? .on : .off
+        bell.selectedSegment = BellStyle.allCases.firstIndex(of: settings.bell) ?? 0
+        let lines = settings.scrollbackLines
+        fill(scrollback, SettingsFormat.choices(SettingsFormat.scrollbackChoices, including: lines), current: lines) { SettingsFormat.scrollback($0) }
+
+        radius.doubleValue = settings.cornerRadius
+        gap.doubleValue = settings.gap
+        snap.state = settings.snapWindows ? .on : .off
+        dropdown.state = settings.dropdownEnabled ? .on : .off
+        dropdownHeight.doubleValue = settings.dropdownHeight
+        dropdownHide.state = settings.dropdownHideOnFocusLoss ? .on : .off
+        paintDropdownKey()
+
+        if !prompting {
+            sessionWhere.selectedSegment = settings.usesCloud ? 1 : 0
+            cloudChosen = sessionWhere.selectedSegment == 1
+        }
         refreshCloudControls()
         keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()
-        applying = false
+        enableDependents()
+    }
+
+    private func fill<T: Equatable>(_ popup: NSPopUpButton, _ values: [T], current: T, title: (T) -> String) {
+        popup.removeAllItems()
+        for value in values {
+            popup.addItem(withTitle: title(value))
+            popup.lastItem?.representedObject = value
+        }
+        if let index = values.firstIndex(of: current) {
+            popup.selectItem(at: index)
+        }
+    }
+
+    private func loadThemes(_ selected: String) {
+        var names = SettingsThemeSource.names()
+        if !names.contains(selected) { names.append(selected) }
+        theme.removeAllItems()
+        theme.addItems(withTitles: names)
+        theme.selectItem(withTitle: selected)
+    }
+
+    private func loadFonts(_ selected: String) {
+        var families = SettingsFonts.monospacedFamilies()
+        if !selected.isEmpty, !families.contains(selected) { families.insert(selected, at: 0) }
+        fontFamily.removeAllItems()
+        fontFamily.addItem(withTitle: "SF Mono (default)")
+        fontFamily.lastItem?.representedObject = ""
+        fontFamily.menu?.addItem(.separator())
+        for family in families {
+            fontFamily.addItem(withTitle: family)
+            fontFamily.lastItem?.representedObject = family
+            if let font = NSFont(name: family, size: 13) ?? NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 13) {
+                fontFamily.lastItem?.attributedTitle = NSAttributedString(string: family, attributes: [.font: font])
+            }
+        }
+        if selected.isEmpty {
+            fontFamily.selectItem(at: 0)
+        } else if let index = fontFamily.itemArray.firstIndex(where: { $0.representedObject as? String == selected }) {
+            fontFamily.selectItem(at: index)
+        }
     }
 
     private func paintValues() {
-        shadeValue.stringValue = String(format: "%.2f", shade.doubleValue)
-        blurValue.stringValue = String(format: "%.2f", blur.doubleValue)
-        radiusValue.stringValue = String(Int(radius.doubleValue.rounded()))
-        gapValue.stringValue = String(Int(gap.doubleValue.rounded()))
-        fontValue.stringValue = String(Int(font.doubleValue.rounded()))
+        for field in [shade, contrast, fontSize, lineHeight, blur, radius, gap, dropdownHeight] {
+            field.paint()
+        }
     }
 
-    private func note(_ text: String) -> NSTextField {
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 12)
-        label.textColor = .secondaryLabelColor
-        label.preferredMaxLayoutWidth = 560
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return label
-    }
-
-    private func labeled(_ title: String, _ control: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.alignment = .left
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        control.translatesAutoresizingMaskIntoConstraints = false
-        let line = NSStackView(views: [label, control])
-        line.orientation = .horizontal
-        line.alignment = .centerY
-        line.spacing = 16
-        line.distribution = .fill
-        return line
-    }
-
-    private func sliderRow(_ title: String, _ slider: NSSlider, _ value: NSTextField, min: Double, max: Double) -> NSView {
-        slider.cell = GlassSliderCell()
-        slider.minValue = min
-        slider.maxValue = max
-        slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        slider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        label.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        let line = NSStackView(views: [label, slider, value])
-        line.orientation = .horizontal
-        line.alignment = .centerY
-        line.spacing = 16
-        line.distribution = .fill
-        return line
+    private func enableDependents() {
+        let blurring = FocusRest.allCases[max(0, rest.selectedSegment)] == .blur
+        blur.isEnabled = blurring
+        blurLabel?.textColor = blurring ? .labelColor : .tertiaryLabelColor
+        notifyAfter.isEnabled = notify.state == .on
+        let dropping = dropdown.state == .on
+        dropdownKey.isEnabled = dropping
+        dropdownHeight.isEnabled = dropping
+        dropdownHide.isEnabled = dropping
     }
 }
 
 private final class GlassSliderCell: NSSliderCell {
     override func drawBar(inside rect: NSRect, flipped: Bool) {
         let track = NSRect(x: rect.minX, y: rect.midY - 2, width: rect.width, height: 4)
-        let ink = NSColor.labelColor
+        let ink = NSColor.labelColor.withAlphaComponent(isEnabled ? 1 : 0.4)
         ink.withAlphaComponent(0.16).setFill()
         NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
         let span = max(maxValue - minValue, 0.0001)
         let t = CGFloat((doubleValue - minValue) / span)
         let fill = NSRect(x: rect.minX, y: track.minY, width: max(4, rect.width * t), height: 4)
-        ink.withAlphaComponent(0.82).setFill()
+        ink.withAlphaComponent(isEnabled ? 0.82 : 0.3).setFill()
         NSBezierPath(roundedRect: fill, xRadius: 2, yRadius: 2).fill()
     }
 
     override func drawKnob(_ knobRect: NSRect) {
         let knob = NSRect(x: knobRect.midX - 7, y: knobRect.midY - 7, width: 14, height: 14)
-        NSColor.labelColor.withAlphaComponent(0.94).setFill()
+        NSColor.labelColor.withAlphaComponent(isEnabled ? 0.94 : 0.35).setFill()
         NSBezierPath(ovalIn: knob).fill()
         NSColor.controlBackgroundColor.withAlphaComponent(0.35).setStroke()
         let ring = NSBezierPath(ovalIn: knob.insetBy(dx: 0.5, dy: 0.5))
         ring.lineWidth = 1
         ring.stroke()
+        if showsFirstResponder, let view = controlView, view.window?.firstResponder === view {
+            NSColor.keyboardFocusIndicatorColor.setStroke()
+            let focus = NSBezierPath(ovalIn: knob.insetBy(dx: -2, dy: -2))
+            focus.lineWidth = 2
+            focus.stroke()
+        }
     }
 }
