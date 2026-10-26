@@ -61,14 +61,15 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     private var acceptingClose = false
     private var dropdownGeneration = 0
     private var dropdownSize: CGSize?
+    /// The height setting a hand-resized dropdown was made under. Changing the setting drops the old size.
+    private var dropdownSizeSetting: Double?
     private var dropdownAnimating = false
     private var dragWatch: Timer?
     private var fullScreenTransition = false
     private var lastDividerSync: CFTimeInterval = 0
 
-    // TODO: move to Settings (dropdownHeightPercent, dropdownHideOnFocusLoss) once the settings owner adds them.
-    static let dropdownHeightFraction: CGFloat = 0.44
-    static let dropdownHidesOnFocusLoss = true
+    static var dropdownHeightFraction: CGFloat { CGFloat(AppModel.shared.settings.dropdownHeight) }
+    static var dropdownHidesOnFocusLoss: Bool { AppModel.shared.settings.dropdownHideOnFocusLoss }
 
     init(deskID: String, frame: NSRect) {
         self.deskID = deskID
@@ -166,7 +167,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     static func dropdownFrame(on screen: NSScreen?, size: CGSize? = nil) -> CGRect {
         let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
         let width = min(size?.width ?? 980, visible.width - 36)
-        let height = min(size?.height ?? min(460, max(320, visible.height * dropdownHeightFraction)), visible.height - 16)
+        let height = min(size?.height ?? max(240, visible.height * dropdownHeightFraction), visible.height - 16)
         return CGRect(x: visible.midX - width / 2, y: visible.maxY - height, width: width, height: height)
     }
 
@@ -177,6 +178,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(kind)?.isHidden = true
         }
+        if dropdownSizeSetting != AppModel.shared.settings.dropdownHeight { dropdownSize = nil }
         let target = Self.dropdownFrame(on: Self.screenUnderMouse(), size: dropdownSize)
         dropdownGeneration += 1
         let generation = dropdownGeneration
@@ -312,6 +314,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         }
         if isDropdown, !dropdownAnimating, let size = window?.frame.size {
             dropdownSize = size
+            dropdownSizeSetting = AppModel.shared.settings.dropdownHeight
         }
         rememberFrame()
     }
