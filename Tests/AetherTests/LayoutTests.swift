@@ -114,10 +114,86 @@ private func close(_ value: Double, _ expected: Double) -> Bool {
     #expect(Layout.layoutRects(shrunk)["a"]!.w < Layout.layoutRects(grown)["a"]!.w)
 }
 
-@Test func equalizeUsesLeafWeight() {
+@Test func equalizeWeighsPanesAlongTheSplitAxis() {
+    // Tall: one main pane beside a stack. Two columns, so each gets half.
     let tree = Layout.arrange(["a", "b", "c"], pattern: .main)!
     let even = Layout.equalize(tree)
-    #expect(close(Layout.layoutRects(even)["a"]!.w, 1.0 / 3.0))
+    #expect(close(Layout.layoutRects(even)["a"]!.w, 0.5))
+    #expect(close(Layout.layoutRects(even)["b"]!.h, 0.5))
+    // Three side-by-side columns still split in thirds.
+    let columns = Layout.equalize(Layout.arrange(["a", "b", "c"], pattern: .columns)!)
+    for id in ["a", "b", "c"] {
+        #expect(close(Layout.layoutRects(columns)[id]!.w, 1.0 / 3.0))
+    }
+    // a | (b over (c | d)): three columns across the bottom right, so a gets a third.
+    let nested = LayoutNode.split(id: "r", axis: .row, ratio: 0.7, a: .pane("a"), b: .split(
+        id: "c", axis: .col, ratio: 0.2, a: .pane("b"),
+        b: .split(id: "r2", axis: .row, ratio: 0.9, a: .pane("c"), b: .pane("d"))
+    ))
+    let rects = Layout.layoutRects(Layout.equalize(nested))
+    #expect(close(rects["a"]!.w, 1.0 / 3.0))
+    #expect(close(rects["b"]!.h, 0.5))
+    #expect(close(rects["c"]!.w, 1.0 / 3.0))
+}
+
+@Test func placeNeverProducesEmptyFrames() {
+    var tree = LayoutNode.pane("p0")
+    var focused = "p0"
+    for i in 1..<24 {
+        let id = "p\(i)"
+        tree = Layout.insert(tree, target: focused, zone: i % 2 == 0 ? .right : .bottom, newID: id)
+        focused = id
+    }
+    for (area, gap) in [(CGRect(x: 8, y: 8, width: 404, height: 264), CGFloat(40)), (CGRect(x: 0, y: 0, width: 3, height: 2), 12), (CGRect(x: 0, y: 0, width: 0, height: 0), 8)] {
+        let placed = Layout.place(tree, in: area, gap: gap)
+        #expect(placed.panes.count == 24)
+        for pane in placed.panes {
+            #expect(!pane.frame.isNull)
+            #expect(!pane.frame.isInfinite)
+            #expect(pane.frame.width > 0)
+            #expect(pane.frame.height > 0)
+            #expect(pane.frame.minX.isFinite && pane.frame.minY.isFinite)
+        }
+    }
+}
+
+@Test func splitIsRefusedWhenThePaneIsTooSmall() {
+    let area = CGRect(x: 0, y: 0, width: 150, height: 400)
+    let right = Layout.insert(.pane("a"), target: "a", zone: .right, newID: "b")
+    #expect(!Layout.fits(right, in: area, gap: 8, ids: ["a", "b"]))
+    let down = Layout.insert(.pane("a"), target: "a", zone: .bottom, newID: "b")
+    #expect(Layout.fits(down, in: area, gap: 8, ids: ["a", "b"]))
+}
+
+@Test func splitRefusalOnlyLooksAtTheSplitPane() {
+    // A cramped sibling does not block splitting a roomy pane.
+    let tree = LayoutNode.split(id: "s", axis: .row, ratio: 0.1, a: .pane("tiny"), b: .pane("big"))
+    let area = CGRect(x: 0, y: 0, width: 800, height: 500)
+    let next = Layout.insert(tree, target: "big", zone: .right, newID: "new")
+    #expect(Layout.fits(next, in: area, gap: 8, ids: ["big", "new"]))
+    #expect(!Layout.fits(next, in: area, gap: 8))
+}
+
+@Test func manyColumnsDoNotJumpWhenNudged() {
+    let ids = (0..<14).map { "p\($0)" }
+    let tree = Layout.arrange(ids, pattern: .columns)!
+    guard case .split(let id, _, let ratio, _, _) = tree else {
+        Issue.record("expected a split")
+        return
+    }
+    #expect(ratio < Layout.minRatio)
+    let nudged = Layout.setRatio(tree, splitID: id, ratio: ratio + 0.001)
+    #expect(close(Layout.ratio(of: id, in: nudged)!, ratio + 0.001))
+    let shrunk = Layout.setRatio(tree, splitID: id, ratio: ratio - 0.04)
+    #expect(close(Layout.ratio(of: id, in: shrunk)!, ratio))
+}
+
+@Test func dragBoundsFollowPoints() {
+    let wide = Layout.dragBounds(span: 2000, current: 0.5)
+    #expect(close(wide.lowerBound, 0.02))
+    #expect(close(wide.upperBound, 0.98))
+    let narrow = Layout.dragBounds(span: 200, current: 0.5)
+    #expect(close(narrow.lowerBound, Layout.minRatio))
 }
 
 @Test func neighborPrefersTheNearestPane() {
@@ -130,6 +206,36 @@ private func close(_ value: Double, _ expected: Double) -> Bool {
     #expect(Layout.neighbor(rects, id: "b", direction: .down) == "c")
     #expect(Layout.neighbor(rects, id: "c", direction: .left) == "a")
     #expect(Layout.neighbor(rects, id: "a", direction: .left) == nil)
+}
+
+@Test func neighborReturnsToThePaneYouCameFrom() {
+    let tree = Layout.arrange(["a", "b", "c", "d"], pattern: .main)!
+    let rects = Layout.layoutRects(tree)
+    #expect(Layout.neighbor(rects, id: "a", direction: .right) == "b")
+    #expect(Layout.neighbor(rects, id: "c", direction: .left) == "a")
+    #expect(Layout.neighbor(rects, id: "a", direction: .right, history: ["b", "c"]) == "c")
+    #expect(Layout.neighbor(rects, id: "a", direction: .right, history: ["c", "d"]) == "d")
+}
+
+@Test func neighborNeedsASharedEdge() {
+    // a sits top-left; c is diagonally below-right and closer by center than b.
+    let rects = [
+        "a": NormRect(x: 0, y: 0, w: 0.5, h: 0.5),
+        "b": NormRect(x: 0.5, y: 0, w: 0.5, h: 0.2),
+        "c": NormRect(x: 0.5, y: 0.5, w: 0.5, h: 0.5),
+        "x": NormRect(x: 0.5, y: 0.2, w: 0.5, h: 0.3),
+    ]
+    let right = Layout.neighbor(rects, id: "a", direction: .right)
+    #expect(right == "x" || right == "b")
+    #expect(right != "c")
+}
+
+@Test func closingFocusesTheNearestNeighbor() {
+    let tree = Layout.arrange(["a", "b", "c", "d"], pattern: .grid)!
+    let rects = Layout.layoutRects(tree)
+    let next = Layout.successor(rects, of: "d")
+    #expect(next == "b" || next == "c")
+    #expect(Layout.successor(rects, of: "d", history: ["c"]) == "c")
 }
 
 @Test func snapRectPullsTowardNearbyEdges() {
@@ -180,6 +286,33 @@ private func close(_ value: Double, _ expected: Double) -> Bool {
     let snapped = Layout.snapFrame(frame, others: [], screen: screen, threshold: 12)
     #expect(snapped.minX == 0)
     #expect(snapped.minY == 100)
+}
+
+@Test func windowSnapLetsAWindowSpanMonitors() {
+    let left = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let right = CGRect(x: 1000, y: 0, width: 1200, height: 900)
+    let frame = CGRect(x: 700, y: 200, width: 600, height: 400)
+    #expect(Layout.snapFrame(frame, others: [], screens: [left, right], threshold: 12) == frame)
+    // Partly off the bottom of one screen is fine too.
+    let low = CGRect(x: 300, y: -200, width: 400, height: 400)
+    #expect(Layout.snapFrame(low, others: [], screens: [left], threshold: 12) == low)
+}
+
+@Test func windowSnapUsesEveryScreenEdge() {
+    let left = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let right = CGRect(x: 1000, y: 0, width: 1200, height: 900)
+    let frame = CGRect(x: 1006, y: 300, width: 400, height: 300)
+    #expect(Layout.snapFrame(frame, others: [], screens: [left, right], threshold: 12).minX == 1000)
+}
+
+@Test func windowSnapRescuesAnUnreachableTitleBar() {
+    let screen = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let above = CGRect(x: 200, y: 790, width: 400, height: 300)
+    let fixed = Layout.snapFrame(above, others: [], screens: [screen], threshold: 12)
+    #expect(Layout.titleBarReachable(fixed, screens: [screen]))
+    #expect(fixed.maxY <= screen.maxY)
+    let gone = CGRect(x: -900, y: 200, width: 400, height: 300)
+    #expect(Layout.titleBarReachable(Layout.snapFrame(gone, others: [], screens: [screen], threshold: 12), screens: [screen]))
 }
 
 @Test func randomEditsKeepEveryPane() {
