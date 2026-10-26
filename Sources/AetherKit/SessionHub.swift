@@ -484,7 +484,9 @@ final class SessionHub {
     private func handleAgent(_ msg: [String: Any]) {
         let requestID = msg["id"] as? String ?? ""
         let path = msg["path"] as? String ?? ""
-        let body = msg["body"] as? [String: Any] ?? [:]
+        var body = msg["body"] as? [String: Any] ?? [:]
+        // A Cloud request names its own Cloud terminal by session. It never gets to pick a local pane by id.
+        body.removeValue(forKey: "pane")
         let previous = approvals
         approvals = Task { @MainActor in
             await previous?.value
@@ -501,15 +503,24 @@ final class SessionHub {
     }
 
     /// Anything that runs a command needs a yes from the person at this Mac.
+    /// Reading the screen also needs one unless the request comes from a Cloud terminal reading itself.
     private func approve(path: String, body: [String: Any]) async -> Bool {
-        guard let command = CloudPrompt.command(in: body) else { return true }
+        let command = CloudPrompt.command(in: body)
+        let ownSession = !((body["session"] as? String) ?? "").isEmpty
+        let reads = CloudPrompt.readsScreen(path) && !ownSession
+        guard command != nil || reads else { return true }
         let account = CloudPrompt.fingerprint(AppModel.shared.settings.sessionToken)
         if CloudPrompt.trusted(account) { return true }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        let place = AppModel.shared.settings.usesCloud ? "in a new Cloud terminal" : "on this Mac"
-        alert.messageText = "Your Cloud device wants to run a command \(place)."
-        alert.informativeText = command
+        if let command {
+            let place = AppModel.shared.settings.usesCloud ? "in a new Cloud terminal" : "on this Mac"
+            alert.messageText = "Your Cloud device wants to run a command \(place)."
+            alert.informativeText = command
+        } else {
+            alert.messageText = "Your Cloud device wants to read what's on screen in Aether."
+            alert.informativeText = path == "/view" ? "It will see the titles of your terminals." : "It will see the text in the focused terminal."
+        }
         alert.addButton(withTitle: "Deny")
         alert.addButton(withTitle: "Allow")
         alert.showsSuppressionButton = true
@@ -698,6 +709,10 @@ enum CloudPrompt {
         return await withCheckedContinuation { cont in
             alert.beginSheetModal(for: window) { cont.resume(returning: $0) }
         }
+    }
+
+    nonisolated static func readsScreen(_ path: String) -> Bool {
+        path == "/read" || path == "/view"
     }
 
     nonisolated static func command(in body: [String: Any]) -> String? {

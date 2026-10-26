@@ -415,7 +415,10 @@ final class UpdateCenter {
         }
         quitting = true
         visibleToast()?.setRestarting(true)
+        // The restart was already confirmed above, so the quit check must not ask again or defer the quit.
+        AppModel.shared.quitConfirmed = true
         NSApp.terminate(nil)
+        AppModel.shared.quitConfirmed = false
         // terminate(_:) returns only when the quit was cancelled.
         if let terminateObserver {
             NotificationCenter.default.removeObserver(terminateObserver)

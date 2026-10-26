@@ -44,6 +44,8 @@ final class AppModel {
     private var lazySaveItem: DispatchWorkItem?
     private var confirmedDeskClose: Set<String> = []
     private var asking: Set<String> = []
+    /// Set when the person already agreed to stop running terminals, such as Restart to Update.
+    var quitConfirmed = false
 
     private init() {
         directoryTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { _ in
@@ -346,6 +348,7 @@ final class AppModel {
 
     /// The question to ask before quitting, or nil to quit right away.
     func quitQuestion() -> (title: String, detail: String)? {
+        if quitConfirmed { return nil }
         let running = panes.values.filter { $0.runningCommand() != nil }
         switch settings.confirmClose {
         case .never:
