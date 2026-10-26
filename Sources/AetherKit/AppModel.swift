@@ -637,7 +637,7 @@ final class AppModel {
         desk.panes[paneID]?.title = pane.title
         desk.panes[paneID]?.cwd = pane.cwd
         desks[deskID] = desk
-        pane.refreshCaption(tone: settings.text)
+        pane.refreshCaption(tone: settings.text.effective)
         if desk.focusedID == paneID {
             controllers[deskID]?.window?.title = "\(pane.title) — Aether"
         }

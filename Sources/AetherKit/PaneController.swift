@@ -417,7 +417,7 @@ final class PaneChrome: NSView {
     func setFocused(_ focused: Bool, settings: Settings) {
         let nextBlur = (!focused && settings.focusRest == .blur) ? settings.blurAmount : 0
         let broadcasting = AppModel.shared.isBroadcasting(pane: paneID)
-        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text, abs(appliedBlur - nextBlur) < 0.01,
+        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text.effective, abs(appliedBlur - nextBlur) < 0.01,
            appliedBroadcast == broadcasting {
             return
         }
@@ -426,9 +426,9 @@ final class PaneChrome: NSView {
         header.setBroadcasting(broadcasting)
         appliedFocus = focused
         appliedRest = settings.focusRest
-        appliedTone = settings.text
+        appliedTone = settings.text.effective
         appliedBlur = nextBlur
-        let dim: CGFloat = focused || settings.focusRest != .dim ? 0 : (settings.text == .light ? 0.22 : 0.12)
+        let dim: CGFloat = focused || settings.focusRest != .dim ? 0 : (settings.text.effective == .light ? 0.22 : 0.12)
         // Enough smear that glyphs and pictures stop being readable, even toward the low end of the slider.
         let radius = nextBlur > 0.01 ? CGFloat(16 + nextBlur * 26) : 0
         header.setFindVisible(focused)
@@ -937,7 +937,7 @@ final class PaneController {
         title = command?.split(separator: " ").first.map(String.init) ?? folder
         chrome = PaneChrome(paneID: id, font: PaneController.font(size: settings.fontSize))
         apply(settings)
-        chrome.header.setCaption(caption, tone: settings.text)
+        chrome.header.setCaption(caption, tone: settings.text.effective)
         chrome.terminal.processDelegate = DelegateBridge.shared
         DelegateBridge.shared.register(self)
         wireChrome()
@@ -1172,10 +1172,10 @@ final class PaneController {
     }
 
     func apply(_ settings: Settings) {
-        let foreground: NSColor = settings.text == .light
+        let foreground: NSColor = settings.text.effective == .light
             ? NSColor(srgbRed: 0.95, green: 0.97, blue: 0.98, alpha: 1)
             : NSColor(srgbRed: 0.07, green: 0.08, blue: 0.1, alpha: 1)
-        let veil: NSColor = settings.text == .light ? .black : .white
+        let veil: NSColor = settings.text.effective == .light ? .black : .white
         chrome.terminal.font = PaneController.font(size: settings.fontSize)
         chrome.terminal.syncRemoteSize()
         chrome.terminal.nativeForegroundColor = foreground
@@ -1183,7 +1183,7 @@ final class PaneController {
         chrome.terminal.nativeBackgroundColor = .clear
         chrome.setBodyShade(veil.withAlphaComponent(settings.shade))
         chrome.terminal.selectedTextBackgroundColor = foreground.withAlphaComponent(0.22)
-        chrome.terminal.appearance = NSAppearance(named: settings.text == .light ? .darkAqua : .aqua)
+        chrome.terminal.appearance = NSAppearance(named: settings.text.effective == .light ? .darkAqua : .aqua)
         chrome.terminal.optionMode = settings.optionKey
         chrome.terminal.optionAsMetaKey = settings.optionKey == .meta
         chrome.terminal.warnMultilinePaste = settings.warnMultilinePaste
@@ -1192,12 +1192,12 @@ final class PaneController {
             self?.chrome.header.setActivity(state: state, message: message)
         }
         chrome.header.setScrim(veil.withAlphaComponent(max(settings.shade, 0.55)))
-        chrome.header.setCaption(caption, tone: settings.text)
+        chrome.header.setCaption(caption, tone: settings.text.effective)
         chrome.layer?.cornerRadius = settings.cornerRadius
     }
 
     func applyShade(_ shade: Double, settings: Settings) {
-        let veil: NSColor = settings.text == .light ? .black : .white
+        let veil: NSColor = settings.text.effective == .light ? .black : .white
         chrome.terminal.nativeBackgroundColor = .clear
         chrome.setBodyShade(veil.withAlphaComponent(shade))
         chrome.header.setScrim(veil.withAlphaComponent(max(shade, 0.55)))
@@ -1405,5 +1405,12 @@ final class DelegateBridge: NSObject, LocalProcessTerminalViewDelegate {
                 DelegateBridge.shared.pane(for: terminal)?.noteExit(exitCode)
             }
         }
+    }
+}
+
+extension TextTone {
+    /// The tone to draw with right now.
+    @MainActor var effective: TextTone {
+        resolved(darkMode: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
     }
 }

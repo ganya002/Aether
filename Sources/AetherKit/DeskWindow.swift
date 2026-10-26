@@ -589,7 +589,7 @@ final class DeskCanvas: NSView {
             }
             let revealing = chrome.isHidden || chrome.alphaValue < 0.05
             chrome.isHidden = false
-            pane.refreshCaption(tone: settings.text)
+            pane.refreshCaption(tone: settings.text.effective)
             pane.chrome.setFocused(item.id == desk.focusedID && window?.isKeyWindow != false, settings: settings)
             wire(pane)
             visible.insert(item.id)

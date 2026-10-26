@@ -15,11 +15,50 @@ public enum GlassStyle: String, Codable, CaseIterable, Sendable {
 public enum TextTone: String, Codable, CaseIterable, Sendable {
     case light
     case dark
+    /// Follows the system appearance: light text in Dark Mode, dark text in Light Mode.
+    case automatic
 
     public var title: String {
         switch self {
         case .light: "Light"
         case .dark: "Dark"
+        case .automatic: "Automatic"
+        }
+    }
+
+    /// Light or dark, with Automatic settled by the system appearance.
+    public func resolved(darkMode: Bool) -> TextTone {
+        switch self {
+        case .automatic: darkMode ? .light : .dark
+        default: self
+        }
+    }
+}
+
+public enum CursorShape: String, Codable, CaseIterable, Sendable {
+    case block
+    case underline
+    case bar
+
+    public var title: String {
+        switch self {
+        case .block: "Block"
+        case .underline: "Underline"
+        case .bar: "Bar"
+        }
+    }
+}
+
+public enum BellStyle: String, Codable, CaseIterable, Sendable {
+    case visual
+    case sound
+    case none
+
+    public var title: String {
+        switch self {
+        case .visual: "Flash"
+        case .sound: "Sound"
+        case .none: "Off"
         }
     }
 }
@@ -116,6 +155,22 @@ public struct Settings: Codable, Equatable, Sendable {
     public var notifyAfterSeconds: Double
     /// Local or Cloud. Turning Cloud off keeps the account above so it can come back.
     public var cloudEnabled: Bool
+    /// Name of a color theme, built in or imported. See Themes.
+    public var themeName: String = "Aether"
+    /// 0 leaves colors as the theme has them. 1 forces full contrast against the glass behind the text.
+    public var minimumContrast: Double = 0.25
+    /// Empty uses SF Mono, then Menlo.
+    public var fontFamily: String = ""
+    /// Multiplier on the font's natural line height.
+    public var lineHeight: Double = 1.0
+    public var cursorShape: CursorShape = .bar
+    public var cursorBlink: Bool = false
+    public var scrollbackLines: Int = 10_000
+    public var bell: BellStyle = .visual
+    public var copyOnSelect: Bool = false
+    /// Share of the screen the dropdown covers, top to bottom.
+    public var dropdownHeight: Double = 0.44
+    public var dropdownHideOnFocusLoss: Bool = true
 
     public static let currentVersion = 2
 
@@ -201,6 +256,17 @@ public struct Settings: Codable, Equatable, Sendable {
         baseFontSize = field(.baseFontSize, 13.0)
         notifyAfterSeconds = field(.notifyAfterSeconds, 10.0)
         cloudEnabled = field(.cloudEnabled, !sessionHost.isEmpty)
+        themeName = field(.themeName, "Aether")
+        minimumContrast = field(.minimumContrast, 0.25)
+        fontFamily = field(.fontFamily, "")
+        lineHeight = field(.lineHeight, 1.0)
+        cursorShape = field(.cursorShape, CursorShape.bar)
+        cursorBlink = field(.cursorBlink, false)
+        scrollbackLines = field(.scrollbackLines, 10_000)
+        bell = field(.bell, BellStyle.visual)
+        copyOnSelect = field(.copyOnSelect, false)
+        dropdownHeight = field(.dropdownHeight, 0.44)
+        dropdownHideOnFocusLoss = field(.dropdownHideOnFocusLoss, true)
         clamp()
     }
 
@@ -212,5 +278,9 @@ public struct Settings: Codable, Equatable, Sendable {
         notifyAfterSeconds = max(0, notifyAfterSeconds.isFinite ? notifyAfterSeconds : 10)
         cornerRadius = Layout.clamp(cornerRadius, 8, 32)
         gap = Layout.clamp(gap, 4, 22)
+        minimumContrast = Layout.clamp(minimumContrast, 0, 1)
+        lineHeight = Layout.clamp(lineHeight, 0.8, 2.0)
+        scrollbackLines = min(max(scrollbackLines, 0), 1_000_000)
+        dropdownHeight = Layout.clamp(dropdownHeight, 0.2, 1.0)
     }
 }
