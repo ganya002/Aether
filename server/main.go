@@ -877,7 +877,7 @@ func (h *hub) serveAPI(addr string) {
 	})
 	mux.Handle("/", webHandler())
 	log.Printf("agent api on %s", addr)
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: securityHeaders(mux), ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
 

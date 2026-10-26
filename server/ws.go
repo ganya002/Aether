@@ -95,6 +95,38 @@ func originPatterns() []string {
 	return []string{u.Host, "localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*"}
 }
 
+// securityHeaders wraps every response. The page loads only its own scripts
+// and talks only to its own socket; xterm.js adds <style> elements at runtime,
+// which is why inline styles are allowed.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connect := "'self'"
+		if safeHost(r.Host) {
+			connect += " wss://" + r.Host + " ws://" + r.Host
+		}
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; font-src 'self'; connect-src "+connect+"; object-src 'none'; base-uri 'none'; "+
+			"form-action 'self'; frame-ancestors 'none'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func safeHost(host string) bool {
+	if host == "" || len(host) > 255 {
+		return false
+	}
+	for _, c := range host {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == ':') {
+			return false
+		}
+	}
+	return true
+}
+
 func webHandler() http.Handler {
 	sub, err := fs.Sub(webFiles, "web")
 	if err != nil {
@@ -103,8 +135,6 @@ func webHandler() http.Handler {
 	}
 	files := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		files.ServeHTTP(w, r)
 	})
