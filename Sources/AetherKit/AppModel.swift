@@ -1015,21 +1015,42 @@ enum SessionStore {
 
 extension AppModel {
     func agent(path: String, body: [String: Any]) -> [String: Any] {
+        let sessions = panes.compactMapValues { $0.chrome.terminal.remoteSession }
+        let resolved = AgentArgs.target(pane: body["pane"] as? String, session: body["session"] as? String, desks: desks, sessions: sessions, keyDesk: keyDeskID)
         switch path {
-        case "/tab":
-            let pane = openAgentPane(zone: nil, command: body["command"] as? String, focus: bool(body["focus"], false), share: share(body["ratio"]))
-            return ["ok": true, "pane": pane]
-        case "/split":
-            let zone = Zone(rawValue: body["direction"] as? String ?? "right") ?? .right
-            let pane = openAgentPane(zone: zone, command: body["command"] as? String, focus: bool(body["focus"], false), share: share(body["ratio"]))
-            return ["ok": true, "pane": pane]
+        case "/tab", "/split":
+            var zone: Zone?
+            if path == "/split" {
+                guard let side = AgentArgs.zone(body["direction"]) else { return failure("Use right, left, up, or down.") }
+                zone = side
+            }
+            let command = (body["command"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            switch resolved {
+            case .success(let target):
+                guard let pane = openAgentPane(beside: target, zone: zone, command: command, focus: bool(body["focus"], false), share: share(body["ratio"])) else {
+                    return failure("Could not split that pane.")
+                }
+                return ["ok": true, "pane": pane]
+            case .failure(let error):
+                guard body["pane"] == nil, body["session"] == nil else { return failure(error.message) }
+                newWindow(command: command)
+                return ["ok": true, "pane": order.last.flatMap { desks[$0]?.focusedID } ?? ""]
+            }
         case "/open":
-            let zone = Zone(rawValue: body["direction"] as? String ?? "right") ?? .right
-            let pane = openAgentPane(zone: zone, command: nil, focus: false, share: share(body["ratio"]))
+            guard case .success(let target) = resolved else { return failure(resolved) }
+            guard let zone = AgentArgs.zone(body["direction"]) else { return failure("Use right, left, up, or down.") }
             let kind = body["kind"] as? String ?? "web"
-            let target = body["target"] as? String ?? ""
-            guard let controller = panes[pane], controller.chrome.showPreview(kind: kind, source: target) else {
-                return ["ok": false, "error": "Could not open that page."]
+            var source = body["target"] as? String ?? ""
+            if kind == "pdf", !source.hasPrefix("/") {
+                let base = desks[target.desk]?.panes[target.pane]?.cwd ?? System.home()
+                source = URL(fileURLWithPath: base).appendingPathComponent(source).standardized.path
+            }
+            guard let pane = openAgentPane(beside: target, zone: zone, command: nil, focus: bool(body["focus"], false), share: share(body["ratio"])) else {
+                return failure("Could not split that pane.")
+            }
+            guard let controller = panes[pane], controller.chrome.showPreview(kind: kind, source: source) else {
+                closePane(pane)
+                return failure(kind == "pdf" ? "Could not open \(source)." : "Could not open that page.")
             }
             controller.holdsPreview = true
             return ["ok": true, "pane": pane]
@@ -1038,42 +1059,104 @@ extension AppModel {
             changeFont(by: delta)
             return ["ok": true, "size": settings.fontSize]
         case "/zoom":
-            toggleMaximize()
-            return ["ok": true]
+            guard case .success(let target) = resolved, var desk = desks[target.desk] else { return failure(resolved) }
+            desk.maximizedID = desk.maximizedID == target.pane ? nil : target.pane
+            if desk.maximizedID != nil { desk.focusedID = target.pane }
+            desks[target.desk] = desk
+            controllers[target.desk]?.sync(animated: true)
+            return ["ok": true, "pane": target.pane, "zoomed": desk.maximizedID != nil]
         case "/read":
-            guard let deskID = keyDeskID, let focused = desks[deskID]?.focusedID, let text = panes[focused]?.screenText() else {
-                return ["ok": false, "error": "No terminal is focused."]
+            guard case .success(let target) = resolved, let pane = panes[target.pane] else { return failure(resolved) }
+            if let count = int(body["lines"]), count > 0 {
+                let dump = String(decoding: pane.chrome.terminal.terminal.getBufferAsData(), as: UTF8.self)
+                return ["ok": true, "pane": target.pane, "text": AgentArgs.tail(dump, lines: min(count, 100_000))]
             }
-            return ["ok": true, "pane": focused, "text": text]
+            return ["ok": true, "pane": target.pane, "text": pane.screenText()]
         case "/view":
-            let rows = desks.values.flatMap { desk in
-                desk.layout.panes.map { id in
+            let rows = order.compactMap { desks[$0] }.flatMap { desk in
+                Layout.visualIDs(desk.layout).map { id in
                     ["id": id, "desk": desk.id, "focused": desk.focusedID == id, "title": desk.panes[id]?.title ?? ""] as [String: Any]
                 }
             }
             return ["ok": true, "panes": rows]
+        case "/status":
+            guard case .success(let target) = resolved, target.explicit, let pane = panes[target.pane] else { return failure(resolved) }
+            let state = body["state"] as? String ?? ""
+            guard ["idle", "working", "blocked", "done", "error"].contains(state) else {
+                return failure("Use working, blocked, done, error, or idle.")
+            }
+            pane.chrome.header.setActivity(state: state, message: body["message"] as? String ?? "")
+            return ["ok": true, "pane": target.pane]
+        case "/notify":
+            let message = body["message"] as? String ?? ""
+            guard !message.isEmpty else { return failure("Say what to notify.") }
+            let title = (try? resolved.get()).flatMap { panes[$0.pane]?.title } ?? "Aether"
+            FinishNotifier.deliver(title: title, body: message)
+            return ["ok": true]
+        case "/close":
+            guard case .success(let caller) = resolved, caller.explicit else {
+                return failure("Run this from the pane that opened it, or pass --pane.")
+            }
+            let victim = body["target"] as? String ?? ""
+            guard deskID(containing: victim) != nil else { return failure("No pane \(victim).") }
+            guard AgentDesk.shared.openedBy[victim] == caller.pane else {
+                return failure("You can only close panes you opened.")
+            }
+            AgentDesk.shared.openedBy[victim] = nil
+            closePane(victim)
+            return ["ok": true, "pane": victim]
         default:
-            return ["ok": false, "error": "Unknown request."]
+            return failure("Unknown request.")
         }
     }
 
-    private func openAgentPane(zone: Zone?, command: String?, focus: Bool, share: Double?) -> String {
-        let before = keyDeskID.flatMap { desks[$0]?.focusedID }
+    /// Adds a pane beside `target` in the target's own window. Focus and window order stay put
+    /// unless `focus` is set. Returns nil when the layout could not take the pane.
+    private func openAgentPane(beside target: AgentArgs.Target, zone: Zone?, command: String?, focus: Bool, share: Double?) -> String? {
+        guard var desk = desks[target.desk] else { return nil }
+        let directory = desk.panes[target.pane]?.cwd ?? System.home()
+        let paneID = UUID().uuidString
+        let before = desk.layout
         if let zone {
-            splitFocused(zone, command: command)
+            desk.kind = .splits
+            desk.layout = Layout.insert(desk.layout, target: target.pane, zone: zone, newID: paneID)
+        } else if desk.kind == .splits {
+            desk.layout = Layout.insert(desk.layout, target: target.pane, zone: .right, newID: paneID)
         } else {
-            newPane(command: command)
+            desk.layout = Self.layout(for: Layout.visualIDs(desk.layout) + [paneID], kind: desk.kind)
         }
-        let created = keyDeskID.flatMap { desks[$0]?.focusedID } ?? ""
-        if let share, let deskID = keyDeskID {
-            tuneShare(deskID: deskID, paneID: created, share: min(max(share, 0.1), 0.8))
+        guard desk.layout != before, desk.layout.panes.contains(paneID) else { return nil }
+        if focus { desk.focusedID = paneID }
+        desk.maximizedID = nil
+        desk.panes[paneID] = PaneState(id: paneID, cwd: directory, command: command, title: Self.initialTitle(command: command, cwd: directory), exitCode: nil)
+        desks[target.desk] = desk
+        makePane(desk.panes[paneID]!, settings: settings)
+        controllers[target.desk]?.sync(animated: true)
+        startSoon(paneID)
+        scheduleSave()
+        if let share {
+            tuneShare(deskID: target.desk, paneID: paneID, share: min(max(share, 0.1), 0.8))
         }
-        if !focus, let before, let deskID = keyDeskID, var desk = desks[deskID] {
-            desk.focusedID = before
-            desks[deskID] = desk
-            controllers[deskID]?.sync(animated: true)
+        if target.explicit {
+            AgentDesk.shared.openedBy = AgentDesk.shared.openedBy.filter { panes[$0.key] != nil }
+            AgentDesk.shared.openedBy[paneID] = target.pane
         }
-        return created
+        return paneID
+    }
+
+    private func failure(_ message: String) -> [String: Any] {
+        ["ok": false, "error": message]
+    }
+
+    private func failure(_ resolved: Result<AgentArgs.Target, AgentError>) -> [String: Any] {
+        if case .failure(let error) = resolved { return failure(error.message) }
+        return failure("That pane is gone.")
+    }
+
+    private func int(_ raw: Any?) -> Int? {
+        if let value = raw as? Int { return value }
+        if let value = raw as? Double { return Int(value) }
+        return nil
     }
 
     private func tuneShare(deskID: String, paneID: String, share: Double) {

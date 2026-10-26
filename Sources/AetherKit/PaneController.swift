@@ -412,7 +412,7 @@ final class PaneChrome: NSView {
 }
 
 @MainActor
-final class PaneHeader: NSView {
+final class PaneHeader: NSView, NSViewToolTipOwner {
     var onFocus: (() -> Void)?
     var onGripDrag: ((NSEvent) -> Void)?
     var onWindowDrag: ((NSEvent) -> Void)?
@@ -484,6 +484,7 @@ final class PaneHeader: NSView {
         activityState = state
         activity = message
         needsDisplay = true
+        needsLayout = true
     }
 
     func setScrim(_ color: NSColor) {
@@ -496,6 +497,12 @@ final class PaneHeader: NSView {
         closeButton.frame = NSRect(x: bounds.width - 36, y: 5, width: 24, height: 24)
         findButton.frame = NSRect(x: bounds.width - 62, y: 5, width: 24, height: 24)
         titleField.frame = NSRect(x: 34, y: 7, width: max(0, bounds.width - 108), height: 20)
+        removeAllToolTips()
+        if !activity.isEmpty, activityState != "idle" { addToolTip(NSRect(x: bounds.width - 84, y: 8, width: 19, height: 19), owner: self, userData: nil) }
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        activity
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -903,7 +910,10 @@ final class PaneController {
             env.removeAll { $0.hasPrefix("LANG=") }
             env.append("LANG=\(lang)")
         }
+        let bin = System.supportDirectory().appendingPathComponent("bin").path
+        env = env.map { $0.hasPrefix("PATH=") ? "PATH=\(bin):" + $0.dropFirst(5) : $0 }
         env.append("TERM_PROGRAM=Aether")
+        env.append("TERM_PROGRAM_VERSION=\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")")
         env.append("AETHER_PANE=\(pane)")
         env.append("AETHER_CONTROL=127.0.0.1:\(AgentDesk.port)")
         env.append("AETHER_AGENT_PLIST=\(System.supportDirectory().appendingPathComponent("agent.plist").path)")
