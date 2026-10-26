@@ -58,9 +58,12 @@ public struct Settings: Codable, Equatable, Sendable {
     public var keys: KeyMap
     /// Public host of aether-sessiond. Empty keeps shells on this Mac.
     public var sessionHost: String
+    /// Kept in the keychain. The JSON files only carry it when the keychain refuses it.
     public var sessionToken: String
     /// WebSocket URL for Cloud. Empty falls back to the older TCP port.
     public var sessionWS: String
+    /// Local or Cloud. Turning Cloud off keeps the account above so it can come back.
+    public var cloudEnabled: Bool
 
     public static let currentVersion = 2
 
@@ -81,7 +84,8 @@ public struct Settings: Codable, Equatable, Sendable {
         keys: KeyMap = .standard,
         sessionHost: String = "",
         sessionToken: String = "",
-        sessionWS: String = ""
+        sessionWS: String = "",
+        cloudEnabled: Bool? = nil
     ) {
         self.shade = shade
         self.glass = glass
@@ -100,6 +104,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.sessionHost = sessionHost
         self.sessionToken = sessionToken
         self.sessionWS = sessionWS
+        self.cloudEnabled = cloudEnabled ?? !sessionHost.isEmpty
     }
 
     public init(from decoder: Decoder) throws {
@@ -121,6 +126,7 @@ public struct Settings: Codable, Equatable, Sendable {
         sessionHost = try container.decodeIfPresent(String.self, forKey: .sessionHost) ?? ""
         sessionToken = try container.decodeIfPresent(String.self, forKey: .sessionToken) ?? ""
         sessionWS = try container.decodeIfPresent(String.self, forKey: .sessionWS) ?? ""
+        cloudEnabled = try container.decodeIfPresent(Bool.self, forKey: .cloudEnabled) ?? !sessionHost.isEmpty
         clamp()
     }
 

@@ -102,6 +102,17 @@ final class AetherTerminal: LocalProcessTerminalView {
         onUserInput?(data)
     }
 
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        syncRemoteSize()
+    }
+
+    /// SwiftTerm only reports size changes while a local process runs, so Cloud panes tell the server here.
+    func syncRemoteSize() {
+        guard let remoteSession, let terminal else { return }
+        SessionHub.shared.resize(remoteSession, cols: terminal.cols, rows: terminal.rows)
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
@@ -405,6 +416,12 @@ final class PaneChrome: NSView {
         needsLayout = true
     }
 
+    func showNotice(_ text: String, action: String) {
+        exitBanner.isHidden = false
+        exitBanner.setNotice(text, action: action)
+        needsLayout = true
+    }
+
     func hideExit() {
         exitBanner.isHidden = true
         needsLayout = true
@@ -597,7 +614,13 @@ final class ExitBanner: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    func setNotice(_ text: String, action: String) {
+        label.stringValue = text
+        button.title = action
+    }
+
     func setCode(_ code: Int32?) {
+        button.title = "Restart"
         if let code {
             label.stringValue = "Exited \(code)"
         } else {
@@ -716,49 +739,121 @@ final class PaneController {
     }
 
     var holdsPreview = false
+    /// A Cloud terminal saved with this pane last time. Launching attaches to it instead of starting a new one.
+    var resumeRemote: String?
+    /// The link to this pane's Cloud terminal dropped, but the shell may still be running there.
+    private(set) var remoteResumable = false
+    private var remoteTicket = 0
 
     func launch() {
         if holdsPreview { return }
-        if !AppModel.shared.settings.sessionHost.isEmpty, !AppModel.shared.settings.sessionToken.isEmpty {
+        if AppModel.shared.settings.usesCloud {
             launchRemote()
             return
+        }
+        if resumeRemote != nil {
+            resumeRemote = nil
+            AppModel.shared.noteRemote(id, session: nil)
         }
         launchLocal()
     }
 
     private func launchRemote(attempt: Int = 0) {
+        remoteTicket += 1
+        let ticket = remoteTicket
         chrome.header.setCloud("Connecting")
-        let cols = max(chrome.terminal.terminal.cols, 80)
-        let rows = max(chrome.terminal.terminal.rows, 24)
+        chrome.hideExit()
+        if chrome.terminal.process.running {
+            chrome.terminal.terminate()
+        }
+        let term: Terminal = chrome.terminal.terminal
+        let cols = term.cols > 1 ? term.cols : 80
+        let rows = term.rows > 1 ? term.rows : 24
+        let resume = chrome.terminal.remoteSession ?? resumeRemote
         Task { @MainActor in
             do {
-                let id = try await SessionHub.shared.create(cwd: "", cols: cols, rows: rows, command: command)
-                chrome.terminal.remoteSession = id
-                chrome.header.setCloud(SessionHub.shared.link.title == "Connected" ? "Cloud" : SessionHub.shared.link.title)
-                SessionHub.shared.onResync(id) { [weak self] in
-                    self?.chrome.terminal.terminal.resetToInitialState()
-                }
-                SessionHub.shared.onOutput(id) { [weak self] data in
-                    self?.chrome.terminal.terminal.feed(byteArray: [UInt8](data))
-                }
-                SessionHub.shared.onStatus(id) { [weak self] state, message in
-                    self?.chrome.header.setActivity(state: state, message: message)
-                    if state == "done", message == "exited" {
-                        self?.noteExit(0)
+                let hub = SessionHub.shared
+                var id = ""
+                if let resume {
+                    // The server replays the screen on attach, so start clean.
+                    self.resetRemoteScreen()
+                    do {
+                        try await hub.attach(id: resume, cols: cols, rows: rows)
+                        id = resume
+                    } catch SessionError.server(let message) where message == "no such session" {
+                        id = ""
                     }
                 }
-                chrome.hideExit()
+                if id.isEmpty {
+                    id = try await hub.create(cwd: "", cols: cols, rows: rows, command: command)
+                }
+                guard !self.didShutdown, ticket == self.remoteTicket else {
+                    if id != resume { hub.close(id) }
+                    return
+                }
+                self.bindRemote(id, cols: cols, rows: rows)
             } catch {
-                guard !self.didShutdown, attempt < 2 else {
+                guard !self.didShutdown, ticket == self.remoteTicket else { return }
+                guard attempt < 2, error as? SessionError != .unauthorized else {
                     let text = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.remoteResumable = (self.chrome.terminal.remoteSession ?? self.resumeRemote) != nil
                     self.chrome.header.setCloud(text)
+                    self.chrome.showNotice("Disconnected · \(text)", action: "Reconnect")
                     return
                 }
                 try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 700_000_000)
-                guard !self.didShutdown else { return }
+                guard !self.didShutdown, ticket == self.remoteTicket else { return }
                 self.launchRemote(attempt: attempt + 1)
             }
         }
+    }
+
+    /// Starts showing a Cloud terminal. The size is the one the server was given, so a later change gets sent.
+    private func bindRemote(_ id: String, cols: Int, rows: Int) {
+        let hub = SessionHub.shared
+        if let old = chrome.terminal.remoteSession, old != id {
+            hub.close(old)
+        }
+        hub.track(id, cols: cols, rows: rows)
+        chrome.terminal.remoteSession = id
+        resumeRemote = nil
+        remoteResumable = false
+        AppModel.shared.noteRemote(self.id, session: id)
+        chrome.header.setCloud(hub.link == .connected ? "Cloud" : hub.link.title)
+        hub.onResync(id) { [weak self] in
+            self?.resetRemoteScreen()
+        }
+        hub.onOutput(id) { [weak self] data in
+            self?.chrome.terminal.feed(byteArray: ArraySlice([UInt8](data)))
+        }
+        hub.onStatus(id) { [weak self] state, message in
+            self?.chrome.header.setActivity(state: state, message: message)
+            if state == "done", message == "exited" {
+                self?.remoteResumable = false
+                self?.noteExit(0)
+            }
+        }
+        hub.onEvent(id) { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .disconnected:
+                self.remoteResumable = true
+                self.chrome.showNotice("Disconnected from Cloud", action: "Reconnect")
+            case .restored:
+                self.remoteResumable = false
+                self.chrome.hideExit()
+            case .gone:
+                self.remoteResumable = false
+                self.chrome.showNotice("This Cloud terminal is gone", action: "Restart")
+            }
+        }
+        chrome.hideExit()
+        chrome.terminal.syncRemoteSize()
+    }
+
+    private func resetRemoteScreen() {
+        chrome.terminal.terminal.resetToInitialState()
+        chrome.terminal.feed(byteArray: [])
     }
 
     func screenText() -> String {
@@ -768,9 +863,14 @@ final class PaneController {
     }
 
     func endRemoteSession() {
-        if let id = chrome.terminal.remoteSession {
-            SessionHub.shared.close(id)
-            chrome.terminal.remoteSession = nil
+        remoteTicket += 1
+        remoteResumable = false
+        let target = chrome.terminal.remoteSession ?? resumeRemote
+        resumeRemote = nil
+        chrome.terminal.remoteSession = nil
+        if let target {
+            SessionHub.shared.close(target)
+            AppModel.shared.noteRemote(id, session: nil)
         }
     }
 
@@ -807,6 +907,7 @@ final class PaneController {
             : NSColor(srgbRed: 0.07, green: 0.08, blue: 0.1, alpha: 1)
         let veil: NSColor = settings.text == .light ? .black : .white
         chrome.terminal.font = PaneController.font(size: settings.fontSize)
+        chrome.terminal.syncRemoteSize()
         chrome.terminal.nativeForegroundColor = foreground
         chrome.terminal.caretColor = foreground
         chrome.terminal.nativeBackgroundColor = .clear
