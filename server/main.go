@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,8 @@ func envOr(key, fallback string) string {
 type session struct {
 	id    string
 	owner string
+	// created orders the session list so every client shows terminals oldest first.
+	created time.Time
 	// token is handed to the shell as AETHER_TOKEN so the aether command can
 	// reach /agent for this one session without the person's own token.
 	token  string
@@ -344,7 +347,7 @@ func (h *hub) create(owner, cwd string, cols, rows int, command string) (*sessio
 		_ = exec.Command("prlimit", "--pid", strconv.Itoa(cmd.Process.Pid), "--nproc=128", "--nofile=4096").Run()
 	}
 	s := &session{
-		id: id, owner: owner, token: token, cmd: cmd, master: master, cols: cols, rows: rows, cwd: dir,
+		id: id, owner: owner, created: time.Now(), token: token, cmd: cmd, master: master, cols: cols, rows: rows, cwd: dir,
 		title: "shell", state: "idle", subs: map[*subscriber]struct{}{},
 	}
 	h.mu.Lock()
@@ -546,11 +549,20 @@ func (h *hub) close(id string) {
 func (h *hub) listFor(owner string) []map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	items := make([]map[string]any, 0, len(h.sessions))
+	mine := make([]*session, 0, len(h.sessions))
 	for _, s := range h.sessions {
-		if s.owner != owner {
-			continue
+		if s.owner == owner {
+			mine = append(mine, s)
 		}
+	}
+	sort.Slice(mine, func(i, j int) bool {
+		if !mine[i].created.Equal(mine[j].created) {
+			return mine[i].created.Before(mine[j].created)
+		}
+		return mine[i].id < mine[j].id
+	})
+	items := make([]map[string]any, 0, len(mine))
+	for _, s := range mine {
 		s.mu.Lock()
 		items = append(items, map[string]any{
 			"id": s.id, "title": s.title, "cwd": s.cwd, "state": s.state, "msg": s.msg,
