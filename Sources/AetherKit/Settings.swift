@@ -171,6 +171,8 @@ public struct Settings: Codable, Equatable, Sendable {
     /// Share of the screen the dropdown covers, top to bottom.
     public var dropdownHeight: Double = 0.44
     public var dropdownHideOnFocusLoss: Bool = true
+    /// Prompt marks, command notifications, and titles from zsh, bash, and fish. See ShellIntegration.
+    public var shellIntegration: Bool = true
 
     public static let currentVersion = 2
 
@@ -267,6 +269,7 @@ public struct Settings: Codable, Equatable, Sendable {
         copyOnSelect = field(.copyOnSelect, false)
         dropdownHeight = field(.dropdownHeight, 0.44)
         dropdownHideOnFocusLoss = field(.dropdownHideOnFocusLoss, true)
+        shellIntegration = field(.shellIntegration, true)
         clamp()
     }
 

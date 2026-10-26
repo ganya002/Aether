@@ -144,6 +144,9 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case dropdown
     case quit
     case insertPath
+    case previousPrompt
+    case nextPrompt
+    case selectLastOutput
 
     var title: String {
         switch self {
@@ -181,6 +184,9 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .dropdown: "Dropdown terminal"
         case .quit: "Quit Aether"
         case .insertPath: "Insert a path"
+        case .previousPrompt: "Previous prompt"
+        case .nextPrompt: "Next prompt"
+        case .selectLastOutput: "Select last command output"
         }
     }
 
@@ -224,6 +230,9 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .dropdown: return chord("`", [command, .control], kVK_ANSI_Grave)
         case .quit: return chord("q", command, kVK_ANSI_Q)
         case .insertPath: return chord("p", [command, .shift], kVK_ANSI_P)
+        case .previousPrompt: return chord(String(UnicodeScalar(NSUpArrowFunctionKey)!), command, kVK_UpArrow)
+        case .nextPrompt: return chord(String(UnicodeScalar(NSDownArrowFunctionKey)!), command, kVK_DownArrow)
+        case .selectLastOutput: return chord("a", [command, .shift], kVK_ANSI_A)
         }
     }
 }
