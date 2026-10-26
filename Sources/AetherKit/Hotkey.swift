@@ -10,12 +10,13 @@ enum GlassMotion {
             return
         }
         let target = window.frame
-        let intro = target.insetBy(dx: target.width * 0.022, dy: target.height * 0.028)
+        let reduced = Motion.reduced
+        let intro = reduced ? target : target.insetBy(dx: target.width * 0.022, dy: target.height * 0.028)
         window.alphaValue = 0
         window.setFrame(intro, display: false)
         window.makeKeyAndOrderFront(nil)
         Motion.group(Motion.reveal) {
-            window.animator().setFrame(target, display: true)
+            if !reduced { window.animator().setFrame(target, display: true) }
             window.animator().alphaValue = 1
         }
     }
@@ -27,9 +28,10 @@ enum GlassMotion {
         let home = window.frame
         var gone = home.insetBy(dx: home.width * 0.04, dy: home.height * 0.05)
         gone.origin.y += 10
+        let reduced = Motion.reduced
         Motion.group(Motion.close, {
             window.animator().alphaValue = 0
-            window.animator().setFrame(gone, display: true)
+            if !reduced { window.animator().setFrame(gone, display: true) }
         }, done: {
             guard finish() else { return }
             window.orderOut(nil)

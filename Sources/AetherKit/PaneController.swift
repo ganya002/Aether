@@ -378,10 +378,21 @@ final class PaneChrome: NSView {
         bellLayer.opacity = 0
         bell.layer?.addSublayer(bellLayer)
         exitBanner.isHidden = true
+        header.paneID = paneID
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+
+    /// "Terminal: zsh, ~/proj, focused"
+    override func accessibilityLabel() -> String? {
+        var parts = [header.titleText, header.pathText].filter { !$0.isEmpty }
+        if appliedFocus == true { parts.append("focused") }
+        return parts.isEmpty ? "Terminal" : "Terminal: " + parts.joined(separator: ", ")
+    }
 
     override func layout() {
         super.layout()
@@ -659,16 +670,29 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
     var onWindowDrag: ((NSEvent) -> Void)?
     var onClose: (() -> Void)?
     var onFind: (() -> Void)?
+    /// The pane this header belongs to, for the grip's VoiceOver menu.
+    var paneID: String? {
+        didSet { grip.paneID = paneID }
+    }
     private var activity = ""
     private var activityState = ""
     private var cloudNote = ""
     private var broadcasting = false
+    private(set) var titleText = ""
+    private(set) var pathText = ""
+    private var focused = false
+    private var hovering = false
+    private var hoverArea: NSTrackingArea?
 
     private let titleField = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
     private let findButton = NSButton()
+    private let grip = PaneGrip()
     private var tone: TextTone = .light
     private var scrim = NSColor.black.withAlphaComponent(0.55)
+
+    private static let gripWidth: CGFloat = 26
+    private static let titleX: CGFloat = 34
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -678,6 +702,9 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         titleField.translatesAutoresizingMaskIntoConstraints = true
         addSubview(titleField)
 
+        grip.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(grip)
+
         closeButton.isBordered = false
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close terminal")
         closeButton.imageScaling = .scaleProportionallyDown
@@ -686,6 +713,8 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         closeButton.action = #selector(closePressed)
         closeButton.translatesAutoresizingMaskIntoConstraints = true
         closeButton.toolTip = "Close terminal"
+        closeButton.setAccessibilityLabel("Close terminal")
+        closeButton.alphaValue = 0
         addSubview(closeButton)
 
         findButton.isBordered = false
@@ -695,37 +724,96 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         findButton.target = self
         findButton.action = #selector(findPressed)
         findButton.translatesAutoresizingMaskIntoConstraints = true
-        findButton.toolTip = "Find  ⌘F"
+        findButton.setAccessibilityLabel("Find in terminal")
         findButton.alphaValue = 0
         addSubview(findButton)
+        refreshFindTip()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    /// The caption is "title   path". The path is drawn in a quieter tone than the title.
     func setCaption(_ text: String, tone: TextTone) {
         self.tone = tone
-        titleField.stringValue = text
+        let parts = Self.split(caption: text)
+        titleText = parts.title
+        pathText = parts.path
         let color: NSColor = tone == .light ? .white : NSColor(srgbRed: 0.09, green: 0.1, blue: 0.12, alpha: 1)
-        titleField.textColor = color.withAlphaComponent(0.92)
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingMiddle
+        let line = NSMutableAttributedString()
+        if !parts.title.isEmpty {
+            line.append(NSAttributedString(string: parts.title, attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: color.withAlphaComponent(0.92),
+            ]))
+        }
+        if !parts.path.isEmpty {
+            line.append(NSAttributedString(string: parts.title.isEmpty ? parts.path : "  \(parts.path)", attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: color.withAlphaComponent(0.55),
+            ]))
+        }
+        line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
+        titleField.attributedStringValue = line
+        titleField.setAccessibilityLabel([parts.title, parts.path].filter { !$0.isEmpty }.joined(separator: ", "))
         closeButton.contentTintColor = color.withAlphaComponent(0.75)
         findButton.contentTintColor = color.withAlphaComponent(0.75)
+        refreshFindTip()
         needsDisplay = true
     }
 
+    nonisolated static func split(caption text: String) -> (title: String, path: String) {
+        guard let gap = text.range(of: "   ", options: .backwards) else { return ("", text) }
+        return (String(text[..<gap.lowerBound]), String(text[gap.upperBound...]))
+    }
+
+    private func refreshFindTip() {
+        let chord = AppModel.shared.settings.keys.chord(.find)
+        findButton.toolTip = chord.key.isEmpty ? "Find" : "Find  \(chord.symbol)"
+    }
+
+    /// Called with the pane's focus. Find shows on the focused pane, Close on it or under the pointer.
     func setFindVisible(_ visible: Bool) {
-        findButton.alphaValue = visible ? 1 : 0
+        focused = visible
+        refreshButtons()
+    }
+
+    private func refreshButtons() {
+        findButton.alphaValue = focused ? 1 : 0
+        closeButton.alphaValue = focused || hovering ? 1 : 0
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        refreshButtons()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        refreshButtons()
     }
 
     func setCloud(_ note: String) {
         cloudNote = note
         needsDisplay = true
+        needsLayout = true
     }
 
     func setBroadcasting(_ on: Bool) {
         guard broadcasting != on else { return }
         broadcasting = on
         needsDisplay = true
+        needsLayout = true
     }
 
     func setActivity(state: String, message: String) {
@@ -740,11 +828,49 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         needsDisplay = true
     }
 
+    /// Everything on the right that the title must stay clear of: the Broadcasting pill and the Cloud note.
+    private func rightSide() -> (pill: NSRect?, note: NSRect?, titleRight: CGFloat) {
+        var right = bounds.width - 90
+        var pill: NSRect?
+        if broadcasting {
+            let size = Self.pillText.size()
+            let frame = NSRect(x: bounds.width - 92 - size.width - 14, y: 9, width: size.width + 14, height: 16)
+            pill = frame
+            right = frame.minX - 6
+        }
+        var note: NSRect?
+        if !cloudNote.isEmpty {
+            let width = min(ceil(noteText(ink: .white).size().width) + 2, max(40, (right - Self.titleX) * 0.45))
+            let frame = NSRect(x: right - width, y: 11, width: width, height: 14)
+            note = frame
+            right = frame.minX - 8
+        }
+        return (pill, note, right)
+    }
+
+    private static let pillText = NSAttributedString(string: "Broadcasting", attributes: [
+        .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+        .foregroundColor: NSColor.black.withAlphaComponent(0.85),
+    ])
+
+    private func noteText(ink: NSColor) -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .right
+        style.lineBreakMode = .byTruncatingTail
+        return NSAttributedString(string: cloudNote, attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: ink.withAlphaComponent(0.78),
+            .paragraphStyle: style,
+        ])
+    }
+
     override func layout() {
         super.layout()
         closeButton.frame = NSRect(x: bounds.width - 36, y: 5, width: 24, height: 24)
         findButton.frame = NSRect(x: bounds.width - 62, y: 5, width: 24, height: 24)
-        titleField.frame = NSRect(x: 34, y: 7, width: max(0, bounds.width - 108), height: 20)
+        grip.frame = NSRect(x: 0, y: 0, width: Self.gripWidth, height: bounds.height)
+        let right = min(rightSide().titleRight, bounds.width - 84)
+        titleField.frame = NSRect(x: Self.titleX, y: 7, width: max(0, right - Self.titleX), height: 20)
         removeAllToolTips()
         if !activity.isEmpty, activityState != "idle" { addToolTip(NSRect(x: bounds.width - 84, y: 8, width: 19, height: 19), owner: self, userData: nil) }
     }
@@ -759,8 +885,8 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         bounds.fill()
         ink.withAlphaComponent(0.16).setFill()
         NSBezierPath(rect: NSRect(x: 0, y: 0, width: bounds.width, height: 1)).fill()
-        let grip = ink.withAlphaComponent(0.55)
-        grip.setFill()
+        let dots = ink.withAlphaComponent(0.55)
+        dots.setFill()
         for column in 0..<2 {
             for row in 0..<3 {
                 let dot = NSRect(x: 16 + CGFloat(column) * 5, y: 11 + CGFloat(row) * 5, width: 2.4, height: 2.4)
@@ -778,53 +904,51 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
             color.setFill()
             NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
         }
-        var noteRight = bounds.width - 90
-        if broadcasting {
-            let pill = NSAttributedString(string: "Broadcasting", attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
-                .foregroundColor: NSColor.black.withAlphaComponent(0.85),
-            ])
-            let size = pill.size()
-            let frame = NSRect(x: bounds.width - 92 - size.width - 14, y: 9, width: size.width + 14, height: 16)
+        let side = rightSide()
+        if let frame = side.pill {
+            let size = Self.pillText.size()
             NSColor(srgbRed: 0.99, green: 0.66, blue: 0.2, alpha: 0.95).setFill()
             NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8).fill()
-            pill.draw(at: NSPoint(x: frame.minX + 7, y: frame.minY + (frame.height - size.height) / 2))
-            noteRight = frame.minX - 6
+            Self.pillText.draw(at: NSPoint(x: frame.minX + 7, y: frame.minY + (frame.height - size.height) / 2))
         }
-        guard !cloudNote.isEmpty else { return }
-        let style = NSMutableParagraphStyle()
-        style.alignment = .right
-        style.lineBreakMode = .byTruncatingTail
-        let caption = NSAttributedString(string: cloudNote, attributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: ink.withAlphaComponent(0.78),
-            .paragraphStyle: style,
-        ])
-        caption.draw(in: NSRect(x: 72, y: 11, width: max(40, noteRight - 72), height: 14))
+        if let frame = side.note {
+            noteText(ink: ink).draw(in: frame)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
         onFocus?()
         let local = convert(event.locationInWindow, from: nil)
-        if local.x < 26 {
+        if local.x < Self.gripWidth {
             onGripDrag?(event)
             return
         }
         if event.clickCount == 2 {
-            window?.performZoom(nil)
+            Self.performTitlebarDoubleClick(window)
             return
         }
         onWindowDrag?(event)
     }
 
+    /// Follows "Double-click a window's title bar to" in Desktop & Dock settings.
+    static func performTitlebarDoubleClick(_ window: NSWindow?) {
+        guard let window else { return }
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": window.performMiniaturize(nil)
+        case "None": break
+        default: window.performZoom(nil)
+        }
+    }
+
     override func resetCursorRects() {
-        addCursorRect(NSRect(x: 0, y: 0, width: 26, height: bounds.height), cursor: .openHand)
-        addCursorRect(NSRect(x: 26, y: 0, width: max(0, bounds.width - 56), height: bounds.height), cursor: .openHand)
+        addCursorRect(NSRect(x: 0, y: 0, width: Self.gripWidth, height: bounds.height), cursor: .openHand)
+        addCursorRect(NSRect(x: Self.gripWidth, y: 0, width: max(0, bounds.width - 56), height: bounds.height), cursor: .openHand)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
         if hit === findButton, findButton.alphaValue < 0.2 { return self }
+        if hit === closeButton, closeButton.alphaValue < 0.2 { return self }
         return hit
     }
 
@@ -1038,10 +1162,14 @@ final class PaneController {
         wireChrome()
     }
 
+    /// Set from Rename Terminal. Titles that programs send are still kept underneath.
+    var customTitle: String?
+
     var caption: String {
         let path = System.displayPath(cwd)
-        if title.isEmpty { return path }
-        return "\(title)   \(path)"
+        let shown = customTitle ?? title
+        if shown.isEmpty { return path }
+        return "\(shown)   \(path)"
     }
 
     var holdsPreview = false

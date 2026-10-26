@@ -132,8 +132,8 @@ enum System {
         return paths
     }
 
-    static func executable(named name: String) -> String? {
-        for directory in searchPaths() {
+    static func executable(named name: String, in paths: [String] = searchPaths()) -> String? {
+        for directory in paths {
             let path = (directory as NSString).appendingPathComponent(name)
             if FileManager.default.isExecutableFile(atPath: path) {
                 return path
@@ -142,7 +142,7 @@ enum System {
         return nil
     }
 
-    static func installedTools() -> [(name: String, path: String)] {
+    static func installedTools(in paths: [String] = searchPaths()) -> [(name: String, path: String)] {
         let names = [
             "btop", "htop", "top",
             "lazygit", "git",
@@ -152,7 +152,7 @@ enum System {
             "fzf", "tmux", "claude",
         ]
         return names.compactMap { name in
-            guard let path = executable(named: name) else { return nil }
+            guard let path = executable(named: name, in: paths) else { return nil }
             return (name, path)
         }
     }

@@ -144,6 +144,42 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case dropdown
     case quit
     case insertPath
+    case focusPane1
+    case focusPane2
+    case focusPane3
+    case focusPane4
+    case focusPane5
+    case focusPane6
+    case focusPane7
+    case focusPane8
+    case focusPane9
+    case previousPane
+    case nextPane
+    case swapNext
+    case movePaneToWindow
+    case renamePane
+    case restartPane
+    case shortcuts
+
+    /// 1 through 9 for the Focus Terminal actions.
+    var paneNumber: Int? {
+        switch self {
+        case .focusPane1: 1
+        case .focusPane2: 2
+        case .focusPane3: 3
+        case .focusPane4: 4
+        case .focusPane5: 5
+        case .focusPane6: 6
+        case .focusPane7: 7
+        case .focusPane8: 8
+        case .focusPane9: 9
+        default: nil
+        }
+    }
+
+    static func focusPane(_ number: Int) -> AppAction? {
+        allCases.first { $0.paneNumber == number }
+    }
 
     var title: String {
         switch self {
@@ -181,8 +217,34 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .dropdown: "Dropdown terminal"
         case .quit: "Quit Aether"
         case .insertPath: "Insert a path"
+        case .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9:
+            "Focus terminal \(paneNumber ?? 0)"
+        case .previousPane: "Previous terminal"
+        case .nextPane: "Next terminal"
+        case .swapNext: "Swap with next terminal"
+        case .movePaneToWindow: "Move terminal to new window"
+        case .renamePane: "Rename terminal"
+        case .restartPane: "Restart terminal"
+        case .shortcuts: "Keyboard shortcuts"
         }
     }
+
+    /// Menu shortcuts that are fixed by macOS conventions and cannot be rebound.
+    static let reservedChords: [KeyChord] = {
+        func chord(_ key: String, _ flags: NSEvent.ModifierFlags) -> KeyChord {
+            KeyChord(key: key, modifiers: flags.rawValue, keyCode: 0)
+        }
+        return [
+            chord("h", .command),
+            chord("h", [.command, .option]),
+            chord("m", .command),
+            chord("z", .command),
+            chord("z", [.command, .shift]),
+            chord("x", .command),
+            chord("e", .command),
+            chord("f", [.command, .control]),
+        ]
+    }()
 
     var defaultChord: KeyChord {
         func chord(_ key: String, _ flags: NSEvent.ModifierFlags, _ code: Int) -> KeyChord {
@@ -224,6 +286,17 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .dropdown: return chord("`", [command, .control], kVK_ANSI_Grave)
         case .quit: return chord("q", command, kVK_ANSI_Q)
         case .insertPath: return chord("p", [command, .shift], kVK_ANSI_P)
+        case .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9:
+            let number = paneNumber ?? 1
+            let codes = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
+            return chord("\(number)", command, codes[number - 1])
+        case .previousPane: return chord("[", command, kVK_ANSI_LeftBracket)
+        case .nextPane: return chord("]", command, kVK_ANSI_RightBracket)
+        case .swapNext: return chord("]", [command, .option], kVK_ANSI_RightBracket)
+        case .movePaneToWindow: return chord("n", [command, .option], kVK_ANSI_N)
+        case .renamePane: return chord("i", [command, .shift], kVK_ANSI_I)
+        case .restartPane: return KeyChord(key: "", modifiers: 0, keyCode: 0)
+        case .shortcuts: return chord("/", command, kVK_ANSI_Slash)
         }
     }
 }
