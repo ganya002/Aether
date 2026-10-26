@@ -66,3 +66,7 @@ Unfocused panes dim by default. Settings can blur them, or leave them as they ar
 ⌃⌘` drops a terminal down from the top of the screen, from any app. ⌘-click a path to open it. A command that runs for 10 seconds or more posts a notification if Aether is in the background, with its name, whether it worked, and how long it took. Click it to go back to that terminal. `notifyAfterSeconds` in config.json changes the wait. The scrollbar shows while you scroll, and the magnifying glass on the focused pane is Find.
 
 The portable settings file is `~/Library/Application Support/Aether/config.json`. Sessions, including open panes, stay in `session.json` beside it. Terminals reopen as shells in the directory they were left in. A terminal that was running a command does not run it again; it offers Run Again instead. If config.json stops being valid JSON, Aether moves it aside as `config.json.bad-<time>`, says so, and starts with defaults. A single bad value only resets that setting.
+
+## Credits
+
+Built by Gabby (ganya002), with help from Botty (Grokky-Bot-Cutie).
