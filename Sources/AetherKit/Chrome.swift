@@ -247,34 +247,8 @@ final class ToolShelf: @unchecked Sendable {
     }
 }
 
-enum ShortcutGroup: String, CaseIterable {
-    case terminals = "Terminals"
-    case layout = "Layout"
-    case focus = "Focus"
-    case resize = "Resize"
-    case text = "Text"
-    case app = "Aether"
-}
-
 extension AppAction {
-    var group: ShortcutGroup {
-        switch self {
-        case .newWindow, .newPane, .splitRight, .splitDown, .closePane, .closeWindow, .launch, .insertPath,
-             .clearBuffer, .renamePane, .restartPane:
-            .terminals
-        case .fill, .equalize, .nextLayout, .previousLayout, .swapNext, .movePaneToWindow, .broadcast:
-            .layout
-        case .focusLeft, .focusRight, .focusUp, .focusDown, .previousPane, .nextPane,
-             .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9:
-            .focus
-        case .growLeft, .growRight, .growUp, .growDown:
-            .resize
-        case .fontUp, .fontDown, .fontReset, .find, .findNext, .findPrevious, .copy, .paste, .selectAll:
-            .text
-        case .settings, .dropdown, .quit, .shortcuts:
-            .app
-        }
-    }
+    var group: ShortcutGroup { ShortcutGroup.of(self) }
 
     var symbolName: String {
         switch self {
@@ -909,7 +883,7 @@ final class ShortcutController: NSWindowController, NSWindowDelegate, NSTableVie
                 return .entry(title: action.title, keys: shown)
             }
             guard !entries.isEmpty else { continue }
-            items.append(.header(group.rawValue))
+            items.append(.header(group.title))
             items.append(contentsOf: entries)
         }
         return items

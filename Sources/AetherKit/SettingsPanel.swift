@@ -1,10 +1,9 @@
 import AppKit
 
-/// Theme names for the Appearance popup. Themes wires the real list in:
-/// `SettingsThemeSource.names = { Themes.all.map(\.name) }`.
+/// Theme names for the Appearance popup: built-ins, then any imported from the themes folder.
 @MainActor
 enum SettingsThemeSource {
-    static var names: () -> [String] = { ["Aether"] }
+    static var names: () -> [String] = { Themes.names() }
 }
 
 enum SettingsTab: String, CaseIterable, Sendable {

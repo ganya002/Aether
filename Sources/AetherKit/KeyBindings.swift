@@ -607,13 +607,15 @@ enum ShortcutGroup: String, CaseIterable, Sendable {
 
     static func of(_ action: AppAction) -> ShortcutGroup {
         switch action {
-        case .newWindow, .newPane, .splitRight, .splitDown, .closePane, .closeWindow, .broadcast: .windows
+        case .newWindow, .newPane, .splitRight, .splitDown, .closePane, .closeWindow, .broadcast,
+             .renamePane, .restartPane, .swapNext, .movePaneToWindow: .windows
         case .fill, .equalize, .nextLayout, .previousLayout: .layout
-        case .focusLeft, .focusRight, .focusUp, .focusDown: .focus
+        case .focusLeft, .focusRight, .focusUp, .focusDown, .previousPane, .nextPane,
+             .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9: .focus
         case .growLeft, .growRight, .growUp, .growDown: .resize
         case .fontUp, .fontDown, .fontReset, .copy, .paste, .selectAll, .clearBuffer, .insertPath: .text
         case .find, .findNext, .findPrevious: .find
-        case .launch, .settings, .dropdown, .quit: .app
+        case .launch, .settings, .dropdown, .quit, .shortcuts: .app
         }
     }
 
