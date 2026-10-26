@@ -1118,6 +1118,8 @@ final class AppModel {
         var live: Set<String> = []
         for (id, pane) in panes {
             live.insert(id)
+            // A shell with integration reports its own commands. See shellCommandStarted.
+            if pane.shellIntegrated { continue }
             if let running = pane.runningCommand() {
                 if busySince[id] == nil { busySince[id] = (now, running.line) }
                 continue
@@ -1130,6 +1132,17 @@ final class AppModel {
         busySince = busySince.filter { live.contains($0.key) }
     }
 
+    func shellCommandStarted(_ paneID: String, line: String) {
+        guard settings.notifyOnFinish, panes[paneID] != nil else { return }
+        busySince[paneID] = (Date(), line)
+    }
+
+    func shellCommandFinished(_ paneID: String, _ finished: FinishedCommand) {
+        busySince[paneID] = nil
+        guard let pane = panes[paneID] else { return }
+        notifyFinished(pane, command: finished.line, since: finished.started, exitCode: finished.exitCode)
+    }
+
     private func notifyFinished(_ pane: PaneController, command: String, since started: Date, exitCode: Int32?) {
         guard settings.notifyOnFinish else { return }
         let elapsed = Date().timeIntervalSince(started)
@@ -1138,11 +1151,8 @@ final class AppModel {
         let window = controllers[deskID]?.window
         let visibleHere = NSApp.isActive && window?.isKeyWindow == true && !NSApp.isHidden
         guard !visibleHere else { return }
-        FinishNotifier.deliver(
-            title: command,
-            body: FinishNotifier.phrase(command: command, elapsed: elapsed, exitCode: exitCode),
-            pane: pane.id
-        )
+        let text = ShellIntegration.notification(for: FinishedCommand(line: command, started: started, elapsed: elapsed, exitCode: exitCode))
+        FinishNotifier.deliver(title: text.title, body: text.body, pane: pane.id)
     }
 
     private func focusedDirectory() -> String? {

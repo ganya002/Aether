@@ -384,6 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case .restartPane:
             if let id = focusedPaneID { model.restart(id) }
         case .shortcuts: shortcuts.show()
+        case .previousPrompt, .nextPrompt, .selectLastOutput:
+            if let id = focusedPaneID, let pane = model.panes[id], !pane.chrome.terminal.performPromptAction(action) {
+                NSSound.beep()
+            }
         }
         guard !chained else { return }
         // A shortcut can be set to run a second action after its own.
@@ -545,6 +549,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             bind(.selectAll, responderItem("Select All", #selector(NSText.selectAll(_:)))),
             .separator(),
             bind(.clearBuffer, item("Clear Scrollback", .clearBuffer)),
+            .separator(),
+            bind(.previousPrompt, item("Previous Prompt", .previousPrompt)),
+            bind(.nextPrompt, item("Next Prompt", .nextPrompt)),
+            bind(.selectLastOutput, item("Select Last Command Output", .selectLastOutput)),
             .separator(),
             menu("Find", items: [find, findNext, findPrev, .separator(), useSelection]),
         ]))

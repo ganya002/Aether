@@ -10,6 +10,9 @@ final class AetherTerminal: LocalProcessTerminalView {
     var onUserInput: ((ArraySlice<UInt8>) -> Void)?
     var onFocus: (() -> Void)?
     var onStatus: ((String, String) -> Void)?
+    var onShellEvent: ((ShellEvent) -> Void)?
+    /// The prompt row the last ⌘↑ or ⌘↓ went to, and where that left the view.
+    var lastPromptJump: (row: Int, top: Int)?
     /// Keys typed while the shell is gone. Returning true swallows them.
     var onExitedKey: ((ArraySlice<UInt8>) -> Bool)?
     var remoteSession: String?
@@ -37,6 +40,22 @@ final class AetherTerminal: LocalProcessTerminalView {
                 }
             }
         }
+        terminal.registerOscHandler(code: 7502) { [weak self] data in
+            guard let event = ShellEvent.parse(String(decoding: data, as: UTF8.self)) else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.onShellEvent?(event)
+                }
+            }
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, window?.firstResponder === self, let action = promptAction(for: event),
+           performPromptAction(action) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     private func handleStatus(_ body: String) {
@@ -1129,6 +1148,12 @@ final class PaneController {
     private(set) var lastExitCode: Int32?
     /// Set once the shell reports its directory with OSC 7. Polling then leaves the directory alone.
     private(set) var reportsDirectory = false
+    /// Commands and prompts as the shell integration reports them.
+    private(set) var shellState = CommandTracker()
+    /// The command line running right now, when the shell reports it.
+    var currentCommand: String? { shellState.running?.line }
+    /// The shell reports its prompts and commands, so polling the process group is not needed.
+    var shellIntegrated: Bool { shellState.active }
 
     var onUserInput: ((ArraySlice<UInt8>) -> Void)?
     var onFocus: (() -> Void)?
@@ -1344,6 +1369,7 @@ final class PaneController {
         let foreground = tcgetpgrp(process.childfd)
         guard foreground > 0, foreground != process.shellPid else { return nil }
         let name = System.processName(pid: foreground) ?? "A command"
+        if let line = currentCommand { return (name, ShellIntegration.summary(line)) }
         return (name, System.commandLine(pid: foreground) ?? name)
     }
 
@@ -1372,8 +1398,14 @@ final class PaneController {
         }
         let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let environment = PaneController.shellEnvironment(pane: id)
+        shellState = CommandTracker()
         if trimmed.isEmpty {
-            chrome.terminal.startProcess(executable: shell, args: ["-l"], environment: environment, currentDirectory: directory)
+            var enabled = ShellIntegration.enabled(setting: AppModel.shared.settings.shellIntegration)
+            if enabled, ShellIntegration.shell(for: shell) != nil {
+                enabled = ShellIntegration.install()
+            }
+            let launch = ShellIntegration.plan(shell: shell, environment: environment, root: ShellIntegration.root(), enabled: enabled)
+            chrome.terminal.startProcess(executable: shell, args: launch.args, environment: launch.environment, currentDirectory: directory)
         } else {
             chrome.terminal.startProcess(executable: shell, args: ["-lc", trimmed], environment: environment, currentDirectory: directory)
         }
@@ -1533,6 +1565,8 @@ final class PaneController {
     func noteTitle(_ title: String) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
+        // At a reporting shell's prompt the header shows the shell and its directory, whatever the prompt hooks set.
+        if shellIntegrated, currentCommand == nil { return }
         self.title = cleaned
         onTitle?(cleaned)
     }
@@ -1546,6 +1580,27 @@ final class PaneController {
     func noteReportedDirectory(_ directory: String) {
         reportsDirectory = true
         noteDirectory(directory)
+    }
+
+    func noteShellEvent(_ event: ShellEvent) {
+        let finished = shellState.apply(event, at: Date())
+        if let finished {
+            AppModel.shared.shellCommandFinished(id, finished)
+        }
+        switch event {
+        case .command(let line):
+            guard shellIntegrated else { return }
+            AppModel.shared.shellCommandStarted(id, line: line)
+            setTitle(ShellIntegration.summary(line))
+        case .prompt:
+            setTitle(shellState.shell ?? URL(fileURLWithPath: System.userShell()).lastPathComponent)
+        }
+    }
+
+    private func setTitle(_ text: String) {
+        guard !text.isEmpty, text != title else { return }
+        title = text
+        onTitle?(text)
     }
 
     func noteExit(_ code: Int32?) {
@@ -1583,6 +1638,9 @@ final class PaneController {
         }
         chrome.terminal.onFocus = { [weak self] in
             self?.onFocus?()
+        }
+        chrome.terminal.onShellEvent = { [weak self] event in
+            self?.noteShellEvent(event)
         }
         chrome.header.onFocus = { [weak self] in
             self?.onFocus?()

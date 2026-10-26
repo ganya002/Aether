@@ -160,6 +160,9 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case renamePane
     case restartPane
     case shortcuts
+    case previousPrompt
+    case nextPrompt
+    case selectLastOutput
 
     /// 1 through 9 for the Focus Terminal actions.
     var paneNumber: Int? {
@@ -226,6 +229,9 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .renamePane: "Rename terminal"
         case .restartPane: "Restart terminal"
         case .shortcuts: "Keyboard shortcuts"
+        case .previousPrompt: "Previous prompt"
+        case .nextPrompt: "Next prompt"
+        case .selectLastOutput: "Select last command output"
         }
     }
 
@@ -297,6 +303,9 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .renamePane: return chord("i", [command, .shift], kVK_ANSI_I)
         case .restartPane: return KeyChord(key: "", modifiers: 0, keyCode: 0)
         case .shortcuts: return chord("/", command, kVK_ANSI_Slash)
+        case .previousPrompt: return chord(String(UnicodeScalar(NSUpArrowFunctionKey)!), command, kVK_UpArrow)
+        case .nextPrompt: return chord(String(UnicodeScalar(NSDownArrowFunctionKey)!), command, kVK_DownArrow)
+        case .selectLastOutput: return chord("a", [command, .shift], kVK_ANSI_A)
         }
     }
 }
@@ -614,7 +623,7 @@ enum ShortcutGroup: String, CaseIterable, Sendable {
              .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9: .focus
         case .growLeft, .growRight, .growUp, .growDown: .resize
         case .fontUp, .fontDown, .fontReset, .copy, .paste, .selectAll, .clearBuffer, .insertPath: .text
-        case .find, .findNext, .findPrevious: .find
+        case .find, .findNext, .findPrevious, .previousPrompt, .nextPrompt, .selectLastOutput: .find
         case .launch, .settings, .dropdown, .quit, .shortcuts: .app
         }
     }

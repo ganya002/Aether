@@ -295,6 +295,9 @@ extension AppAction {
         case .renamePane: "pencil"
         case .restartPane: "arrow.clockwise"
         case .shortcuts: "keyboard"
+        case .previousPrompt: "arrow.up.to.line"
+        case .nextPrompt: "arrow.down.to.line"
+        case .selectLastOutput: "text.badge.checkmark"
         }
     }
 
