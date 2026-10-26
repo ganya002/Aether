@@ -36,5 +36,23 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>A program running in Aether wants to control another app.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A program running in Aether wants to use the camera.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A program running in Aether wants to use the microphone.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>A program running in Aether wants to read or change files on your Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>A program running in Aether wants to read or change files in Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>A program running in Aether wants to read or change files in Downloads.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>A program running in Aether wants to read or change files on a removable drive.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>A program running in Aether wants to read or change files on a network drive.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>A program running in Aether wants to find and connect to devices on your local network.</string>
 </dict>
 </plist>
