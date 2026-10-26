@@ -16,6 +16,10 @@ final class AetherTerminal: LocalProcessTerminalView {
     var workingDirectory: () -> String = { System.home() }
     var optionMode: OptionKey = .characters
     var warnMultilinePaste = true
+    var copyOnSelect = false
+    var onBell: (() -> Void)?
+    /// Set when the selection changes, so a click that leaves an old selection alone does not copy it over the clipboard again.
+    private var selectionMoved = false
     /// True while SwiftTerm answers the program itself (cursor reports, color queries, mouse and focus reports).
     /// Those replies are not typing, so they never reach broadcast.
     private var replying = false
@@ -238,6 +242,7 @@ final class AetherTerminal: LocalProcessTerminalView {
 
     override func mouseDown(with event: NSEvent) {
         onFocus?()
+        selectionMoved = false
         super.mouseDown(with: event)
     }
 
@@ -266,6 +271,19 @@ final class AetherTerminal: LocalProcessTerminalView {
             return
         }
         super.mouseUp(with: event)
+        defer { selectionMoved = false }
+        guard copyOnSelect, selectionMoved, selection?.active == true, let text = getSelection(), !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    override func selectionChanged(source: Terminal) {
+        super.selectionChanged(source: source)
+        selectionMoved = true
+    }
+
+    override func bell(source: Terminal) {
+        onBell?()
     }
 
     private func matchScreenScale() {
@@ -318,13 +336,18 @@ final class PaneChrome: NSView {
     private var appliedTone: TextTone?
     private var appliedBlur: Double = -1
     private var appliedBroadcast = false
+    private var appliedBoost = false
+    private let bell = PassthroughView()
+    private let bellLayer = CALayer()
     private static let broadcastColor = NSColor(srgbRed: 0.99, green: 0.66, blue: 0.2, alpha: 0.95)
 
-    init(paneID: String, font: NSFont) {
+    var isFocused: Bool { appliedFocus == true }
+
+    init(paneID: String, font: NSFont, cursor: CursorStyle = .steadyBar, scrollback: Int = 10_000) {
         self.paneID = paneID
         var options = TerminalOptions.default
-        options.scrollback = 10_000
-        options.cursorStyle = .steadyBar
+        options.scrollback = scrollback
+        options.cursorStyle = cursor
         options.termName = "xterm-256color"
         options.enableSixelReported = true
         options.kittyImageCacheLimitBytes = 320 * 1024 * 1024
@@ -341,7 +364,7 @@ final class PaneChrome: NSView {
         rest.wantsLayer = true
         rest.layer?.backgroundColor = NSColor.black.cgColor
         rest.alphaValue = 0
-        for view in [clip, stage, terminal, header, exitBanner, rest, outline] as [NSView] {
+        for view in [clip, stage, terminal, header, exitBanner, rest, outline, bell] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = true
         }
         addSubview(clip)
@@ -351,6 +374,9 @@ final class PaneChrome: NSView {
         clip.addSubview(exitBanner)
         clip.addSubview(rest)
         clip.addSubview(outline)
+        clip.addSubview(bell)
+        bellLayer.opacity = 0
+        bell.layer?.addSublayer(bellLayer)
         exitBanner.isHidden = true
     }
 
@@ -387,8 +413,59 @@ final class PaneChrome: NSView {
         outline.layer?.cornerRadius = max(0, radius - 0.5)
         if outline.layer?.borderWidth ?? 0 < 1 {
             outline.layer?.borderWidth = 1
-            outline.layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
+            outline.layer?.borderColor = borderInk.withAlphaComponent(0.2).cgColor
         }
+        bell.frame = bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bellLayer.frame = bell.bounds
+        bellLayer.cornerRadius = radius
+        CATransaction.commit()
+    }
+
+    /// White over dark glass, black over light glass.
+    private var borderInk: NSColor {
+        (appliedTone ?? .light) == .dark ? .black : .white
+    }
+
+    /// The outline on the focused pane. Increase Contrast makes it thicker and nearly opaque.
+    private func focusBorder(_ focused: Bool) -> (width: CGFloat, color: NSColor) {
+        if appliedBoost {
+            return (focused ? 2 : 1, borderInk.withAlphaComponent(focused ? 0.9 : 0.4))
+        }
+        return (focused ? 1.5 : 1, borderInk.withAlphaComponent(focused ? 0.55 : 0.2))
+    }
+
+    /// The pane flashes for a bell. With Reduce Motion the edge lights up for a moment instead.
+    func flashBell(tone: TextTone, reduceMotion: Bool) {
+        let ink: NSColor = tone == .dark ? .black : .white
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bellLayer.removeAllAnimations()
+        if reduceMotion {
+            bellLayer.backgroundColor = nil
+            bellLayer.borderWidth = 2
+            bellLayer.borderColor = ink.withAlphaComponent(0.75).cgColor
+            bellLayer.opacity = 1
+            CATransaction.commit()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self?.bellLayer.opacity = 0
+                CATransaction.commit()
+            }
+            return
+        }
+        bellLayer.borderWidth = 0
+        bellLayer.backgroundColor = ink.withAlphaComponent(tone == .dark ? 0.1 : 0.14).cgColor
+        bellLayer.opacity = 0
+        CATransaction.commit()
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        fade.duration = 0.12
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        bellLayer.add(fade, forKey: "bell")
     }
 
     func showPreview(kind: String, source: String) -> Bool {
@@ -417,12 +494,14 @@ final class PaneChrome: NSView {
     func setFocused(_ focused: Bool, settings: Settings) {
         let nextBlur = (!focused && settings.focusRest == .blur) ? settings.blurAmount : 0
         let broadcasting = AppModel.shared.isBroadcasting(pane: paneID)
+        let boost = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text.effective, abs(appliedBlur - nextBlur) < 0.01,
-           appliedBroadcast == broadcasting {
+           appliedBroadcast == broadcasting, appliedBoost == boost {
             return
         }
         let animate = appliedFocus != nil && appliedBroadcast == broadcasting
         appliedBroadcast = broadcasting
+        appliedBoost = boost
         header.setBroadcasting(broadcasting)
         appliedFocus = focused
         appliedRest = settings.focusRest
@@ -443,12 +522,19 @@ final class PaneChrome: NSView {
                 outline.layer?.borderWidth = focused ? 2.5 : 2
                 outline.layer?.borderColor = Self.broadcastColor.cgColor
             } else {
-                outline.layer?.borderWidth = focused ? 1.5 : 0
-                outline.layer?.borderColor = NSColor.white.withAlphaComponent(focused ? 0.62 : 0).cgColor
+                let border = focusBorder(focused)
+                outline.layer?.borderWidth = focused ? border.width : 0
+                outline.layer?.borderColor = border.color.cgColor
             }
             rest.alphaValue = dim
             CATransaction.commit()
         }
+    }
+
+    /// Redraws the outline after an accessibility display option changed.
+    func refreshFocusStyle(settings: Settings) {
+        guard let focused = appliedFocus else { return }
+        setFocused(focused, settings: settings)
     }
 
     /// Blurs the terminal's own pixels. The filter stays attached while Blur is the setting,
@@ -507,13 +593,14 @@ final class PaneChrome: NSView {
 
     private func animateBorder(_ focused: Bool) {
         guard let layer = outline.layer else { return }
-        let width: CGFloat = appliedBroadcast ? (focused ? 2.5 : 2) : (focused ? 1.5 : 1)
+        let border = focusBorder(focused)
+        let width: CGFloat = appliedBroadcast ? (focused ? 2.5 : 2) : border.width
         // borderColor is a CGColor. Animating the presentation layer's color
         // releases a pointer the window server still owns, which crashes in
         // the next autorelease pool drain.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.borderColor = appliedBroadcast ? Self.broadcastColor.cgColor : NSColor.white.withAlphaComponent(focused ? 0.55 : 0.2).cgColor
+        layer.borderColor = appliedBroadcast ? Self.broadcastColor.cgColor : border.color.cgColor
         CATransaction.commit()
         let widthAnim = CABasicAnimation(keyPath: "borderWidth")
         widthAnim.fromValue = layer.presentation()?.borderWidth ?? layer.borderWidth
@@ -683,10 +770,10 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         if activityState == "working" || activityState == "blocked" || activityState == "done" || activityState == "error" {
             let color: NSColor
             switch activityState {
-            case "blocked": color = NSColor(srgbRed: 0.96, green: 0.78, blue: 0.45, alpha: 0.95)
-            case "error": color = NSColor(srgbRed: 0.95, green: 0.45, blue: 0.42, alpha: 0.95)
-            case "done": color = NSColor(srgbRed: 0.55, green: 0.9, blue: 0.7, alpha: 0.95)
-            default: color = NSColor.white.withAlphaComponent(0.92)
+            case "blocked": color = tone == .light ? NSColor(srgbRed: 0.96, green: 0.78, blue: 0.45, alpha: 0.95) : NSColor(srgbRed: 0.72, green: 0.47, blue: 0.04, alpha: 0.95)
+            case "error": color = tone == .light ? NSColor(srgbRed: 0.95, green: 0.45, blue: 0.42, alpha: 0.95) : NSColor(srgbRed: 0.78, green: 0.17, blue: 0.15, alpha: 0.95)
+            case "done": color = tone == .light ? NSColor(srgbRed: 0.55, green: 0.9, blue: 0.7, alpha: 0.95) : NSColor(srgbRed: 0.09, green: 0.55, blue: 0.3, alpha: 0.95)
+            default: color = ink.withAlphaComponent(0.92)
             }
             color.setFill()
             NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
@@ -935,7 +1022,15 @@ final class PaneController {
         self.command = command
         let folder = URL(fileURLWithPath: cwd).lastPathComponent
         title = command?.split(separator: " ").first.map(String.init) ?? folder
-        chrome = PaneChrome(paneID: id, font: PaneController.font(size: settings.fontSize))
+        chrome = PaneChrome(
+            paneID: id,
+            font: PaneController.font(size: settings.fontSize, family: settings.fontFamily),
+            cursor: PaneController.cursorStyle(settings),
+            scrollback: settings.scrollbackLines
+        )
+        appliedCursor = PaneController.cursorStyle(settings)
+        appliedScrollback = settings.scrollbackLines
+        PaneController.watchAccessibility()
         apply(settings)
         chrome.header.setCaption(caption, tone: settings.text.effective)
         chrome.terminal.processDelegate = DelegateBridge.shared
@@ -1172,35 +1267,139 @@ final class PaneController {
     }
 
     func apply(_ settings: Settings) {
-        let foreground: NSColor = settings.text.effective == .light
-            ? NSColor(srgbRed: 0.95, green: 0.97, blue: 0.98, alpha: 1)
-            : NSColor(srgbRed: 0.07, green: 0.08, blue: 0.1, alpha: 1)
-        let veil: NSColor = settings.text.effective == .light ? .black : .white
-        chrome.terminal.font = PaneController.font(size: settings.fontSize)
-        chrome.terminal.syncRemoteSize()
-        chrome.terminal.nativeForegroundColor = foreground
-        chrome.terminal.caretColor = foreground
-        chrome.terminal.nativeBackgroundColor = .clear
-        chrome.setBodyShade(veil.withAlphaComponent(settings.shade))
-        chrome.terminal.selectedTextBackgroundColor = foreground.withAlphaComponent(0.22)
-        chrome.terminal.appearance = NSAppearance(named: settings.text.effective == .light ? .darkAqua : .aqua)
-        chrome.terminal.optionMode = settings.optionKey
-        chrome.terminal.optionAsMetaKey = settings.optionKey == .meta
-        chrome.terminal.warnMultilinePaste = settings.warnMultilinePaste
-        chrome.terminal.workingDirectory = { [weak self] in self?.cwd ?? System.home() }
-        chrome.terminal.onStatus = { [weak self] state, message in
+        let tone = settings.text.effective
+        let workspace = NSWorkspace.shared
+        let look = TerminalLook(
+            settings: settings,
+            tone: tone,
+            reduceTransparency: workspace.accessibilityDisplayShouldReduceTransparency,
+            increaseContrast: workspace.accessibilityDisplayShouldIncreaseContrast
+        )
+        let view = chrome.terminal
+        let fontKey = "\(settings.fontFamily)|\(settings.fontSize)|\(settings.lineHeight)"
+        if fontKey != appliedFontKey {
+            appliedFontKey = fontKey
+            view.font = PaneController.font(size: settings.fontSize, family: settings.fontFamily)
+            if abs(view.lineSpacing - CGFloat(settings.lineHeight)) > 0.001 {
+                view.lineSpacing = CGFloat(settings.lineHeight)
+            }
+        }
+        view.syncRemoteSize()
+        // Only on change, so a resize does not undo colors or a cursor the program set for itself.
+        if look != appliedLook {
+            appliedLook = look
+            view.installColors(look.palette.ansi.map(Self.terminalColor))
+            let foreground = Self.color(look.palette.foreground)
+            view.nativeForegroundColor = foreground
+            view.caretColor = Self.color(look.palette.cursor)
+            view.selectedTextBackgroundColor = Self.color(look.selection).withAlphaComponent(look.selectionAlpha)
+        }
+        view.nativeBackgroundColor = .clear
+        let cursor = Self.cursorStyle(settings)
+        if cursor != appliedCursor {
+            appliedCursor = cursor
+            view.terminal.setCursorStyle(cursor)
+        }
+        if settings.scrollbackLines != appliedScrollback {
+            appliedScrollback = settings.scrollbackLines
+            view.changeScrollback(settings.scrollbackLines)
+        }
+        view.copyOnSelect = settings.copyOnSelect
+        view.onBell = { [weak self] in self?.ring() }
+        veil = Self.color(look.veil)
+        chrome.setBodyShade(veil.withAlphaComponent(look.shade))
+        view.appearance = NSAppearance(named: tone == .light ? .darkAqua : .aqua)
+        view.optionMode = settings.optionKey
+        view.optionAsMetaKey = settings.optionKey == .meta
+        view.warnMultilinePaste = settings.warnMultilinePaste
+        view.workingDirectory = { [weak self] in self?.cwd ?? System.home() }
+        view.onStatus = { [weak self] state, message in
             self?.chrome.header.setActivity(state: state, message: message)
         }
-        chrome.header.setScrim(veil.withAlphaComponent(max(settings.shade, 0.55)))
-        chrome.header.setCaption(caption, tone: settings.text.effective)
+        chrome.header.setScrim(veil.withAlphaComponent(max(look.shade, 0.55)))
+        chrome.header.setCaption(caption, tone: tone)
         chrome.layer?.cornerRadius = settings.cornerRadius
     }
 
     func applyShade(_ shade: Double, settings: Settings) {
-        let veil: NSColor = settings.text.effective == .light ? .black : .white
+        let floor = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ? TerminalLook.opaqueShadeFloor : 0
+        let shade = max(shade, floor)
         chrome.terminal.nativeBackgroundColor = .clear
         chrome.setBodyShade(veil.withAlphaComponent(shade))
         chrome.header.setScrim(veil.withAlphaComponent(max(shade, 0.55)))
+    }
+
+    private var appliedLook: TerminalLook?
+    private var appliedFontKey: String?
+    private var appliedCursor: CursorStyle?
+    private var appliedScrollback: Int?
+    private var veil: NSColor = .black
+    private var lastBell = Date.distantPast
+    private var askedAttention = false
+
+    /// Bells closer together than this ring once, so `yes $'\a'` does not strobe.
+    private static let bellGap: TimeInterval = 0.15
+
+    private func ring() {
+        let now = Date()
+        guard now.timeIntervalSince(lastBell) >= Self.bellGap else { return }
+        lastBell = now
+        let settings = AppModel.shared.settings
+        switch settings.bell {
+        case .none:
+            return
+        case .sound:
+            NSSound.beep()
+        case .visual:
+            chrome.flashBell(tone: settings.text.effective, reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        }
+        let watched = NSApp.isActive && chrome.isFocused && chrome.window?.isKeyWindow == true
+        if watched {
+            askedAttention = false
+        } else if !askedAttention {
+            askedAttention = true
+            NSApp.requestUserAttention(.informationalRequest)
+        }
+    }
+
+    static func cursorStyle(_ settings: Settings) -> CursorStyle {
+        switch (settings.cursorShape, settings.cursorBlink) {
+        case (.block, true): .blinkBlock
+        case (.block, false): .steadyBlock
+        case (.underline, true): .blinkUnderline
+        case (.underline, false): .steadyUnderline
+        case (.bar, true): .blinkBar
+        case (.bar, false): .steadyBar
+        }
+    }
+
+    static func color(_ rgb: RGB) -> NSColor {
+        NSColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
+    }
+
+    static func terminalColor(_ rgb: RGB) -> SwiftTerm.Color {
+        func channel(_ value: Double) -> UInt16 { UInt16((min(max(value, 0), 1) * 65535).rounded()) }
+        return SwiftTerm.Color(red: channel(rgb.r), green: channel(rgb.g), blue: channel(rgb.b))
+    }
+
+    private static var accessibilityObserver: NSObjectProtocol?
+
+    /// Reduce Transparency and Increase Contrast change the shade, the contrast floor and the focus outline.
+    private static func watchAccessibility() {
+        guard accessibilityObserver == nil else { return }
+        accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let settings = AppModel.shared.settings
+                for pane in AppModel.shared.panes.values {
+                    pane.apply(settings)
+                    pane.chrome.refreshFocusStyle(settings: settings)
+                }
+            }
+        }
     }
 
     func noteTitle(_ title: String) {
@@ -1342,13 +1541,60 @@ final class PaneController {
         return env
     }
 
-    static func font(size: Double) -> NSFont {
+    /// The chosen family at its regular weight, else SF Mono, then Menlo. When a Nerd Font is installed,
+    /// its icons fill in for glyphs the font lacks, the private-use ones prompts draw with.
+    static func font(size: Double, family: String = "") -> NSFont {
         let point = CGFloat(size)
-        for name in ["SFMono-Regular", "SF Mono", "Menlo"] {
-            if let font = NSFont(name: name, size: point) { return font }
-        }
-        return NSFont.monospacedSystemFont(ofSize: point, weight: .regular)
+        let base = familyFont(family, size: point) ?? defaultFont(size: point)
+        guard let symbols = symbolFamily, !(base.familyName.map(isNerdFont) ?? false) else { return base }
+        let cascade = NSFontDescriptor(fontAttributes: [.family: symbols])
+        return NSFont(descriptor: base.fontDescriptor.addingAttributes([.cascadeList: [cascade]]), size: point) ?? base
     }
+
+    private static func defaultFont(size: CGFloat) -> NSFont {
+        for name in ["SFMono-Regular", "SF Mono", "Menlo"] {
+            if let font = NSFont(name: name, size: size) { return font }
+        }
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    /// Picks the upright regular member of a family, fixed pitch first. A PostScript name works too.
+    private static func familyFont(_ family: String, size: CGFloat) -> NSFont? {
+        let family = family.trimmingCharacters(in: .whitespaces)
+        guard !family.isEmpty else { return nil }
+        let manager = NSFontManager.shared
+        if let members = manager.availableMembers(ofFontFamily: family), !members.isEmpty {
+            let fixed = NSFontTraitMask.fixedPitchFontMask.rawValue
+            let slanted = NSFontTraitMask.italicFontMask.rawValue | NSFontTraitMask.boldFontMask.rawValue
+            let ranked = members.compactMap { member -> (name: String, score: Int)? in
+                guard member.count >= 4, let name = member[0] as? String,
+                      let weight = (member[2] as? NSNumber)?.intValue,
+                      let traits = (member[3] as? NSNumber)?.uintValue else { return nil }
+                var score = abs(weight - 5) * 10
+                if traits & slanted != 0 { score += 100 }
+                if traits & fixed == 0 { score += 5 }
+                return (name, score)
+            }
+            if let best = ranked.min(by: { $0.score < $1.score }), let font = NSFont(name: best.name, size: size) {
+                return font
+            }
+        }
+        return NSFont(name: family, size: size)
+    }
+
+    nonisolated private static func isNerdFont(_ family: String) -> Bool {
+        family.localizedCaseInsensitiveContains("Nerd Font")
+    }
+
+    /// An installed Nerd Font to borrow icons from, Symbols Nerd Font first. Read once per launch.
+    private static let symbolFamily: String? = {
+        let families = NSFontManager.shared.availableFontFamilies
+        for name in ["Symbols Nerd Font Mono", "Symbols Nerd Font"] where families.contains(name) {
+            return name
+        }
+        let nerd = families.filter(isNerdFont).sorted()
+        return nerd.first { $0.hasSuffix("Nerd Font Mono") } ?? nerd.first { !$0.hasSuffix("Propo") } ?? nerd.first
+    }()
 }
 
 /// SwiftTerm delivers process events from a background queue. This bridge hops to the main actor
