@@ -14,10 +14,15 @@ enum Motion {
     static let frostOut: TimeInterval = 0.36
     static let reveal: TimeInterval = 0.42
 
+    /// Reduce Motion is on: crossfade only, and quickly. Callers skip their frame and scale changes.
+    static var reduced: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     static func group(_ duration: TimeInterval, _ changes: () -> Void, done: (() -> Void)? = nil) {
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = duration
-            context.timingFunction = ease()
+            context.duration = reduced ? min(duration, 0.15) : duration
+            context.timingFunction = reduced ? CAMediaTimingFunction(name: .easeInEaseOut) : ease()
             context.allowsImplicitAnimation = true
             changes()
         }, completionHandler: done)
@@ -25,6 +30,18 @@ enum Motion {
 
     static func fade(_ layer: CALayer?, to opacity: Float, key: String) {
         guard let layer else { return }
+        if reduced {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = layer.presentation()?.opacity ?? layer.opacity
+            fade.toValue = opacity
+            fade.duration = 0.15
+            layer.add(fade, forKey: key)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.opacity = opacity
+            CATransaction.commit()
+            return
+        }
         let spring = CASpringAnimation(keyPath: "opacity")
         spring.fromValue = layer.presentation()?.opacity ?? layer.opacity
         spring.toValue = opacity
@@ -135,7 +152,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         glass.style = frosted ? .regular : .clear
         canvas.layOut(desk: desk, settings: settings, animated: animated && !liveResizing)
         let focused = desk.panes[desk.focusedID]
-        let title = focused?.title ?? "Aether"
+        let title = focused.map { $0.customTitle ?? $0.title } ?? "Aether"
         window?.title = "\(title) — Aether"
         if window?.isKeyWindow == true {
             focusTerminal(desk.focusedID)
@@ -145,12 +162,12 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     func presentAnimated() {
         guard let window else { return }
         let target = window.frame
-        let intro = target.insetBy(dx: target.width * 0.022, dy: target.height * 0.028)
+        let intro = Motion.reduced ? target : target.insetBy(dx: target.width * 0.022, dy: target.height * 0.028)
         window.setFrame(intro, display: false)
         window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
         Motion.group(Motion.reveal, {
-            window.animator().setFrame(target, display: true)
+            if intro != target { window.animator().setFrame(target, display: true) }
             window.animator().alphaValue = 1
         }, done: { [weak self] in
             self?.sync()
@@ -225,7 +242,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     }
 
     func flashLayout(_ title: String) {
-        canvas.flash(title)
+        canvas.flash(title, announce: true)
     }
 
     func focusTerminal(_ paneID: String) {
@@ -349,7 +366,9 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         Motion.group(Motion.close, {
             sender.animator().alphaValue = 0
             let frame = sender.frame
-            sender.animator().setFrame(frame.insetBy(dx: frame.width * 0.035, dy: frame.height * 0.035), display: true)
+            if !Motion.reduced {
+                sender.animator().setFrame(frame.insetBy(dx: frame.width * 0.035, dy: frame.height * 0.035), display: true)
+            }
         }, done: {
             sender.close()
         })
@@ -584,7 +603,7 @@ final class DeskCanvas: NSView {
             let fresh = chrome.superview !== self
             if fresh {
                 chrome.alphaValue = 0
-                chrome.frame = Self.scaled(item.frame, by: 0.9)
+                chrome.frame = Motion.reduced ? item.frame : Self.scaled(item.frame, by: 0.9)
                 addSubview(chrome)
             }
             let revealing = chrome.isHidden || chrome.alphaValue < 0.05
@@ -638,7 +657,9 @@ final class DeskCanvas: NSView {
                 }
                 for chrome in departing {
                     chrome.animator().alphaValue = 0
-                    chrome.animator().frame = Self.scaled(chrome.frame, by: 0.92)
+                    if !Motion.reduced {
+                        chrome.animator().frame = Self.scaled(chrome.frame, by: 0.92)
+                    }
                 }
                 for grip in oldDividers {
                     grip.animator().alphaValue = 0
@@ -698,10 +719,16 @@ final class DeskCanvas: NSView {
         })
     }
 
-    func flash(_ title: String, linger: TimeInterval = 0.85) {
+    func flash(_ title: String, linger: TimeInterval = 0.85, announce: Bool = false) {
         hudToken += 1
         let token = hudToken
         hud.setTitle(title)
+        if announce {
+            NSAccessibility.post(element: window ?? self, notification: .announcementRequested, userInfo: [
+                .announcement: title,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ])
+        }
         let width = min(bounds.width - 24, max(88, hud.fittingWidth))
         hud.frame = CGRect(x: (bounds.width - width) / 2, y: bounds.height - 58, width: width, height: 32)
         // Repeated flashes (live resize) update in place instead of blinking.
@@ -806,7 +833,7 @@ final class DragPreview: NSWindow {
         glass.cornerRadius = 12
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .white
+        label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingMiddle
         label.frame = NSRect(x: 12, y: 12, width: 216, height: 20)
         let host = NSView(frame: glass.bounds)
@@ -846,6 +873,8 @@ final class LayoutHUD: NSView {
         label.textColor = .white
         label.alignment = .center
         addSubview(label)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
     }
 
     @available(*, unavailable)
@@ -853,6 +882,7 @@ final class LayoutHUD: NSView {
 
     func setTitle(_ title: String) {
         label.stringValue = title
+        setAccessibilityLabel(title)
         needsLayout = true
     }
 

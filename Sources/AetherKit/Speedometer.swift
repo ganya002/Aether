@@ -23,6 +23,15 @@ final class Speedometer: NSView {
         let stepped = (clamped * 100).rounded() / 100
         guard abs(stepped - goal) > 0.004 else { return }
         goal = stepped
+        NSAccessibility.post(element: self, notification: .valueChanged)
+        if Motion.reduced {
+            ticker?.invalidate()
+            ticker = nil
+            shown = goal
+            velocity = 0
+            needsDisplay = true
+            return
+        }
         if ticker == nil {
             let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
                 self?.advanceNeedle()
@@ -45,6 +54,18 @@ final class Speedometer: NSView {
     required init?(coder: NSCoder) { nil }
 
     override var isOpaque: Bool { false }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .progressIndicator }
+    override func accessibilityLabel() -> String? { "Download progress" }
+    override func accessibilityValue() -> Any? { NSNumber(value: Int((goal * 100).rounded())) }
+    override func accessibilityMinValue() -> Any? { NSNumber(value: 0) }
+    override func accessibilityMaxValue() -> Any? { NSNumber(value: 100) }
+
+    /// White on dark glass, near-black on light glass, following the text tone setting.
+    @MainActor static var ink: NSColor {
+        AppModel.shared.settings.text.effective == .light ? .white : NSColor(srgbRed: 0.07, green: 0.08, blue: 0.1, alpha: 1)
+    }
 
     private func advanceNeedle() {
         let dt = 1.0 / 60.0
@@ -82,11 +103,12 @@ final class Speedometer: NSView {
         let start = CGFloat(216)
         let sweep = CGFloat(252)
         let displayed = min(1, max(0, shown))
+        let ink = Self.ink
 
-        let faceColor = NSColor.white.withAlphaComponent(0.1)
+        let faceColor = ink.withAlphaComponent(0.1)
         faceColor.setFill()
         NSBezierPath(ovalIn: face).fill()
-        NSColor.white.withAlphaComponent(0.28).setStroke()
+        ink.withAlphaComponent(0.28).setStroke()
         let rim = NSBezierPath(ovalIn: face.insetBy(dx: 0.6, dy: 0.6))
         rim.lineWidth = 1
         rim.stroke()
@@ -102,21 +124,21 @@ final class Speedometer: NSView {
             mark.line(to: CGPoint(x: center.x + cos(angle) * outer, y: center.y + sin(angle) * outer))
             mark.lineWidth = major ? 1.6 : 1
             mark.lineCapStyle = .round
-            NSColor.white.withAlphaComponent(major ? 0.72 : 0.32).setStroke()
+            ink.withAlphaComponent(major ? 0.72 : 0.32).setStroke()
             mark.stroke()
         }
 
         let track = arc(center: center, radius: arcRadius, start: start, sweep: sweep)
         track.lineWidth = side * 0.045
         track.lineCapStyle = .round
-        NSColor.white.withAlphaComponent(0.14).setStroke()
+        ink.withAlphaComponent(0.14).setStroke()
         track.stroke()
 
         if displayed > 0.001 {
             let progress = arc(center: center, radius: arcRadius, start: start, sweep: sweep * CGFloat(displayed))
             progress.lineWidth = side * 0.045
             progress.lineCapStyle = .round
-            NSColor.white.withAlphaComponent(0.94).setStroke()
+            ink.withAlphaComponent(0.94).setStroke()
             progress.stroke()
         }
 
@@ -127,10 +149,10 @@ final class Speedometer: NSView {
         needle.line(to: CGPoint(x: center.x + cos(needleAngle) * arcRadius, y: center.y + sin(needleAngle) * arcRadius))
         needle.lineWidth = 2.4
         needle.lineCapStyle = .round
-        NSColor.white.setStroke()
+        ink.setStroke()
         needle.stroke()
 
-        NSColor.white.withAlphaComponent(0.14).setFill()
+        ink.withAlphaComponent(0.14).setFill()
         NSBezierPath(ovalIn: NSRect(x: center.x - hubRadius, y: center.y - hubRadius, width: hubRadius * 2, height: hubRadius * 2)).fill()
 
         guard showsPercent else { return }
@@ -138,7 +160,7 @@ final class Speedometer: NSView {
         let font = NSFont.monospacedDigitSystemFont(ofSize: side * 0.145, weight: .medium)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: NSColor.white.withAlphaComponent(0.96),
+            .foregroundColor: ink.withAlphaComponent(0.96),
         ]
         let textSize = percent.size(withAttributes: attributes)
         let textRect = NSRect(
@@ -190,7 +212,7 @@ final class UpdateVeil: NSView {
         gauge.showsPercent = false
         gauge.layer?.shadowOpacity = 0
         label.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        label.textColor = NSColor.white.withAlphaComponent(0.95)
+        label.textColor = Speedometer.ink.withAlphaComponent(0.95)
         label.lineBreakMode = .byTruncatingTail
         configure(later, title: "Later", action: #selector(laterPressed))
         configure(install, title: "Restart to Update", action: #selector(installPressed))
@@ -223,6 +245,7 @@ final class UpdateVeil: NSView {
     func showDownloading() {
         showsGauge = true
         gauge.isHidden = false
+        label.textColor = Speedometer.ink.withAlphaComponent(0.95)
         label.stringValue = "Downloading Aether update…"
         install.isEnabled = false
         install.isHidden = true
@@ -233,6 +256,7 @@ final class UpdateVeil: NSView {
     func showReady() {
         showsGauge = false
         gauge.isHidden = true
+        label.textColor = Speedometer.ink.withAlphaComponent(0.95)
         label.stringValue = "Aether update ready"
         install.isHidden = false
         install.isEnabled = true
@@ -241,6 +265,7 @@ final class UpdateVeil: NSView {
     }
 
     func showMessage(_ text: String) {
+        label.textColor = Speedometer.ink.withAlphaComponent(0.95)
         label.stringValue = text
         positionCard()
     }
