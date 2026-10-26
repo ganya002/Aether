@@ -1785,6 +1785,7 @@ final class DelegateBridge: NSObject, LocalProcessTerminalViewDelegate {
 extension TextTone {
     /// The tone to draw with right now.
     @MainActor var effective: TextTone {
-        resolved(darkMode: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        let appearance = NSApp?.effectiveAppearance ?? NSAppearance.currentDrawing()
+        return resolved(darkMode: appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
     }
 }

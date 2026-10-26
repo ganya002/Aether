@@ -49,7 +49,6 @@ final class AppModel {
     /// Set when the person already agreed to stop running terminals, such as Restart to Update.
     var quitConfirmed = false
 
-    private var appearanceObservation: NSKeyValueObservation?
 
     private init() {
         directoryTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { _ in
@@ -58,11 +57,16 @@ final class AppModel {
             }
         }
         // Automatic text follows Light and Dark Mode as the system switches.
-        appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
-            Task { @MainActor in
-                let model = AppModel.shared
-                guard model.settings.text == .automatic else { return }
-                model.applySettings()
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("AppleInterfaceThemeChangedNotification"), object: nil, queue: .main
+        ) { _ in
+            // The app's effective appearance settles a moment after the system posts this.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                MainActor.assumeIsolated {
+                    let model = AppModel.shared
+                    guard model.settings.text == .automatic else { return }
+                    model.applySettings()
+                }
             }
         }
     }
