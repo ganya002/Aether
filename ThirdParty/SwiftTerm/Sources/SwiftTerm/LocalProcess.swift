@@ -161,9 +161,16 @@ public class LocalProcess {
         return keepReading
     }
 
-    // Re-arm the PTY read loop after a backpressure pause.
+    // Re-arm the PTY read loop after a backpressure pause. Only this method
+    // clears the flag, so two drain turns cannot resume an already-running source.
     private func resumePtyRead() {
-        guard running, readSource != nil else { return }
+        pendingLock.lock()
+        let wasSuspended = readSuspendedForBackpressure
+        if wasSuspended {
+            readSuspendedForBackpressure = false
+        }
+        pendingLock.unlock()
+        guard wasSuspended, running, readSource != nil else { return }
         readSource?.resume()
     }
 
@@ -191,6 +198,7 @@ public class LocalProcess {
         var buffer = [UInt8](repeating: 0, count: readSize)
         while running, childfd >= 0 {
             let n = Darwin.read(childfd, &buffer, buffer.count)
+            let err = errno
             if n > 0 {
                 let chunk = Array(buffer[0..<n])
                 let keepReading: Bool
@@ -207,27 +215,50 @@ public class LocalProcess {
                 }
                 continue
             }
-            if n == 0 {
-                childfd = -1
-                if running {
-                    childStopped(cancelProcessMonitor: false)
-                }
-                stopReading()
+            if n == 0 || err == EIO || err == EBADF || err == ENXIO {
+                notePtyHangup()
                 return
             }
-            if errno == EINTR {
+            if err == EINTR {
                 continue
             }
-            if errno == EAGAIN || errno == EWOULDBLOCK {
+            if err == EAGAIN || err == EWOULDBLOCK {
                 return
             }
+            // Any other error would otherwise leave the source armed and spinning.
+            notePtyHangup()
             return
         }
     }
 
+    private func notePtyHangup() {
+        childfd = -1
+        if running {
+            childStopped(cancelProcessMonitor: false)
+        }
+        stopReading()
+    }
+
     private func stopReading() {
+        pendingLock.lock()
+        let suspended = readSuspendedForBackpressure
+        readSuspendedForBackpressure = false
+        pendingLock.unlock()
+        // A suspended source still needs a matching resume before cancel.
+        if suspended {
+            readSource?.resume()
+        }
         readSource?.cancel()
         readSource = nil
+    }
+
+    private func dropPending() {
+        pendingLock.lock()
+        pendingChunks.removeAll(keepingCapacity: true)
+        pendingChunkIndex = 0
+        pendingBytes = 0
+        pendingScheduled = false
+        pendingLock.unlock()
     }
 
     private func drainReceivedData() {
@@ -247,17 +278,23 @@ public class LocalProcess {
                 // drains below the low-water mark.
                 if let chunk {
                     pendingBytes -= chunk.count
+                    if pendingBytes < 0 { pendingBytes = 0 }
                     if readSuspendedForBackpressure && pendingBytes <= pendingLowWaterBytes {
-                        readSuspendedForBackpressure = false
                         resumeRead = true
                     }
                 }
             } else {
+                let shouldResume = readSuspendedForBackpressure
                 pendingChunks.removeAll(keepingCapacity: true)
                 pendingChunkIndex = 0
                 pendingBytes = 0
                 pendingScheduled = false
                 pendingLock.unlock()
+                if shouldResume {
+                    readQueue.async { [weak self] in
+                        self?.resumePtyRead()
+                    }
+                }
                 return
             }
             pendingLock.unlock()
@@ -267,7 +304,7 @@ public class LocalProcess {
                     self?.resumePtyRead()
                 }
             }
-            if let chunk {
+            if let chunk, running {
                 delegate?.dataReceived(slice: chunk[...])
             }
 
@@ -642,8 +679,10 @@ public class LocalProcess {
         slaveFd = -1
         #endif
 
-        // Cancel the reader first so its cancel handler closes the fd after
-        // any in-flight read, matching the old DispatchIO cleanup order.
+        // Stop delivering first, so a drain already on the main queue cannot
+        // feed a pane that is closing or restarting.
+        childStopped()
+        dropPending()
         stopReading()
         io?.close()
         io = nil
@@ -655,7 +694,6 @@ public class LocalProcess {
         // Cancelling the source drops its waitpid, and waiting here would block
         // the main thread. The reaper must use the captured pid: shellPid may
         // already belong to the next process.
-        childStopped()
         guard pid > 0 else { return }
         kill(pid, SIGTERM)
         DispatchQueue.global(qos: .utility).async {

@@ -15,6 +15,8 @@ private final class StreamProbe: LocalProcessDelegate, @unchecked Sendable {
     private var exitDate: Date?
     private var text = ""
     private var finished = false
+    var needle = "one"
+    var minGap: TimeInterval = 0.2
     var onDone: ((Result<Void, Error>) -> Void)?
 
     init(queue: DispatchQueue) {
@@ -52,10 +54,11 @@ private final class StreamProbe: LocalProcessDelegate, @unchecked Sendable {
 
     private func consider(first: Date?, ended: Date?, text: String) {
         guard let first, let ended else { return }
-        if text.contains("one"), ended.timeIntervalSince(first) >= 0.2 {
+        let gap = ended.timeIntervalSince(first)
+        if text.contains(needle), gap >= minGap {
             complete(.success(()))
         } else {
-            complete(.failure(StreamFailure(description: "output waited for exit (\(ended.timeIntervalSince(first))s): \(text)")))
+            complete(.failure(StreamFailure(description: "wanted \(needle) with \(minGap)s gap, got \(gap)s: \(text)")))
         }
     }
 
@@ -67,6 +70,27 @@ private final class StreamProbe: LocalProcessDelegate, @unchecked Sendable {
         guard !already else { return }
         process.terminate()
         onDone?(result)
+    }
+}
+
+@Test func aShortCommandStillDeliversThenEnds() async throws {
+    let queue = DispatchQueue(label: "aether.stream-test.short")
+    let probe = StreamProbe(queue: queue)
+    probe.needle = "bye"
+    probe.minGap = 0
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        probe.onDone = { result in
+            cont.resume(with: result)
+        }
+        queue.asyncAfter(deadline: .now() + 4) {
+            probe.fail("timed out waiting for a short command to end")
+        }
+        probe.process.startProcess(
+            executable: "/bin/sh",
+            args: ["-c", "printf 'bye\\n'"],
+            environment: ["TERM=xterm", "PATH=/bin:/usr/bin", "HOME=/tmp"],
+            currentDirectory: "/tmp"
+        )
     }
 }
 
