@@ -563,6 +563,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         form.row("Selection:", copyOnSelect)
         form.row("Bell:", bell)
         form.row("Scrollback:", scrollback)
+        form.section()
+        form.note("macOS asks once for Local Network access. Allow it if you want arp, mDNS, and other LAN commands to show real devices.")
         return SettingsPage.scrolling(form)
     }
 

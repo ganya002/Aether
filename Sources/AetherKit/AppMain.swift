@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         buildMenus()
         FinishNotifier.install()
         AetherTerminal.cleanDropStash()
+        LocalNetworkAccess.start()
         ToolShelf.shared.warm()
         NotificationCenter.default.addObserver(forName: .aetherBindingsChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {

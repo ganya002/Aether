@@ -24,6 +24,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("WebKit"),
                 .linkedFramework("PDFKit"),
+                .linkedFramework("Network"),
+                .linkedFramework("SystemConfiguration"),
             ]
         ),
         .executableTarget(

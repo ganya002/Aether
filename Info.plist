@@ -53,6 +53,10 @@
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>A program running in Aether wants to read or change files on a network drive.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>A program running in Aether wants to find and connect to devices on your local network.</string>
+	<string>Commands you run in Aether, like arp or ssh, need to see devices on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ssh._tcp</string>
+	</array>
 </dict>
 </plist>

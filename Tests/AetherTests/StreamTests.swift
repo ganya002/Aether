@@ -20,6 +20,7 @@ private final class StreamProbe: LocalProcessDelegate, @unchecked Sendable {
     private var events: [(Date, String)] = []
     var needle = "one"
     var minGap: TimeInterval = 0.2
+    var succeedOnExit = false
     var onOutput: ((String) -> Void)?
     var onDone: ((Result<Void, Error>) -> Void)?
 
@@ -55,7 +56,12 @@ private final class StreamProbe: LocalProcessDelegate, @unchecked Sendable {
         let first = needleDate
         let ended = exitDate
         let body = text
+        let finishOnExit = succeedOnExit
         lock.unlock()
+        if finishOnExit {
+            complete(.success(()))
+            return
+        }
         consider(first: first, ended: ended, text: body)
     }
 
@@ -212,7 +218,67 @@ private func runProbe(
     }
 }
 
-/// Each flushed tick must arrive as its own event, not as one dump at hangup.
+/// `arp -a` sits quiet (DNS), then dumps lines. That cadence must stream
+/// through the PTY before the process exits, whether or not macOS 27 is
+/// willing to reveal the real ARP table to this test process.
+@Test func quietThenBurstOutputArrivesBeforeExit() async throws {
+    try await runProbe(timeout: 6, needle: "ifscope", minGap: 0.25, queueLabel: "aether.stream-test.burst") { probe in
+        probe.process.startProcess(
+            executable: "/usr/bin/python3",
+            args: [
+                "-c",
+                """
+                import sys, time
+                time.sleep(0.45)
+                sys.stdout.write('host (1.2.3.4) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\\n')
+                sys.stdout.flush()
+                time.sleep(0.35)
+                sys.stdout.write('done\\n')
+                sys.stdout.flush()
+                """,
+            ],
+            environment: ["TERM=xterm", "PATH=/bin:/usr/bin", "HOME=/tmp", "PYTHONUNBUFFERED=1"],
+            currentDirectory: "/tmp"
+        )
+    }
+}
+
+/// macOS 27 redacts MACs and hides ARP from app-spawned processes until Local
+/// Network is granted. When this test runner is in that state, empty `arp`
+/// output is the OS, not a stuck PTY. Once link addresses are real, hosts
+/// must actually appear.
+@Test func arpDashAPrintsHostsWhenLinkAddressesAreVisible() async throws {
+    let queue = DispatchQueue(label: "aether.stream-test.arp")
+    let probe = StreamProbe(queue: queue)
+    probe.succeedOnExit = true
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        probe.onDone = { result in
+            cont.resume(with: result)
+        }
+        queue.asyncAfter(deadline: .now() + 20) {
+            probe.fail("arp/ifconfig never exited")
+        }
+        probe.process.startProcess(
+            executable: "/bin/sh",
+            args: ["-c", "/usr/sbin/arp -an; printf '\\n__SPLIT__\\n'; /sbin/ifconfig en0"],
+            environment: ["TERM=xterm-256color", "PATH=/bin:/usr/bin:/sbin:/usr/sbin", "HOME=/tmp"],
+            currentDirectory: "/tmp"
+        )
+    }
+    let text = probe.snapshot().text
+    let parts = text.components(separatedBy: "__SPLIT__")
+    let arp = parts.first ?? ""
+    let interfaces = parts.count > 1 ? parts[1] : ""
+    if interfaces.contains(LocalNetworkAccess.redactedEthernetAddress) {
+        #expect(!arp.contains("ifscope"))
+        return
+    }
+    guard interfaces.contains("ether ") else {
+        throw StreamFailure(description: "ifconfig printed no ethernet address: \(text.debugDescription)")
+    }
+    #expect(arp.contains("ifscope") || arp.contains("incomplete") || arp.contains("at "))
+}
+
 @Test func pingRepliesArriveBeforeTheCommandExits() async throws {
     try await runProbe(timeout: 6, needle: "bytes from", minGap: 0.4, queueLabel: "aether.stream-test.ping") { probe in
         probe.process.startProcess(

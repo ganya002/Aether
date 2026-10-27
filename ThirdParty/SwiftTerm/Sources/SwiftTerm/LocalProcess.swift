@@ -88,8 +88,8 @@ public class LocalProcess {
     var io: DispatchIO?
     /// Dedicated blocking `read()` thread. DispatchIO and DispatchSource both
     /// wait for a large kernel buffer (or EOF) on a Darwin PTY, so commands
-    /// that print a line at a time — `arp -a`, `ping`, `tail -f` — sat blank
-    /// until they finished.
+    /// that print a line at a time — `ping`, `tail -f` — sat blank until they
+    /// finished.
     private var readThread: Thread?
     private let readGate = NSCondition()
     private var pauseRead = false
@@ -223,7 +223,9 @@ public class LocalProcess {
                 // can close the fd and wake us.
                 let n = Darwin.read(fd, &buffer, buffer.count)
                 let err = errno
-                guard let this = self else { return }
+                guard let this = self else {
+                    return
+                }
                 if n > 0 {
                     let chunk = Array(buffer[0..<n])
                     let keepReading: Bool
@@ -244,6 +246,10 @@ public class LocalProcess {
                     return
                 }
                 if err == EINTR {
+                    continue
+                }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    usleep(10_000)
                     continue
                 }
                 this.notePtyHangup()
