@@ -86,14 +86,17 @@ public class LocalProcess {
     var readQueue: DispatchQueue
     
     var io: DispatchIO?
-    /// Dedicated blocking `read()` thread. DispatchIO and DispatchSource both
-    /// wait for a large kernel buffer (or EOF) on a Darwin PTY, so commands
-    /// that print a line at a time — `ping`, `tail -f` — sat blank until they
-    /// finished.
+    /// Dedicated reader thread. DispatchIO and DispatchSource both wait for a
+    /// large kernel buffer (or EOF) on a Darwin PTY, so commands that print a
+    /// line at a time — `ping`, `tail -f` — sat blank until they finished.
+    /// `poll` on the master plus a wake pipe means Cmd+W can stop us without
+    /// `close()`-ing the fd the reader is blocked in, which deadlocks Darwin.
     private var readThread: Thread?
     private let readGate = NSCondition()
     private var pauseRead = false
     private var writeFd: Int32 = -1
+    private var wakeReadFd: Int32 = -1
+    private var wakeWriteFd: Int32 = -1
     private let writeQueue = DispatchQueue(label: "aether.pty-write")
     private let ioLock = NSLock()
 
@@ -189,21 +192,67 @@ public class LocalProcess {
         readGate.unlock()
     }
 
-    /// Blocking reads on a private thread, so a line from `arp -a` shows up
-    /// when that lookup finishes, not when the whole command does.
-    private func startReading(fd: Int32) {
-        let flags = Darwin.fcntl(fd, F_GETFL)
-        if flags >= 0 {
-            _ = Darwin.fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+    private func openWakePipe() {
+        var fds = [Int32](repeating: -1, count: 2)
+        let rc = fds.withUnsafeMutableBufferPointer { Darwin.pipe($0.baseAddress!) }
+        guard rc == 0 else { return }
+        _ = Darwin.fcntl(fds[0], F_SETFL, O_NONBLOCK)
+        _ = Darwin.fcntl(fds[1], F_SETFL, O_NONBLOCK)
+        ioLock.lock()
+        wakeReadFd = fds[0]
+        wakeWriteFd = fds[1]
+        ioLock.unlock()
+    }
+
+    /// Unblock `poll` without touching the PTY master. Closing that master
+    /// from another thread while the reader is in `read()`/`poll()` deadlocks
+    /// Darwin (Cmd+W freeze).
+    private func wakeReader() {
+        ioLock.lock()
+        let w = wakeWriteFd
+        ioLock.unlock()
+        guard w >= 0 else { return }
+        var byte: UInt8 = 1
+        _ = Darwin.write(w, &byte, 1)
+    }
+
+    private static func closeIfOpen(_ fd: Int32) {
+        if fd >= 0 {
+            Darwin.close(fd)
         }
+    }
+
+    /// Poll the PTY so a line shows up when it arrives, and watch a wake pipe
+    /// so terminate() can stop us without closing the master from the UI thread.
+    private func startReading(fd: Int32) {
         ioLock.lock()
         writeFd = Darwin.dup(fd)
+        ioLock.unlock()
+        openWakePipe()
+        ioLock.lock()
+        let write = writeFd
+        let wakeRead = wakeReadFd
+        let wakeWrite = wakeWriteFd
         ioLock.unlock()
         readGate.lock()
         pauseRead = false
         readGate.unlock()
         let thread = Thread { [weak self] in
             var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+            defer {
+                Self.closeIfOpen(fd)
+                Self.closeIfOpen(write)
+                Self.closeIfOpen(wakeRead)
+                Self.closeIfOpen(wakeWrite)
+                if let this = self {
+                    this.ioLock.lock()
+                    if this.childfd == fd { this.childfd = -1 }
+                    if this.writeFd == write { this.writeFd = -1 }
+                    if this.wakeReadFd == wakeRead { this.wakeReadFd = -1 }
+                    if this.wakeWriteFd == wakeWrite { this.wakeWriteFd = -1 }
+                    this.ioLock.unlock()
+                }
+            }
             while true {
                 var stillRunning = false
                 if let this = self {
@@ -219,41 +268,51 @@ public class LocalProcess {
                 if !stillRunning {
                     return
                 }
-                // Do not hold `self` across the blocking read, so terminate()
-                // can close the fd and wake us.
-                let n = Darwin.read(fd, &buffer, buffer.count)
-                let err = errno
-                guard let this = self else {
-                    return
+                var pollFds = [pollfd(fd: fd, events: Int16(POLLIN) | Int16(POLLHUP) | Int16(POLLERR), revents: 0)]
+                if wakeRead >= 0 {
+                    pollFds.append(pollfd(fd: wakeRead, events: Int16(POLLIN) | Int16(POLLHUP), revents: 0))
                 }
-                if n > 0 {
-                    let chunk = Array(buffer[0..<n])
-                    let keepReading: Bool
-                    if this.usesMainQueue {
-                        keepReading = this.enqueueReceivedData(chunk)
-                    } else {
-                        this.dispatchQueue.sync {
-                            this.delegate?.dataReceived(slice: chunk[...])
-                        }
-                        keepReading = true
-                    }
-                    if !keepReading {
+                let pr = pollFds.withUnsafeMutableBufferPointer { Darwin.poll($0.baseAddress, nfds_t($0.count), -1) }
+                if pr < 0 {
+                    if errno == EINTR {
                         continue
                     }
-                    continue
-                }
-                if !this.running {
                     return
                 }
-                if err == EINTR {
-                    continue
+                if pollFds.count > 1, pollFds[1].revents != 0 {
+                    return
                 }
-                if err == EAGAIN || err == EWOULDBLOCK {
-                    usleep(10_000)
-                    continue
+                let rev = pollFds[0].revents
+                if rev & Int16(POLLIN) != 0 {
+                    let n = Darwin.read(fd, &buffer, buffer.count)
+                    let err = errno
+                    guard let this = self else { return }
+                    if n > 0 {
+                        let chunk = Array(buffer[0..<n])
+                        let keepReading: Bool
+                        if this.usesMainQueue {
+                            keepReading = this.enqueueReceivedData(chunk)
+                        } else {
+                            this.dispatchQueue.sync {
+                                this.delegate?.dataReceived(slice: chunk[...])
+                            }
+                            keepReading = true
+                        }
+                        if !keepReading {
+                            continue
+                        }
+                        continue
+                    }
+                    if err == EINTR || err == EAGAIN || err == EWOULDBLOCK {
+                        continue
+                    }
+                    this.notePtyHangup()
+                    return
                 }
-                this.notePtyHangup()
-                return
+                if rev & (Int16(POLLHUP) | Int16(POLLERR) | Int16(POLLNVAL)) != 0 {
+                    self?.notePtyHangup()
+                    return
+                }
             }
         }
         thread.name = "aether.pty-read"
@@ -266,7 +325,6 @@ public class LocalProcess {
         if running {
             childStopped(cancelProcessMonitor: false)
         }
-        stopReading()
     }
 
     private func stopReading() {
@@ -277,18 +335,7 @@ public class LocalProcess {
         pauseRead = false
         readGate.broadcast()
         readGate.unlock()
-        ioLock.lock()
-        let read = childfd
-        let write = writeFd
-        childfd = -1
-        writeFd = -1
-        ioLock.unlock()
-        if read >= 0 {
-            Darwin.close(read)
-        }
-        if write >= 0, write != read {
-            Darwin.close(write)
-        }
+        wakeReader()
         readThread = nil
     }
 
@@ -503,12 +550,14 @@ public class LocalProcess {
         childMonitor?.cancel()
         childMonitor = nil
 #endif
-        // With [weak self] in the read/write handlers, deinit can fire even
-        // when the consumer never called terminate() explicitly. Cancel the
-        // reader so its cleanup handler releases the file descriptor.
-        // We intentionally don't send SIGTERM here; terminate() remains the
-        // explicit API for killing the shell. deinit only guarantees that
-        // our own I/O resources don't outlive us.
+        let pid = shellPid
+        shellPid = 0
+        if pid > 0 {
+            kill(pid, SIGKILL)
+        }
+        // Do not close the PTY here. The reader thread closes it after poll
+        // returns; close() from deinit while that thread is in poll()/read()
+        // deadlocks Darwin.
         stopReading()
         io?.close()
         io = nil
@@ -723,22 +772,28 @@ public class LocalProcess {
         #endif
 
         // Stop delivering first, so a drain already on the main queue cannot
-        // feed a pane that is closing or restarting.
+        // feed a pane that is closing or restarting. Do not close the PTY
+        // master here: the reader thread may be inside poll()/read(), and
+        // Darwin deadlocks that close (Cmd+W freeze).
         childStopped()
         dropPending()
+        let pid = shellPid
+        shellPid = 0
+        if pid > 0 {
+            kill(pid, SIGTERM)
+        }
+        ioLock.lock()
+        writeFd = -1
+        childfd = -1
+        ioLock.unlock()
         stopReading()
         io?.close()
         io = nil
-        childfd = -1
 
-        let pid = shellPid
-        shellPid = 0
-        // Cancel the exit source before the kill, then reap on a side queue.
-        // Cancelling the source drops its waitpid, and waiting here would block
-        // the main thread. The reaper must use the captured pid: shellPid may
-        // already belong to the next process.
+        // Reap on a side queue. Waiting here would block the main thread.
+        // The reaper must use the captured pid: shellPid may already belong
+        // to the next process.
         guard pid > 0 else { return }
-        kill(pid, SIGTERM)
         DispatchQueue.global(qos: .utility).async {
             var status: Int32 = 0
             for _ in 0..<40 {

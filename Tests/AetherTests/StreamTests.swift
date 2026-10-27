@@ -381,3 +381,36 @@ private func runProbe(
         throw StreamFailure(description: "pane buffer waited for exit: \(text.debugDescription)")
     }
 }
+
+/// Cmd+W closes a live shell. Darwin deadlocks if the UI thread `close()`s the
+/// PTY master while `aether.pty-read` is blocked in `read()`.
+@Test func terminateOfALiveShellReturnsWithoutDeadlock() async throws {
+    let queue = DispatchQueue(label: "aether.stream-test.terminate")
+    let probe = StreamProbe(queue: queue)
+    probe.process.startProcess(
+        executable: "/bin/sleep",
+        args: ["60"],
+        environment: ["TERM=xterm", "PATH=/bin:/usr/bin", "HOME=/tmp"],
+        currentDirectory: "/tmp"
+    )
+    try await Task.sleep(for: .milliseconds(200))
+    guard probe.process.running else {
+        throw StreamFailure(description: "sleep never started")
+    }
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    probe.process.terminate()
+                    cont.resume()
+                }
+            }
+        }
+        group.addTask {
+            try await Task.sleep(for: .milliseconds(800))
+            throw StreamFailure(description: "terminate hung while the PTY reader was blocked")
+        }
+        try await group.next()
+        group.cancelAll()
+    }
+}
