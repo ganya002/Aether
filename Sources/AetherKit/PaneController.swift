@@ -48,6 +48,22 @@ final class AetherTerminal: LocalProcessTerminalView {
                 }
             }
         }
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+
+    /// Core Image blur on the stage caches a bitmap of this view. Dirtying
+    /// the terminal does not dirty that cache, so `arp -a` / `ping` sat
+    /// invisible until the pane next laid out (usually when the command ended).
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        super.setNeedsDisplay(invalidRect)
+        var ancestor: NSView? = superview
+        while let view = ancestor {
+            if view.layerUsesCoreImageFilters || view.layer?.shouldRasterize == true {
+                view.needsDisplay = true
+                view.layer?.setNeedsDisplay()
+            }
+            ancestor = view.superview
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -380,7 +396,7 @@ final class PaneChrome: NSView {
         clip.layer?.masksToBounds = true
         clip.layer?.cornerRadius = 20
         stage.wantsLayer = true
-        stage.layerUsesCoreImageFilters = true
+        stage.layerContentsRedrawPolicy = .onSetNeedsDisplay
         rest.wantsLayer = true
         rest.layer?.backgroundColor = NSColor.black.cgColor
         rest.alphaValue = 0
@@ -587,9 +603,16 @@ final class PaneChrome: NSView {
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if !layer.shouldRasterize {
-            layer.rasterizationScale = stage.window?.backingScaleFactor ?? 2
-            layer.shouldRasterize = true
+        stage.layerUsesCoreImageFilters = true
+        // Rasterize only while the pane is actually blurred. A radius of 0
+        // still attached a filter and froze live output on the focused pane.
+        if radius > 0.4 {
+            if !layer.shouldRasterize {
+                layer.rasterizationScale = stage.window?.backingScaleFactor ?? 2
+                layer.shouldRasterize = true
+            }
+        } else {
+            layer.shouldRasterize = false
         }
         let filters = (layer.filters as? [CIFilter]) ?? []
         let filter: CIFilter
@@ -636,12 +659,13 @@ final class PaneChrome: NSView {
     }
 
     private func removeContentBlur(from layer: CALayer) {
-        guard layer.filters != nil || layer.shouldRasterize else { return }
+        guard layer.filters != nil || layer.shouldRasterize || stage.layerUsesCoreImageFilters else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer.removeAnimation(forKey: "aetherBlurRadius")
         layer.filters = nil
         layer.shouldRasterize = false
+        stage.layerUsesCoreImageFilters = false
         CATransaction.commit()
     }
 

@@ -62,7 +62,7 @@ public protocol LocalProcessDelegate: AnyObject {
  * This implementation uses swift-subprocess with openpty/login_tty for pseudo-terminal support.
  */
 public class LocalProcess {
-    let readSize = 128*1024
+    let readSize = 16 * 1024
     
     /* The file descriptor used to communicate with the child process */
     public private(set) var childfd: Int32 = -1
@@ -86,10 +86,16 @@ public class LocalProcess {
     var readQueue: DispatchQueue
     
     var io: DispatchIO?
-    /// Reads the PTY as bytes arrive. DispatchIO waits for a large buffer (or for
-    /// the child to exit), so commands that print slowly — `arp -a`, `ping`, `tail -f` —
-    /// would sit blank until they finished.
-    private var readSource: DispatchSourceRead?
+    /// Dedicated blocking `read()` thread. DispatchIO and DispatchSource both
+    /// wait for a large kernel buffer (or EOF) on a Darwin PTY, so commands
+    /// that print a line at a time — `arp -a`, `ping`, `tail -f` — sat blank
+    /// until they finished.
+    private var readThread: Thread?
+    private let readGate = NSCondition()
+    private var pauseRead = false
+    private var writeFd: Int32 = -1
+    private let writeQueue = DispatchQueue(label: "aether.pty-write")
+    private let ioLock = NSLock()
 
     private let usesMainQueue: Bool
     private let pendingChunkFlushThreshold = 32
@@ -151,7 +157,7 @@ public class LocalProcess {
         }
         pendingLock.unlock()
         if shouldSuspend {
-            readSource?.suspend()
+            pausePtyRead()
         }
         if shouldSchedule {
             dispatchQueue.async { [weak self] in
@@ -161,8 +167,8 @@ public class LocalProcess {
         return keepReading
     }
 
-    // Re-arm the PTY read loop after a backpressure pause. Only this method
-    // clears the flag, so two drain turns cannot resume an already-running source.
+    // Wake the reader after a backpressure pause. Only this method
+    // clears the flag, so two drain turns cannot double-resume.
     private func resumePtyRead() {
         pendingLock.lock()
         let wasSuspended = readSuspendedForBackpressure
@@ -170,69 +176,87 @@ public class LocalProcess {
             readSuspendedForBackpressure = false
         }
         pendingLock.unlock()
-        guard wasSuspended, running, readSource != nil else { return }
-        readSource?.resume()
+        guard wasSuspended, running else { return }
+        readGate.lock()
+        pauseRead = false
+        readGate.broadcast()
+        readGate.unlock()
     }
 
-    /// Non-blocking reads as soon as the kernel has bytes, so a line from `arp -a`
-    /// shows up when that lookup finishes, not when the whole command does.
+    private func pausePtyRead() {
+        readGate.lock()
+        pauseRead = true
+        readGate.unlock()
+    }
+
+    /// Blocking reads on a private thread, so a line from `arp -a` shows up
+    /// when that lookup finishes, not when the whole command does.
     private func startReading(fd: Int32) {
         let flags = Darwin.fcntl(fd, F_GETFL)
         if flags >= 0 {
-            _ = Darwin.fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+            _ = Darwin.fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
         }
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: readQueue)
-        source.setEventHandler { [weak self] in
-            self?.readAvailablePtyData()
-        }
-        let fdToClose = fd
-        source.setCancelHandler {
-            Darwin.close(fdToClose)
-        }
-        readSource = source
-        source.resume()
-    }
-
-    private func readAvailablePtyData() {
-        guard childfd >= 0, running else { return }
-        var buffer = [UInt8](repeating: 0, count: readSize)
-        while running, childfd >= 0 {
-            let n = Darwin.read(childfd, &buffer, buffer.count)
-            let err = errno
-            if n > 0 {
-                let chunk = Array(buffer[0..<n])
-                let keepReading: Bool
-                if usesMainQueue {
-                    keepReading = enqueueReceivedData(chunk)
-                } else {
-                    dispatchQueue.sync {
-                        self.delegate?.dataReceived(slice: chunk[...])
+        ioLock.lock()
+        writeFd = Darwin.dup(fd)
+        ioLock.unlock()
+        readGate.lock()
+        pauseRead = false
+        readGate.unlock()
+        let thread = Thread { [weak self] in
+            var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+            while true {
+                var stillRunning = false
+                if let this = self {
+                    this.readGate.lock()
+                    while this.pauseRead && this.running {
+                        this.readGate.wait()
                     }
-                    keepReading = true
-                }
-                if !keepReading {
+                    stillRunning = this.running
+                    this.readGate.unlock()
+                } else {
                     return
                 }
-                continue
-            }
-            if n == 0 || err == EIO || err == EBADF || err == ENXIO {
-                notePtyHangup()
+                if !stillRunning {
+                    return
+                }
+                // Do not hold `self` across the blocking read, so terminate()
+                // can close the fd and wake us.
+                let n = Darwin.read(fd, &buffer, buffer.count)
+                let err = errno
+                guard let this = self else { return }
+                if n > 0 {
+                    let chunk = Array(buffer[0..<n])
+                    let keepReading: Bool
+                    if this.usesMainQueue {
+                        keepReading = this.enqueueReceivedData(chunk)
+                    } else {
+                        this.dispatchQueue.sync {
+                            this.delegate?.dataReceived(slice: chunk[...])
+                        }
+                        keepReading = true
+                    }
+                    if !keepReading {
+                        continue
+                    }
+                    continue
+                }
+                if !this.running {
+                    return
+                }
+                if err == EINTR {
+                    continue
+                }
+                this.notePtyHangup()
                 return
             }
-            if err == EINTR {
-                continue
-            }
-            if err == EAGAIN || err == EWOULDBLOCK {
-                return
-            }
-            // Any other error would otherwise leave the source armed and spinning.
-            notePtyHangup()
-            return
         }
+        thread.name = "aether.pty-read"
+        thread.qualityOfService = .userInteractive
+        readThread = thread
+        thread.start()
     }
 
     private func notePtyHangup() {
-        childfd = -1
         if running {
             childStopped(cancelProcessMonitor: false)
         }
@@ -241,15 +265,25 @@ public class LocalProcess {
 
     private func stopReading() {
         pendingLock.lock()
-        let suspended = readSuspendedForBackpressure
         readSuspendedForBackpressure = false
         pendingLock.unlock()
-        // A suspended source still needs a matching resume before cancel.
-        if suspended {
-            readSource?.resume()
+        readGate.lock()
+        pauseRead = false
+        readGate.broadcast()
+        readGate.unlock()
+        ioLock.lock()
+        let read = childfd
+        let write = writeFd
+        childfd = -1
+        writeFd = -1
+        ioLock.unlock()
+        if read >= 0 {
+            Darwin.close(read)
         }
-        readSource?.cancel()
-        readSource = nil
+        if write >= 0, write != read {
+            Darwin.close(write)
+        }
+        readThread = nil
     }
 
     private func dropPending() {
@@ -318,7 +352,7 @@ public class LocalProcess {
     }
     
     /**
-     * Sends the array slice to the local process using DispatchIO
+     * Sends the array slice to the local process.
      * - Parameter data: The range of bytes to send to the child process
      */
     public func send (data: ArraySlice<UInt8>)
@@ -326,27 +360,30 @@ public class LocalProcess {
         guard running else {
             return
         }
-        let copy = sendCount
+        let copy = Array(data)
         sendCount += 1
-        data.withUnsafeBytes { ptr in
-            let ddata = DispatchData(bytes: ptr)
-            let copyCount = ddata.count
-            if debugIO {
-                print ("[SEND-\(copy)] Queuing data to client: \(data) ")
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            copy.withUnsafeBufferPointer { buf in
+                var offset = 0
+                while offset < buf.count {
+                    self.ioLock.lock()
+                    let fd = self.writeFd
+                    self.ioLock.unlock()
+                    guard fd >= 0, let base = buf.baseAddress else { return }
+                    let n = Darwin.write(fd, base + offset, buf.count - offset)
+                    if n > 0 {
+                        offset += n
+                        self.total += n
+                        continue
+                    }
+                    if n < 0 && errno == EINTR {
+                        continue
+                    }
+                    return
+                }
             }
-
-            DispatchIO.write(toFileDescriptor: childfd, data: ddata, runningHandlerOn: DispatchQueue.global(qos: .userInitiated), handler:  { [weak self] dd, errno in
-                guard let self else { return }
-                self.total += copyCount
-                if self.debugIO {
-                    print ("[SEND-\(copy)] completed bytes=\(self.total)")
-                }
-                if errno != 0 {
-                    print ("Error writing data to the child, errno=\(errno)")
-                }
-            })
         }
-
     }
     
     /* Used to generate the next file name counter */
