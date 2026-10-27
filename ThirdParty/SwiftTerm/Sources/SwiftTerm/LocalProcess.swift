@@ -9,6 +9,7 @@
 #if !os(iOS) && !os(Windows)
 import Foundation
 import Dispatch
+import Darwin
 #if false //canImport(Subprocess)
 import Subprocess
 import System
@@ -85,6 +86,10 @@ public class LocalProcess {
     var readQueue: DispatchQueue
     
     var io: DispatchIO?
+    /// Reads the PTY as bytes arrive. DispatchIO waits for a large buffer (or for
+    /// the child to exit), so commands that print slowly — `arp -a`, `ping`, `tail -f` —
+    /// would sit blank until they finished.
+    private var readSource: DispatchSourceRead?
 
     private let usesMainQueue: Bool
     private let pendingChunkFlushThreshold = 32
@@ -136,7 +141,8 @@ public class LocalProcess {
         pendingChunks.append(bytes)
         pendingBytes += bytes.count
         let keepReading = pendingBytes < pendingHighWaterBytes
-        if !keepReading {
+        let shouldSuspend = !keepReading && !readSuspendedForBackpressure
+        if shouldSuspend {
             readSuspendedForBackpressure = true
         }
         let shouldSchedule = !pendingScheduled
@@ -144,6 +150,9 @@ public class LocalProcess {
             pendingScheduled = true
         }
         pendingLock.unlock()
+        if shouldSuspend {
+            readSource?.suspend()
+        }
         if shouldSchedule {
             dispatchQueue.async { [weak self] in
                 self?.drainReceivedData()
@@ -154,10 +163,71 @@ public class LocalProcess {
 
     // Re-arm the PTY read loop after a backpressure pause.
     private func resumePtyRead() {
-        guard running, let io else { return }
-        io.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
-            self?.childProcessRead(done: done, data: data, errno: errno)
+        guard running, readSource != nil else { return }
+        readSource?.resume()
+    }
+
+    /// Non-blocking reads as soon as the kernel has bytes, so a line from `arp -a`
+    /// shows up when that lookup finishes, not when the whole command does.
+    private func startReading(fd: Int32) {
+        let flags = Darwin.fcntl(fd, F_GETFL)
+        if flags >= 0 {
+            _ = Darwin.fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         }
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: readQueue)
+        source.setEventHandler { [weak self] in
+            self?.readAvailablePtyData()
+        }
+        let fdToClose = fd
+        source.setCancelHandler {
+            Darwin.close(fdToClose)
+        }
+        readSource = source
+        source.resume()
+    }
+
+    private func readAvailablePtyData() {
+        guard childfd >= 0, running else { return }
+        var buffer = [UInt8](repeating: 0, count: readSize)
+        while running, childfd >= 0 {
+            let n = Darwin.read(childfd, &buffer, buffer.count)
+            if n > 0 {
+                let chunk = Array(buffer[0..<n])
+                let keepReading: Bool
+                if usesMainQueue {
+                    keepReading = enqueueReceivedData(chunk)
+                } else {
+                    dispatchQueue.sync {
+                        self.delegate?.dataReceived(slice: chunk[...])
+                    }
+                    keepReading = true
+                }
+                if !keepReading {
+                    return
+                }
+                continue
+            }
+            if n == 0 {
+                childfd = -1
+                if running {
+                    childStopped(cancelProcessMonitor: false)
+                }
+                stopReading()
+                return
+            }
+            if errno == EINTR {
+                continue
+            }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                return
+            }
+            return
+        }
+    }
+
+    private func stopReading() {
+        readSource?.cancel()
+        readSource = nil
     }
 
     private func drainReceivedData() {
@@ -193,7 +263,9 @@ public class LocalProcess {
             pendingLock.unlock()
 
             if resumeRead {
-                resumePtyRead()
+                readQueue.async { [weak self] in
+                    self?.resumePtyRead()
+                }
             }
             if let chunk {
                 delegate?.dataReceived(slice: chunk[...])
@@ -352,12 +424,12 @@ public class LocalProcess {
         childMonitor = nil
 #endif
         // With [weak self] in the read/write handlers, deinit can fire even
-        // when the consumer never called terminate() explicitly. Close the
-        // DispatchIO so its cleanup handler releases the file descriptor —
-        // otherwise the FD (and the DispatchIO itself) would leak. We
-        // intentionally don't send SIGTERM here; terminate() remains the
+        // when the consumer never called terminate() explicitly. Cancel the
+        // reader so its cleanup handler releases the file descriptor.
+        // We intentionally don't send SIGTERM here; terminate() remains the
         // explicit API for killing the shell. deinit only guarantees that
         // our own I/O resources don't outlive us.
+        stopReading()
         io?.close()
         io = nil
     }
@@ -553,21 +625,7 @@ public class LocalProcess {
                 }
             }
 #endif
-            // Capture FD value for cleanup handler to close it safely after DispatchIO is done
-            let fdToClose = childfd
-            io = DispatchIO(type: .stream, fileDescriptor: childfd, queue: dispatchQueue, cleanupHandler: { _ in
-                // Close file descriptor after DispatchIO has finished with it
-                // This prevents EV_VANISHED crash by ensuring proper cleanup order
-                close(fdToClose)
-            })
-            guard let io else {
-                return
-            }
-            io.setLimit(lowWater: 1)
-            io.setLimit(highWater: readSize)
-            io.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
-                self?.childProcessRead(done: done, data: data, errno: errno)
-            }
+            startReading(fd: childfd)
         }
     }
 
@@ -584,10 +642,9 @@ public class LocalProcess {
         slaveFd = -1
         #endif
 
-        // Close DispatchIO - this will trigger the cleanup handler which closes file descriptors
-        // The cleanup handler ensures FDs are closed AFTER DispatchIO is done with them,
-        // preventing "BUG IN CLIENT OF LIBDISPATCH: Unexpected EV_VANISHED" crash
-        // This applies to both Subprocess and forkpty paths
+        // Cancel the reader first so its cancel handler closes the fd after
+        // any in-flight read, matching the old DispatchIO cleanup order.
+        stopReading()
         io?.close()
         io = nil
         childfd = -1

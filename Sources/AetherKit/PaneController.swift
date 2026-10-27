@@ -352,6 +352,7 @@ final class PaneChrome: NSView {
     private var preview: NSView?
     private var appliedFocus: Bool?
     private var appliedRest: FocusRest?
+    private var appliedGlass: GlassStyle?
     private var appliedTone: TextTone?
     private var appliedBlur: Double = -1
     private var appliedBroadcast = false
@@ -522,11 +523,12 @@ final class PaneChrome: NSView {
     }
 
     func setFocused(_ focused: Bool, settings: Settings) {
-        let nextBlur = (!focused && settings.focusRest == .blur) ? settings.blurAmount : 0
+        let blurMode = GlassFocus.blursUnfocusedPane(glass: settings.glass, rest: settings.focusRest)
+        let radius = GlassFocus.paneBlurRadius(focused: focused, glass: settings.glass, rest: settings.focusRest, amount: settings.blurAmount)
         let broadcasting = AppModel.shared.isBroadcasting(pane: paneID)
         let boost = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        if appliedFocus == focused, appliedRest == settings.focusRest, appliedTone == settings.text.effective, abs(appliedBlur - nextBlur) < 0.01,
-           appliedBroadcast == broadcasting, appliedBoost == boost {
+        if appliedFocus == focused, appliedRest == settings.focusRest, appliedGlass == settings.glass, appliedTone == settings.text.effective,
+           abs(appliedBlur - Double(radius)) < 0.4, appliedBroadcast == broadcasting, appliedBoost == boost {
             return
         }
         let animate = appliedFocus != nil && appliedBroadcast == broadcasting
@@ -535,13 +537,12 @@ final class PaneChrome: NSView {
         header.setBroadcasting(broadcasting)
         appliedFocus = focused
         appliedRest = settings.focusRest
+        appliedGlass = settings.glass
         appliedTone = settings.text.effective
-        appliedBlur = nextBlur
+        appliedBlur = Double(radius)
         let dim: CGFloat = focused || settings.focusRest != .dim ? 0 : (settings.text.effective == .light ? 0.22 : 0.12)
-        // Enough smear that glyphs and pictures stop being readable, even toward the low end of the slider.
-        let radius = nextBlur > 0.01 ? CGFloat(16 + nextBlur * 26) : 0
         header.setFindVisible(focused)
-        applyContentBlur(radius: radius, animated: animate, blurMode: settings.focusRest == .blur)
+        applyContentBlur(radius: radius, animated: animate, blurMode: blurMode)
         if animate {
             animateBorder(focused)
             Motion.fade(rest.layer, to: Float(dim), key: "dim")
@@ -573,12 +574,14 @@ final class PaneChrome: NSView {
         guard let layer = stage.layer else { return }
         let name = "aetherBlur"
         if !blurMode {
-            if layer.filters != nil || layer.shouldRasterize {
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                layer.filters = nil
-                layer.shouldRasterize = false
-                CATransaction.commit()
+            animateBlurRadius(on: layer, name: name, to: 0, animated: animated)
+            if !animated || Motion.reduced {
+                removeContentBlur(from: layer)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + GlassFocus.blurDuration) { [weak self] in
+                    guard let self, self.appliedBlur < 0.4 else { return }
+                    self.removeContentBlur(from: layer)
+                }
             }
             return
         }
@@ -595,7 +598,7 @@ final class PaneChrome: NSView {
         } else if let created = CIFilter(name: "CIGaussianBlur") {
             created.name = name
             created.setDefaults()
-            created.setValue(radius, forKey: kCIInputRadiusKey)
+            created.setValue(0, forKey: kCIInputRadiusKey)
             layer.filters = [created]
             filter = created
         } else {
@@ -603,21 +606,42 @@ final class PaneChrome: NSView {
             return
         }
         CATransaction.commit()
-        let current = (filter.value(forKey: kCIInputRadiusKey) as? NSNumber)?.doubleValue ?? 0
-        if animated, abs(current - Double(radius)) > 0.4 {
-            let spring = CASpringAnimation(keyPath: "filters.\(name).inputRadius")
-            spring.fromValue = current
-            spring.toValue = radius
-            spring.mass = 0.6
-            spring.stiffness = 280
-            spring.damping = 24
-            spring.duration = min(max(spring.settlingDuration, 0.22), 0.4)
-            spring.timingFunction = Motion.ease()
-            layer.add(spring, forKey: "aetherBlurRadius")
+        animateBlurRadius(on: layer, name: name, to: radius, animated: animated)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        filter.setValue(radius, forKey: kCIInputRadiusKey)
+        CATransaction.commit()
+    }
+
+    private func animateBlurRadius(on layer: CALayer, name: String, to radius: CGFloat, animated: Bool) {
+        let filters = (layer.filters as? [CIFilter]) ?? []
+        guard let filter = filters.first(where: { $0.name == name }) else { return }
+        let current = (filter.value(forKey: kCIInputRadiusKey) as? NSNumber)?.doubleValue
+            ?? (layer.presentation()?.value(forKeyPath: "filters.\(name).inputRadius") as? NSNumber)?.doubleValue
+            ?? 0
+        layer.removeAnimation(forKey: "aetherBlurRadius")
+        if animated, !Motion.reduced, abs(current - Double(radius)) > 0.4 {
+            let fade = CABasicAnimation(keyPath: "filters.\(name).inputRadius")
+            fade.fromValue = current
+            fade.toValue = radius
+            fade.duration = GlassFocus.blurDuration
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            fade.fillMode = .forwards
+            layer.add(fade, forKey: "aetherBlurRadius")
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         filter.setValue(radius, forKey: kCIInputRadiusKey)
+        CATransaction.commit()
+    }
+
+    private func removeContentBlur(from layer: CALayer) {
+        guard layer.filters != nil || layer.shouldRasterize else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.removeAnimation(forKey: "aetherBlurRadius")
+        layer.filters = nil
+        layer.shouldRasterize = false
         CATransaction.commit()
     }
 

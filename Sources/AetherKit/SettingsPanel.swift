@@ -522,6 +522,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         form.row("Text:", text)
         form.note("Automatic follows macOS: light text in Dark Mode, dark text in Light Mode.")
         form.row("Glass:", glass)
+        form.note("Clear stays clear when you click away. Regular eases into frost.")
         form.row("Shade:", shade.view, centered: true)
 
         form.section()
@@ -544,7 +545,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         form.section()
         form.row("Unfocused panes:", rest)
         blurLabel = form.row("Blur amount:", blur.view, centered: true)
-        form.note("Dim softens other panes. Blur frosts them by the amount above. As is leaves them alone.")
+        form.note("Dim softens other panes. Blur frosts them by the amount above, with a short fade. Clear glass never frosts. As is leaves them alone.")
         return SettingsPage.scrolling(form)
     }
 

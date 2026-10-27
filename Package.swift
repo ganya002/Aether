@@ -32,7 +32,10 @@ let package = Package(
         ),
         .testTarget(
             name: "AetherTests",
-            dependencies: ["AetherKit"]
+            dependencies: [
+                "AetherKit",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ]
         ),
     ]
 )

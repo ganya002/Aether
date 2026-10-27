@@ -12,6 +12,7 @@ enum Motion {
     static let close: TimeInterval = 0.22
     static let frostIn: TimeInterval = 0.32
     static let frostOut: TimeInterval = 0.36
+    static let blur: TimeInterval = GlassFocus.blurDuration
     static let reveal: TimeInterval = 0.42
 
     /// Reduce Motion is on: crossfade only, and quickly. Callers skip their frame and scale changes.
@@ -90,7 +91,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     init(deskID: String, frame: NSRect) {
         self.deskID = deskID
-        let window = NSWindow(
+        let window = DeskWindow(
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -151,7 +152,11 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         glass.layer?.cornerRadius = settings.cornerRadius
         let frosted = liveResizing || settlingResize || settings.glass == .regular
         glass.style = frosted ? .regular : .clear
+        if let deskWindow = window as? DeskWindow {
+            deskWindow.keepGlassActive = true
+        }
         canvas.layOut(desk: desk, settings: settings, animated: animated && !liveResizing)
+        canvas.setInactiveFrost(window?.isKeyWindow == false, settings: settings)
         let focused = desk.panes[desk.focusedID]
         let title = focused.map { $0.customTitle ?? $0.title } ?? "Aether"
         window?.title = "\(title) — Aether"
@@ -279,6 +284,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         AppModel.shared.noteKey(deskID)
         canvas.refreshFocus()
+        canvas.setInactiveFrost(false, settings: AppModel.shared.settings)
         guard let desk = AppModel.shared.desks[deskID] else { return }
         focusTerminal(desk.focusedID)
         AppModel.shared.scheduleDirectoryRefresh()
@@ -385,6 +391,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         canvas.refreshFocus()
+        canvas.setInactiveFrost(true, settings: AppModel.shared.settings)
         guard isDropdown, Self.dropdownHidesOnFocusLoss else { return }
         // Wait a turn so the new key window is known. Aether's own panels and alerts
         // (palette, settings, confirmations) keep the dropdown open.
@@ -548,13 +555,18 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 final class DeskCanvas: NSView {
     private var dividers: [DividerGrip] = []
     private let veil = ResizeVeil()
+    private let restFrost = RestFrost()
     private let hud = LayoutHUD()
     private var hudToken = 0
     private var layoutGeneration = 0
     private var dimToken = 0
+    private var restFrostVisible = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        restFrost.autoresizingMask = [.width, .height]
+        restFrost.alphaValue = 0
+        addSubview(restFrost)
     }
 
     @available(*, unavailable)
@@ -690,10 +702,31 @@ final class DeskCanvas: NSView {
             }
             oldDividers.forEach { $0.removeFromSuperview() }
         }
+        restFrost.frame = bounds
+        pinFrostToBack()
         if veil.superview === self { addSubview(veil) }
         if hud.superview === self { addSubview(hud) }
         for case let update as UpdateVeil in subviews {
             addSubview(update)
+        }
+    }
+
+    /// Regular glass eases into frost when the window is not key. Clear stays clear.
+    func setInactiveFrost(_ inactive: Bool, settings: Settings) {
+        let show = inactive && GlassFocus.windowFrostsWhenInactive(settings.glass)
+        restFrost.frame = bounds
+        pinFrostToBack()
+        guard show != restFrostVisible else { return }
+        restFrostVisible = show
+        Motion.group(Motion.blur) {
+            self.restFrost.animator().alphaValue = show ? 1 : 0
+        }
+    }
+
+    private func pinFrostToBack() {
+        if restFrost.superview !== self { addSubview(restFrost) }
+        if let other = subviews.first, other !== restFrost {
+            addSubview(restFrost, positioned: .below, relativeTo: other)
         }
     }
 
@@ -848,6 +881,35 @@ final class DragPreview: NSWindow {
     func place(at screenPoint: NSPoint) {
         setFrameOrigin(NSPoint(x: screenPoint.x + 12, y: screenPoint.y - 28))
     }
+}
+
+/// Pins Liquid Glass to its active look so Clear does not slam into frost
+/// when the window is not key. Regular frost is faded in by RestFrost instead.
+final class DeskWindow: NSWindow {
+    var keepGlassActive = true
+
+    @objc(_hasActiveAppearance)
+    func pinnedHasActiveAppearance() -> Bool { keepGlassActive }
+
+    @objc(_hasActiveAppearanceIgnoringKeyFocus)
+    func pinnedHasActiveAppearanceIgnoringKeyFocus() -> Bool { keepGlassActive }
+}
+
+/// Extra frost behind the panes, over the glass. Text stays sharp.
+final class RestFrost: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        material = .hudWindow
+        blendingMode = .behindWindow
+        state = .active
+        alphaValue = 0
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 final class ResizeVeil: NSView {

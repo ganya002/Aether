@@ -78,6 +78,32 @@ public enum FocusRest: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// When the window is not key, and when a pane is not focused.
+enum GlassFocus {
+    /// Fade frost in or out. Long enough to see, short enough to feel instant.
+    static let blurDuration: TimeInterval = 0.26
+
+    /// Clear glass stays liquid when Aether is in the background.
+    static func keepsClearWhenInactive(_ glass: GlassStyle) -> Bool {
+        glass == .clear
+    }
+
+    /// Regular glass eases into frost when the window is not key. Clear never does.
+    static func windowFrostsWhenInactive(_ glass: GlassStyle) -> Bool {
+        glass == .regular
+    }
+
+    /// Content blur on an unfocused pane. Clear glass does not frost, even if Blur is selected.
+    static func paneBlurRadius(focused: Bool, glass: GlassStyle, rest: FocusRest, amount: Double) -> CGFloat {
+        guard !focused, glass != .clear, rest == .blur, amount > 0.01 else { return 0 }
+        return CGFloat(16 + amount * 26)
+    }
+
+    static func blursUnfocusedPane(glass: GlassStyle, rest: FocusRest) -> Bool {
+        glass != .clear && rest == .blur
+    }
+}
+
 /// When closing a terminal, a window, or Aether itself should ask first.
 public enum ConfirmClose: String, Codable, CaseIterable, Sendable {
     case whenBusy
