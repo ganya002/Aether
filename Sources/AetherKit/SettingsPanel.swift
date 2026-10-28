@@ -367,7 +367,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
 
     // Windows
     private let radius = SliderField("Corner radius", min: 8, max: 32, step: 1, format: SettingsFormat.points)
-    private let gap = SliderField("Gap", min: 4, max: 22, step: 1, format: SettingsFormat.points)
+    private let gap = SliderField("Gap", min: 2, max: 22, step: 1, format: SettingsFormat.points)
     private let snap = NSButton(checkboxWithTitle: "Snap windows into place when you let go", target: nil, action: nil)
     private let dropdown = NSButton(checkboxWithTitle: "Enabled", target: nil, action: nil)
     private lazy var dropdownKey = ShortcutButton(action: .dropdown, recorder: recorder)

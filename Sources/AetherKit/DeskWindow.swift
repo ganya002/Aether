@@ -575,16 +575,16 @@ final class DeskCanvas: NSView {
     override var isFlipped: Bool { false }
 
     func contentArea() -> CGRect {
-        let fallback = bounds.insetBy(dx: 8, dy: 8)
+        let fallback = bounds.insetBy(dx: 4, dy: 4)
         guard let window, bounds.height > 120 else { return fallback }
         let layout = convert(window.contentLayoutRect, from: nil)
         // Before the window is on screen this rect is empty. Using it pins the pane
         // to a 40pt strip at the bottom, and the shell starts with no rows.
         guard layout.height > 80, bounds.intersects(layout) else { return fallback }
-        let top = max(8, bounds.maxY - layout.maxY + 4)
-        let height = bounds.height - top - 8
+        let top = max(4, bounds.maxY - layout.maxY + 2)
+        let height = bounds.height - top - 4
         guard height > 80 else { return fallback }
-        return CGRect(x: 8, y: 8, width: max(40, bounds.width - 16), height: height)
+        return CGRect(x: 4, y: 4, width: max(40, bounds.width - 8), height: height)
     }
 
     func layOut(desk: Desk, settings: Settings, animated: Bool) {

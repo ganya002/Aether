@@ -23,7 +23,12 @@ let package = Package(
             dependencies: ["SwiftTermBuildInfoGenerator"]
         ),
         .target(
+            name: "AetherSpawn",
+            path: "Sources/AetherSpawn"
+        ),
+        .target(
             name: "SwiftTerm",
+            dependencies: ["AetherSpawn"],
             path: "Sources/SwiftTerm",
             exclude: ["Mac/README.md", "Apple/Metal/Shaders.metal"],
             plugins: [

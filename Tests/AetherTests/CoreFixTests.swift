@@ -61,7 +61,7 @@ import Testing
     #expect(settings.shade == 0.24)
     #expect(settings.glass == .regular)
     #expect(settings.fontSize == 16)
-    #expect(settings.gap == 10)
+    #expect(settings.gap == 6)
     #expect(settings.snapWindows)
     #expect(settings.confirmClose == .always)
     #expect(settings.optionKey == .characters)
@@ -78,6 +78,7 @@ import Testing
     #expect(settings.warnMultilinePaste)
     #expect(settings.baseFontSize == 13)
     #expect(settings.notifyAfterSeconds == 10)
+    #expect(settings.gap == 6)
 }
 
 @Test func configThatIsNotJSONIsRejected() {

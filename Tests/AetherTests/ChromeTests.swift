@@ -106,6 +106,9 @@ private func launch(_ query: String, recents: [String] = [], hosts: [String] = [
     #expect(parts.title == "zsh")
     #expect(parts.path == "~/proj")
     #expect(PaneHeader.split(caption: "~/proj").title.isEmpty)
+    let git = PaneHeader.split(caption: "Ran git diff   ~/proj · main")
+    #expect(git.title == "Ran git diff")
+    #expect(git.path == "~/proj · main")
 }
 
 @Test func paneStateDecodesWithoutACustomTitle() throws {

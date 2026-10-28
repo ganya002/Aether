@@ -5,6 +5,7 @@
 //  Created by Miguel de Icaza on 3/4/20.
 //
 
+import AetherSpawn
 import Foundation
 #if !os(iOS) && !os(tvOS) && !os(Windows)
 
@@ -102,7 +103,10 @@ public class PseudoTerminalHelpers {
             if let cCurrentDirectory {
                 _ = chdir(cCurrentDirectory)
             }
-            
+            // SETEXEC + disclaim so the shell is responsible for its own TCC
+            // (Local Network, ARP). execve would keep Aether as the responsible
+            // process and macOS would hide the LAN table from `arp`.
+            _ = aether_spawn_replacing(cExecutable, cArgs.base, cEnv.base)
             _ = execve(cExecutable, cArgs.base, cEnv.base)
             _exit(127)
         }

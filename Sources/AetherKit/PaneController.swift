@@ -441,13 +441,13 @@ final class PaneChrome: NSView {
         layer?.shadowOpacity = 0.16
         layer?.shadowRadius = 10
         layer?.shadowOffset = CGSize(width: 0, height: 4)
-        let headerHeight: CGFloat = 34
+        let headerHeight: CGFloat = 26
         header.frame = NSRect(x: 0, y: bounds.height - headerHeight, width: bounds.width, height: headerHeight)
         stage.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - headerHeight))
         let bannerHeight: CGFloat = exitBanner.isHidden ? 0 : 36
-        exitBanner.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: 28)
-        let insetX: CGFloat = 18
-        let insetBottom: CGFloat = 14
+        exitBanner.frame = NSRect(x: 6, y: 6, width: max(0, bounds.width - 12), height: 28)
+        let insetX: CGFloat = 8
+        let insetBottom: CGFloat = 6
         terminal.frame = NSRect(
             x: insetX,
             y: bannerHeight + insetBottom,
@@ -897,18 +897,18 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
 
     /// Everything on the right that the title must stay clear of: the Broadcasting pill and the Cloud note.
     private func rightSide() -> (pill: NSRect?, note: NSRect?, titleRight: CGFloat) {
-        var right = bounds.width - 90
+        var right = bounds.width - 80
         var pill: NSRect?
         if broadcasting {
             let size = Self.pillText.size()
-            let frame = NSRect(x: bounds.width - 92 - size.width - 14, y: 9, width: size.width + 14, height: 16)
+            let frame = NSRect(x: bounds.width - 92 - size.width - 14, y: 5, width: size.width + 14, height: 16)
             pill = frame
             right = frame.minX - 6
         }
         var note: NSRect?
         if !cloudNote.isEmpty {
             let width = min(ceil(noteText(ink: .white).size().width) + 2, max(40, (right - Self.titleX) * 0.45))
-            let frame = NSRect(x: right - width, y: 11, width: width, height: 14)
+            let frame = NSRect(x: right - width, y: 7, width: width, height: 14)
             note = frame
             right = frame.minX - 8
         }
@@ -933,13 +933,13 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
 
     override func layout() {
         super.layout()
-        closeButton.frame = NSRect(x: bounds.width - 36, y: 5, width: 24, height: 24)
-        findButton.frame = NSRect(x: bounds.width - 62, y: 5, width: 24, height: 24)
+        closeButton.frame = NSRect(x: bounds.width - 32, y: 1, width: 24, height: 24)
+        findButton.frame = NSRect(x: bounds.width - 56, y: 1, width: 24, height: 24)
         grip.frame = NSRect(x: 0, y: 0, width: Self.gripWidth, height: bounds.height)
-        let right = min(rightSide().titleRight, bounds.width - 84)
-        titleField.frame = NSRect(x: Self.titleX, y: 7, width: max(0, right - Self.titleX), height: 20)
+        let right = min(rightSide().titleRight, bounds.width - 78)
+        titleField.frame = NSRect(x: Self.titleX, y: 3, width: max(0, right - Self.titleX), height: 20)
         removeAllToolTips()
-        if !activity.isEmpty, activityState != "idle" { addToolTip(NSRect(x: bounds.width - 84, y: 8, width: 19, height: 19), owner: self, userData: nil) }
+        if !activity.isEmpty, activityState != "idle" { addToolTip(NSRect(x: bounds.width - 78, y: 4, width: 19, height: 19), owner: self, userData: nil) }
     }
 
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
@@ -956,7 +956,7 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         dots.setFill()
         for column in 0..<2 {
             for row in 0..<3 {
-                let dot = NSRect(x: 16 + CGFloat(column) * 5, y: 11 + CGFloat(row) * 5, width: 2.4, height: 2.4)
+                let dot = NSRect(x: 16 + CGFloat(column) * 5, y: 6 + CGFloat(row) * 5, width: 2.4, height: 2.4)
                 NSBezierPath(ovalIn: dot).fill()
             }
         }
@@ -969,7 +969,7 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
             default: color = ink.withAlphaComponent(0.92)
             }
             color.setFill()
-            NSBezierPath(ovalIn: NSRect(x: bounds.width - 78, y: 14, width: 7, height: 7)).fill()
+            NSBezierPath(ovalIn: NSRect(x: bounds.width - 72, y: 10, width: 7, height: 7)).fill()
         }
         let side = rightSide()
         if let frame = side.pill {
@@ -1233,6 +1233,7 @@ final class PaneController {
         appliedCursor = PaneController.cursorStyle(settings)
         appliedScrollback = settings.scrollbackLines
         PaneController.watchAccessibility()
+        refreshGit()
         apply(settings)
         chrome.header.setCaption(caption, tone: settings.text.effective)
         chrome.terminal.processDelegate = DelegateBridge.shared
@@ -1245,9 +1246,18 @@ final class PaneController {
 
     var caption: String {
         let path = System.displayPath(cwd)
+        let git = gitBranch.isEmpty ? path : "\(path) · \(gitBranch)"
         let shown = customTitle ?? title
-        if shown.isEmpty { return path }
-        return "\(shown)   \(path)"
+        if shown.isEmpty { return git }
+        return "\(shown)   \(git)"
+    }
+
+    private var gitBranch = ""
+
+    private func refreshGit() {
+        let next = GitStatus.branch(in: cwd) ?? ""
+        guard next != gitBranch else { return }
+        gitBranch = next
     }
 
     var holdsPreview = false
@@ -1655,6 +1665,8 @@ final class PaneController {
     func noteDirectory(_ directory: String) {
         guard !System.sameDirectory(directory, cwd) else { return }
         cwd = directory
+        refreshGit()
+        chrome.header.setCaption(caption, tone: AppModel.shared.settings.text.effective)
         onDirectory?(directory)
     }
 
@@ -1674,7 +1686,11 @@ final class PaneController {
             AppModel.shared.shellCommandStarted(id, line: line)
             setTitle(ShellIntegration.summary(line))
         case .prompt:
-            setTitle(shellState.shell ?? URL(fileURLWithPath: System.userShell()).lastPathComponent)
+            if let last = shellState.lastFinished {
+                setTitle("Ran \(ShellIntegration.summary(last.line))")
+            } else {
+                setTitle(shellState.shell ?? URL(fileURLWithPath: System.userShell()).lastPathComponent)
+            }
         }
     }
 
@@ -1694,6 +1710,7 @@ final class PaneController {
     }
 
     func refreshCaption(tone: TextTone) {
+        refreshGit()
         chrome.header.setCaption(caption, tone: tone)
     }
 

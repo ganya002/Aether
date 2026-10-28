@@ -208,7 +208,7 @@ public struct Settings: Codable, Equatable, Sendable {
         text: TextTone = .light,
         fontSize: Double = 13,
         cornerRadius: Double = 20,
-        gap: Double = 10,
+        gap: Double = 6,
         snapWindows: Bool = true,
         focusRest: FocusRest = .dim,
         blurAmount: Double = 0.55,
@@ -265,7 +265,7 @@ public struct Settings: Codable, Equatable, Sendable {
         text = field(.text, TextTone.light)
         fontSize = field(.fontSize, 13.0)
         cornerRadius = field(.cornerRadius, 20.0)
-        gap = field(.gap, 10.0)
+        gap = field(.gap, 6.0)
         snapWindows = field(.snapWindows, true)
         focusRest = field(.focusRest, FocusRest.dim)
         blurAmount = field(.blurAmount, 0.55)
@@ -306,7 +306,7 @@ public struct Settings: Codable, Equatable, Sendable {
         baseFontSize = Layout.clamp(baseFontSize, 10, 24)
         notifyAfterSeconds = max(0, notifyAfterSeconds.isFinite ? notifyAfterSeconds : 10)
         cornerRadius = Layout.clamp(cornerRadius, 8, 32)
-        gap = Layout.clamp(gap, 4, 22)
+        gap = Layout.clamp(gap, 2, 22)
         minimumContrast = Layout.clamp(minimumContrast, 0, 1)
         lineHeight = Layout.clamp(lineHeight, 0.8, 2.0)
         scrollbackLines = min(max(scrollbackLines, 0), 1_000_000)

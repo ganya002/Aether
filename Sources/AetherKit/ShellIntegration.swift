@@ -199,6 +199,8 @@ struct CommandTracker: Equatable, Sendable {
     private(set) var active = false
     private(set) var shell: String?
     private(set) var running: Running?
+    /// The command that last finished, kept so the header can say "Ran git diff".
+    private(set) var lastFinished: FinishedCommand?
 
     /// Returns the command that just ended, if this event ended one.
     mutating func apply(_ event: ShellEvent, at date: Date) -> FinishedCommand? {
@@ -217,7 +219,9 @@ struct CommandTracker: Equatable, Sendable {
             if let shell, !shell.isEmpty { self.shell = shell }
             guard let running else { return nil }
             self.running = nil
-            return FinishedCommand(line: running.line, started: running.started, elapsed: max(0, date.timeIntervalSince(running.started)), exitCode: exit)
+            let finished = FinishedCommand(line: running.line, started: running.started, elapsed: max(0, date.timeIntervalSince(running.started)), exitCode: exit)
+            lastFinished = finished
+            return finished
         }
     }
 }
