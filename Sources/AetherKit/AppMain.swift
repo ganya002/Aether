@@ -321,8 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
              .focusLeft, .focusRight, .focusUp, .focusDown, .growLeft, .growRight, .growUp, .growDown,
              .renamePane, .restartPane, .find, .insertPath:
             return desk != nil
-        case .previousPane, .nextPane, .swapNext, .movePaneToWindow:
+        case .previousPane, .nextPane, .swapNext:
             return model.keyPaneOrder.count > 1
+        case .movePaneToWindow:
+            return model.keyPaneOrder.count > 1 || (desk.flatMap { model.desks[$0]?.tabs.count } ?? 0) > 1
         case .nextTab, .previousTab:
             return (desk.flatMap { model.desks[$0]?.tabs.count } ?? 0) > 1
         case .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9:

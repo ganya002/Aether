@@ -411,6 +411,29 @@ final class AppModel {
         scheduleSave()
     }
 
+    /// The tab on screen has been seen, however it got there.
+    func noteTabShown(_ tabID: String) {
+        unseenFinishes[tabID] = nil
+    }
+
+    /// Closes every tab but `tabID`, asking once about everything still running in them.
+    func closeOtherTabs(keeping tabID: String, in deskID: String, confirm: Bool = true) {
+        guard let desk = desks[deskID], desk.tabs.contains(where: { $0.id == tabID }) else { return }
+        let others = desk.tabs.filter { $0.id != tabID }
+        guard !others.isEmpty else { return }
+        let ids = others.flatMap { Layout.visualIDs($0.layout) }
+        if confirm, let question = closeQuestion(for: ids.compactMap { panes[$0] }, window: false) {
+            ask(question, confirmTitle: "Close", key: "others-\(tabID)", window: controllers[deskID]?.window) { [weak self] in
+                self?.closeOtherTabs(keeping: tabID, in: deskID, confirm: false)
+            }
+            return
+        }
+        selectTab(tabID, in: deskID)
+        for tab in others {
+            closeTab(tab.id, in: deskID, confirm: false)
+        }
+    }
+
     func cycleTab(by delta: Int) {
         guard let deskID = keyDeskID, let desk = desks[deskID], desk.tabs.count > 1 else { return }
         let count = desk.tabs.count
@@ -1049,7 +1072,7 @@ final class AppModel {
     func moveToNewWindow(_ paneID: String? = nil) {
         guard let deskID = paneID.flatMap({ deskID(containing: $0) }) ?? keyDeskID, let desk = desks[deskID] else { return }
         let source = paneID ?? desk.focusedID
-        guard !desk.dropdown, Layout.count(desk.layout) > 1 else {
+        guard !desk.dropdown, Layout.count(desk.layout) > 1 || desk.tabs.count > 1 else {
             NSSound.beep()
             controllers[deskID]?.flashLayout("This terminal already has its own window")
             return
@@ -1119,15 +1142,19 @@ final class AppModel {
         source.panes[paneID] = nil
         if source.maximizedID == paneID { source.maximizedID = nil }
         let removed = Layout.remove(source.layout, paneID)
+        // The source window closes only when this was its last terminal in its last tab.
+        var closeSource = false
         if let removed {
             source.layout = removed
+            source.kind = .splits
             if source.focusedID == paneID { source.focusedID = removed.panes[0] }
-            desks[sourceID] = source
+        } else if source.tabs.count > 1, let tabIndex = source.indexOfTab(containing: paneID) {
+            source.tabs.remove(at: tabIndex)
+            unseenFinishes[source.activeTabID] = nil
+            source.activeTabID = source.tabs[min(tabIndex, source.tabs.count - 1)].id
         } else {
-            source.panes = [:]
-            desks[sourceID] = source
+            closeSource = true
         }
-        source.kind = .splits
         target.kind = .splits
         target.layout = Layout.insert(target.layout, target: targetID, zone: zone, newID: paneID)
         target.panes[paneID] = record
@@ -1136,7 +1163,7 @@ final class AppModel {
         desks[sourceID] = source
         desks[targetDeskID] = target
         controllers[targetDeskID]?.sync(animated: true)
-        if removed == nil {
+        if closeSource {
             closeDesk(sourceID)
         } else {
             controllers[sourceID]?.sync(animated: true)

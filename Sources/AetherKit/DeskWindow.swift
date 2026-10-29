@@ -175,6 +175,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     func reloadTabs() {
         guard let desk = AppModel.shared.desks[deskID] else { return }
+        AppModel.shared.noteTabShown(desk.activeTabID)
         // The dropdown has no traffic lights or tabs, so it gets the short titlebar.
         if desk.dropdown, window?.toolbar != nil {
             window?.toolbar = nil
@@ -636,7 +637,9 @@ final class DeskCanvas: NSView {
         // Switching tabs slides the old layout out and the new one in from the side the tab sits on.
         var slide: CGFloat = 0
         if let shown = shownTab, shown.id != desk.activeTabID, animated, !Motion.reduced {
-            slide = min(56, bounds.width * 0.05) * (desk.activeIndex >= shown.index ? 1 : -1)
+            // Look the old tab up again: dragging tabs may have moved it since it was shown.
+            let was = desk.tabs.firstIndex { $0.id == shown.id } ?? shown.index
+            slide = min(56, bounds.width * 0.05) * (desk.activeIndex >= was ? 1 : -1)
         }
         shownTab = (desk.activeTabID, desk.activeIndex)
 

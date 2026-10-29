@@ -136,12 +136,8 @@ final class WorkspaceTabStrip: NSView {
             WorkspaceTabStrip.rename(tab: id, in: self.deskID)
         }
         chip.onCloseOthers = { [weak self] id in
-            guard let self, let desk = AppModel.shared.desks[self.deskID] else { return }
-            AppModel.shared.selectTab(id, in: self.deskID)
-            // One at a time, so each asks before closing something that is still running.
-            for tab in desk.tabs where tab.id != id {
-                AppModel.shared.closeTab(tab.id, in: self.deskID)
-            }
+            guard let self else { return }
+            AppModel.shared.closeOtherTabs(keeping: id, in: self.deskID)
         }
         chip.onHover = { [weak self] in self?.refreshSeparators() }
         chip.onDrag = { [weak self] chip, event, phase in self?.track(chip, event, phase) }
@@ -711,8 +707,10 @@ final class WorkspaceTabChip: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            onRename?(item.id)
+        // A second click renames. Third and later clicks of the same burst do nothing,
+        // so they never start a drag that the matching mouse-up would not end.
+        if event.clickCount >= 2 {
+            if event.clickCount == 2 { onRename?(item.id) }
             return
         }
         let local = convert(event.locationInWindow, from: nil)
