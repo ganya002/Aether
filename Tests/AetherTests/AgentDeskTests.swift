@@ -295,3 +295,112 @@ private func desk(_ id: String, _ panes: [String], focused: String) -> Desk {
         #expect(port.rawValue == 17391)
     }
 }
+
+@Suite struct AgentSkillsNoteTests {
+    @Test func noteKeepsTheRestOfTheFile() {
+        let mine = "# My rules\n\nBe brief.\n"
+        let once = AgentSkills.withNote(mine)
+        #expect(once.hasPrefix(mine))
+        #expect(once.contains(AgentSkills.blockStart) && once.contains(AgentSkills.blockEnd))
+        #expect(AgentSkills.withNote(once) == once)
+        let edited = once + "\nMore of my own.\n"
+        let updated = AgentSkills.withNote(edited, note: "\(AgentSkills.blockStart)\nnew\n\(AgentSkills.blockEnd)")
+        #expect(updated == mine + "\n\(AgentSkills.blockStart)\nnew\n\(AgentSkills.blockEnd)\n\nMore of my own.\n")
+    }
+
+    @Test func noteReplacesTheOlderUnclosedBlock() {
+        let old = "Mine.\n\n\(AgentSkills.blockStart)\nOld Aether paragraph.\n\nAlso mine.\n"
+        let next = AgentSkills.withNote(old, note: "NOTE")
+        #expect(next == "Mine.\n\nNOTE\n\nAlso mine.\n")
+    }
+
+    @Test func settingsThatAreNotJSONAreLeftAlone() {
+        #expect(AgentSkills.mergeClaudeSettings(Data("{ // comment\n}".utf8), command: "x") == nil)
+        #expect(AgentSkills.mergeClaudeSettings(Data("".utf8), command: "x") != nil)
+    }
+
+    @Test func codexHooksUseTheNestedShapeAndDropTheFlatOne() throws {
+        let flat = #"{"hooks":{"SessionStart":[{"type":"command","command":"old # aether hook"},{"hooks":[{"type":"command","command":"orca"}]}]}}"#
+        let merged = try #require(AgentSkills.mergeCodexHooks(Data(flat.utf8), command: AgentSkills.hookCommand()))
+        let json = try JSONSerialization.jsonObject(with: merged) as? [String: Any]
+        let session = ((json?["hooks"] as? [String: Any])?["SessionStart"] as? [[String: Any]]) ?? []
+        #expect(session.count == 2)
+        #expect(session.allSatisfy { $0["hooks"] != nil })
+    }
+
+    @Test func installWritesTheBlockIntoCodexAndOpenCodeRules() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("aether-notes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".codex"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".config/opencode"), withIntermediateDirectories: true)
+        try "Keep me.\n".write(to: home.appendingPathComponent(".codex/AGENTS.md"), atomically: true, encoding: .utf8)
+        AgentSkills.install(skill: "s\n", agents: "a\n", home: home, env: [:], path: "/nonexistent")
+        let codex = try String(contentsOf: home.appendingPathComponent(".codex/AGENTS.md"), encoding: .utf8)
+        let opencode = try String(contentsOf: home.appendingPathComponent(".config/opencode/AGENTS.md"), encoding: .utf8)
+        #expect(codex.hasPrefix("Keep me.\n") && codex.contains(AgentSkills.blockEnd))
+        #expect(opencode.contains(AgentSkills.blockStart))
+        #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".gemini").path))
+    }
+}
+
+@Suite struct AgentMCPTests {
+    /// MCP's stdio transport is newline-delimited JSON-RPC on stdin, so stdin must not hold the program.
+    @Test func speaksMCPOverStdio() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let process = Process()
+        process.executableURL = root.appendingPathComponent("scripts/aether")
+        process.arguments = ["mcp"]
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = Pipe()
+        var env = ProcessInfo.processInfo.environment
+        env["AETHER_AGENT_PLIST"] = "/tmp/aether-missing-agent.plist"
+        env["AETHER_PANE"] = ""
+        process.environment = env
+        try process.run()
+        let lines = [
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+            #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"args":["50BBAE3B"]}}}"#,
+        ]
+        input.fileHandleForWriting.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let replies = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .split(separator: "\n")
+            .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        #expect(replies.map { $0["id"] as? Int } == [1, 2, 3])
+        let initialize = replies.first?["result"] as? [String: Any]
+        #expect(initialize?["protocolVersion"] as? String == "2025-06-18")
+        let tools = ((replies.dropFirst().first?["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
+        #expect(tools.contains { $0["name"] as? String == "run" })
+        let call = replies.last?["result"] as? [String: Any]
+        #expect(call?["isError"] as? Bool == true)
+        let text = ((call?["content"] as? [[String: Any]])?.first?["text"] as? String) ?? ""
+        #expect(text.contains("Aether is not running"))
+    }
+}
+
+@Suite struct AgentControlExtrasTests {
+    @Test func resizeMovesTheEdgeItNames() {
+        let tree = LayoutNode.split(id: "s", axis: .row, ratio: 0.5, a: .pane("left"), b: .pane("right"))
+        #expect(Layout.ratio(of: "s", in: Layout.resize(tree, pane: "left", edge: .right, by: 0.1)) == 0.6)
+        #expect(Layout.ratio(of: "s", in: Layout.resize(tree, pane: "right", edge: .left, by: 0.1)) == 0.4)
+        #expect(Layout.ratio(of: "s", in: Layout.resize(tree, pane: "right", edge: .left, by: -0.1)) == 0.6)
+        #expect(Layout.resize(tree, pane: "left", edge: .left, by: 0.1) == tree)
+        #expect(Layout.resize(tree, pane: "left", edge: .down, by: 0.1) == tree)
+    }
+
+    @MainActor @Test func settingsAreTypedLikeTheValueTheyReplace() throws {
+        let base = Settings()
+        #expect(AppModel.setting(base, key: "fontSize", value: "15")?.fontSize == 15)
+        #expect(AppModel.setting(base, key: "cursorBlink", value: "on")?.cursorBlink == true)
+        #expect(AppModel.setting(base, key: "glass", value: "clear")?.glass == .clear)
+        #expect(AppModel.setting(base, key: "glass", value: "bogus") == nil)
+        #expect(AppModel.setting(base, key: "fontSize", value: "big") == nil)
+        #expect(!AppModel.agentSettingKeys.contains("sessionToken"))
+    }
+}

@@ -418,6 +418,17 @@ public enum Layout {
         findSplit(node, splitID)
     }
 
+    /// Moves the pane's `edge` outward by `delta` (inward when negative), at the nearest divider on that side.
+    /// Returns the layout unchanged when the pane has no divider there.
+    public static func resize(_ node: LayoutNode, pane: String, edge: Direction, by delta: Double) -> LayoutNode {
+        let axis: Axis = (edge == .left || edge == .right) ? .row : .col
+        let side: Side = (edge == .right || edge == .down) ? .a : .b
+        guard let path = path(of: pane, in: node),
+              let step = path.last(where: { $0.axis == axis && $0.side == side }),
+              let current = findSplit(node, step.id) else { return node }
+        return setRatio(node, splitID: step.id, ratio: current + (side == .a ? delta : -delta))
+    }
+
     public static func nudge(_ node: LayoutNode, pane: String, direction: Direction, delta: Double = 0.04) -> LayoutNode {
         guard let path = path(of: pane, in: node) else { return node }
         let want: Axis = (direction == .left || direction == .right) ? .row : .col

@@ -23,7 +23,7 @@ aether run --pane "$id" -- echo done
 aether close "$id"
 ```
 
-`aether run -- make test` is the one-shot form: new tab, stream output, exit with the command's status. Ctrl-C on `aether run` sends ctrl+c into the pane. `--pane` is required to type into an existing pane; `$AETHER_PANE` is not enough.
+`aether run -- make test` is the one-shot form: new pane, stream output, exit with the command's status, close the pane (`--keep` leaves it). Ctrl-C on `aether run` sends ctrl+c into the pane. `--pane` is required to type into an existing pane; `$AETHER_PANE` is not enough.
 
 ## Commands
 
@@ -38,6 +38,12 @@ aether close "$id"
 | `view` / `windows` / `find` | Discover panes. |
 | `title` / `status` / `notify` | Label and signal. |
 | `move` / `order` | Reorder panes in a window. |
+| `resize` / `layout` / `equalize` | Size panes and arrange a window. |
+| `window` | Size, move, zoom, or full-screen a window. |
+| `focus` | Move the keyboard into a pane. |
+| `tabs` / `tab-select` / `tab-rename` / `tab-move` / `tab-close` | Tab groups. |
+| `set` | Theme, glass, font size, and other safe settings. |
+| `imgcat` | Draw an image inline (kitty graphics and sixel work too). |
 | `close` | Close a pane you opened. |
 | `screenshot` | PNG of a pane. |
 | `mcp` | MCP stdio, one tool per command. |

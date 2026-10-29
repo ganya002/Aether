@@ -14,6 +14,8 @@ enum AgentSkills {
         var hookFile: URL?
         var hookKind: HookKind?
         var rulesFile: URL?
+        /// A shared instructions file the agent reads globally. Aether owns only its managed block.
+        var notesFile: URL? = nil
     }
 
     enum HookKind: Equatable {
@@ -59,7 +61,7 @@ enum AgentSkills {
         }
         let agents = dir("AGENTS_HOME", ".agents")
         let codex = dir("CODEX_HOME", ".codex")
-        let opencode = dir("OPENCODE_CONFIG_DIR", ".opencode")
+        let opencode = dir("OPENCODE_CONFIG_DIR", ".config/opencode")
         let gemini = dir("GEMINI_CONFIG_DIR", ".gemini")
         if FileManager.default.fileExists(atPath: agents.path) || hasBinary("pi") {
             list.append(Target(
@@ -78,7 +80,8 @@ enum AgentSkills {
                 skillDir: codex.appendingPathComponent("skills/aether"),
                 hookFile: codex.appendingPathComponent("hooks.json"),
                 hookKind: .codexHooks,
-                rulesFile: nil
+                rulesFile: nil,
+                notesFile: codex.appendingPathComponent("AGENTS.md")
             ))
         }
         if FileManager.default.fileExists(atPath: opencode.path) || hasBinary("opencode") {
@@ -88,7 +91,8 @@ enum AgentSkills {
                 skillDir: opencode.appendingPathComponent("skills/aether"),
                 hookFile: nil,
                 hookKind: nil,
-                rulesFile: nil
+                rulesFile: nil,
+                notesFile: opencode.appendingPathComponent("AGENTS.md")
             ))
         }
         if FileManager.default.fileExists(atPath: gemini.path) || hasBinary("gemini") {
@@ -98,18 +102,28 @@ enum AgentSkills {
                 skillDir: gemini.appendingPathComponent("skills/aether"),
                 hookFile: nil,
                 hookKind: nil,
-                rulesFile: gemini.appendingPathComponent("GEMINI.md")
+                rulesFile: nil,
+                notesFile: gemini.appendingPathComponent("GEMINI.md")
             ))
         }
         return list
     }
 
-    static func hookCommand(binary: URL) -> String {
-        "\"\(binary.path)\" hook # \(marker)"
+    /// Runs the CLI of whichever Aether (or Aether Dev) owns the pane, and does nothing elsewhere,
+    /// so a session outside Aether never sees an error from it.
+    static func hookCommand() -> String {
+        "[ -z \"$AETHER_PANE\" ] || \"${AETHER_AGENT_PLIST%/*}/bin/aether\" hook 2>/dev/null || true # \(marker)"
     }
 
-    static func mergeClaudeSettings(_ json: Data, command: String) -> Data {
-        var root = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] ?? [:]
+    /// The settings as a JSON object, or nil when the file holds something else, which is then left alone.
+    private static func object(_ json: Data) -> [String: Any]? {
+        if json.allSatisfy({ $0 == 32 || $0 == 9 || $0 == 10 || $0 == 13 }) { return [:] }
+        return (try? JSONSerialization.jsonObject(with: json)) as? [String: Any]
+    }
+
+    /// Adds the SessionStart hook once. Claude Code and Codex share this hooks.json shape.
+    static func mergeClaudeSettings(_ json: Data, command: String) -> Data? {
+        guard var root = object(json) else { return nil }
         var hooks = root["hooks"] as? [String: Any] ?? [:]
         var session = hooks["SessionStart"] as? [[String: Any]] ?? []
         session = session.filter { group in
@@ -128,25 +142,8 @@ enum AgentSkills {
         return (try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])) ?? json
     }
 
-    static func mergeCodexHooks(_ json: Data, command: String) -> Data {
-        var root = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] ?? [:]
-        if var hooks = root["hooks"] as? [String: Any] {
-            var session = hooks["SessionStart"] as? [[String: Any]] ?? []
-            session = session.filter { !(($0["command"] as? String)?.contains(marker) == true) }
-            session.append(["type": "command", "command": command])
-            hooks["SessionStart"] = session
-            root["hooks"] = hooks
-        } else {
-            var session = root["SessionStart"] as? [[String: Any]] ?? []
-            session = session.filter { !(($0["command"] as? String)?.contains(marker) == true) }
-            session.append(["type": "command", "command": command])
-            if root["hooks"] == nil, root["SessionStart"] != nil {
-                root["SessionStart"] = session
-            } else {
-                root["hooks"] = ["SessionStart": session]
-            }
-        }
-        return (try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])) ?? json
+    static func mergeCodexHooks(_ json: Data, command: String) -> Data? {
+        mergeClaudeSettings(json, command: command)
     }
 
     static func cursorRule() -> String {
@@ -161,24 +158,44 @@ enum AgentSkills {
         """
     }
 
-    static func geminiNote() -> String {
+    static let blockStart = "<!-- \(managed) -->"
+    static let blockEnd = "<!-- /\(managed) -->"
+
+    static func note() -> String {
         """
-        <!-- \(managed) -->
-        If `$AETHER_PANE` or `$AETHER` is set, you are inside Aether. Use the `aether` CLI to control this terminal. `aether workspace` opens a tab group. Run `aether help`.
+        \(blockStart)
+        ## Aether terminal
+        If `$AETHER_PANE` is set, you are running inside Aether, a macOS terminal you drive with the `aether` CLI (already on PATH). `aether split`, `aether tab`, and `aether workspace` open panes; `aether run -- make test` runs a command and exits with its status; `aether send <id> --keys ctrl+c` types into a pane; `aether wait <id> --until-idle` waits for its prompt; `aether read <id>` prints its screen; `aether view` lists panes. Run `aether help` for the rest. Do not guess tmux, iTerm, or Terminal.app keystrokes.
+        \(blockEnd)
         """
+    }
+
+    /// `text` with Aether's block replaced, or appended when it has none. Everything else stays as it was.
+    static func withNote(_ text: String, note: String = note()) -> String {
+        if let start = text.range(of: blockStart) {
+            let end: String.Index
+            if let close = text.range(of: blockEnd, range: start.upperBound..<text.endIndex) {
+                end = close.upperBound
+            } else {
+                // An older Aether wrote the marker and one paragraph, without a closing marker.
+                end = text.range(of: "\n\n", range: start.upperBound..<text.endIndex)?.lowerBound ?? text.endIndex
+            }
+            return text.replacingCharacters(in: start.lowerBound..<end, with: note)
+        }
+        if text.isEmpty { return note + "\n" }
+        return text + (text.hasSuffix("\n") ? "\n" : "\n\n") + note + "\n"
     }
 
     @discardableResult
     static func install(
         skill: String,
         agents: String,
-        binary: URL,
         home: URL,
         env: [String: String],
         path: String,
         fileManager: FileManager = .default
     ) -> [String] {
-        let command = hookCommand(binary: binary)
+        let command = hookCommand()
         var done: [String] = []
         for target in targets(home: home, env: env, path: path) {
             do {
@@ -189,11 +206,21 @@ enum AgentSkills {
                     try fileManager.createDirectory(at: hookFile.deletingLastPathComponent(), withIntermediateDirectories: true)
                     let existing = (try? Data(contentsOf: hookFile)) ?? Data("{}".utf8)
                     let merged = kind == .claudeSettings ? mergeClaudeSettings(existing, command: command) : mergeCodexHooks(existing, command: command)
-                    try merged.write(to: hookFile, options: .atomic)
+                    if let merged, merged != existing {
+                        try merged.write(to: hookFile, options: .atomic)
+                    }
+                }
+                if let notes = target.notesFile,
+                   let current = fileManager.fileExists(atPath: notes.path) ? try? String(contentsOf: notes, encoding: .utf8) : "" {
+                    let next = withNote(current)
+                    if next != current {
+                        try fileManager.createDirectory(at: notes.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try next.write(to: notes, atomically: true, encoding: .utf8)
+                    }
                 }
                 if let rules = target.rulesFile {
                     try fileManager.createDirectory(at: rules.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    let text = target.name == "Gemini CLI" ? geminiNote() : cursorRule()
+                    let text = cursorRule()
                     if fileManager.fileExists(atPath: rules.path) {
                         let current = (try? String(contentsOf: rules, encoding: .utf8)) ?? ""
                         if current.contains(managed) {

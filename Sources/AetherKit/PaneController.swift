@@ -1402,6 +1402,40 @@ final class PaneController {
         return term.getText(start: Position(col: 0, row: 0), end: end)
     }
 
+    /// Text from absolute row `since` on, with soft-wrapped rows joined, so a caller can stream output
+    /// without repeats. Stops before the cursor's row, which may still grow, unless `final`.
+    /// With `toPrompt`, also stops at the last prompt the shell marked, so the prompt is left out.
+    /// `next` is where the following call should start; `cursor` is the cursor's absolute row.
+    /// With `skipWrapped`, rows that continue the row above `since` (a long command line) are left out.
+    func transcript(since: Int?, final: Bool, toPrompt: Bool = false, skipWrapped: Bool = false) -> (text: String, next: Int, cursor: Int) {
+        let term: Terminal = chrome.terminal.terminal
+        let top = term.buffer.totalLinesTrimmed
+        var end = top
+        // ponytail: walks the whole scrollback each call; keep a count if reads get hot.
+        while term.getScrollInvariantLine(row: end) != nil { end += 1 }
+        let cursor = end - term.rows + term.getCursorLocation().y
+        var start = max(since ?? cursor, top)
+        while skipWrapped, start < cursor, term.getScrollInvariantLine(row: start)?.isWrapped == true { start += 1 }
+        var stop = final ? end : cursor
+        if toPrompt, let prompt = chrome.terminal.promptRows().last.map({ $0 + top }), prompt >= start {
+            stop = min(stop, prompt)
+        }
+        if final || toPrompt {
+            while stop > start, term.getScrollInvariantLine(row: stop - 1)?.translateToString(trimRight: true).isEmpty != false {
+                stop -= 1
+            }
+        }
+        guard start < stop else { return ("", start, cursor) }
+        var text = ""
+        for row in start..<stop {
+            guard let line = term.getScrollInvariantLine(row: row) else { break }
+            let wraps = term.getScrollInvariantLine(row: row + 1)?.isWrapped ?? false
+            text += line.translateToString(trimRight: !wraps, skipNullCellsFollowingWide: true)
+            if !wraps || row == stop - 1 && (final || toPrompt) { text += "\n" }
+        }
+        return (text, stop, cursor)
+    }
+
     func inject(_ bytes: [UInt8]) {
         chrome.terminal.send(source: chrome.terminal, data: bytes[...])
     }
@@ -1441,7 +1475,23 @@ final class PaneController {
         guard bounds.width > 1, bounds.height > 1,
               let rep = chrome.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
         chrome.cacheDisplay(in: bounds, to: rep)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        // The pane is see-through and the glass behind it does not render offscreen,
+        // so lay it on the theme's own background, or the text lands on nothing.
+        guard let canvas = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: rep.pixelsWide, pixelsHigh: rep.pixelsHigh,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: canvas) else { return nil }
+        // The context draws in pixels; the PNG keeps the screen's point size.
+        let pixels = NSRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        veil.withAlphaComponent(1).setFill()
+        pixels.fill()
+        rep.draw(in: pixels, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        canvas.size = rep.size
+        guard let png = canvas.representation(using: .png, properties: [:]) else { return nil }
         let dest: URL
         if let path, !path.isEmpty {
             dest = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)

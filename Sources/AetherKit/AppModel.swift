@@ -399,6 +399,16 @@ final class AppModel {
         scheduleSave()
     }
 
+    func moveTab(_ tabID: String, to index: Int, in deskID: String) {
+        guard var desk = desks[deskID], let from = desk.tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let tab = desk.tabs.remove(at: from)
+        desk.tabs.insert(tab, at: min(max(0, index), desk.tabs.count))
+        guard desk.tabs.map(\.id) != desks[deskID]?.tabs.map(\.id) else { return }
+        desks[deskID] = desk
+        controllers[deskID]?.reloadTabs()
+        scheduleSave()
+    }
+
     func cycleTab(by delta: Int) {
         guard let deskID = keyDeskID, let desk = desks[deskID], desk.tabs.count > 1 else { return }
         let count = desk.tabs.count
@@ -706,8 +716,8 @@ final class AppModel {
         controllers[deskID]?.sync(animated: true)
     }
 
-    func equalize() {
-        guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
+    func equalize(in deskID: String? = nil) {
+        guard let deskID = deskID ?? keyDeskID, var desk = desks[deskID] else { return }
         desk.layout = Layout.equalize(desk.layout)
         desk.maximizedID = nil
         desks[deskID] = desk
@@ -724,8 +734,8 @@ final class AppModel {
         keyDeskID.flatMap { desks[$0]?.kind }
     }
 
-    func arrange(_ kind: LayoutKind) {
-        guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
+    func arrange(_ kind: LayoutKind, in deskID: String? = nil) {
+        guard let deskID = deskID ?? keyDeskID, var desk = desks[deskID] else { return }
         desk.kind = kind
         var ids = Layout.visualIDs(desk.layout)
         if let index = ids.firstIndex(of: desk.focusedID) {
@@ -740,8 +750,8 @@ final class AppModel {
         scheduleSave()
     }
 
-    func cycleLayout(by delta: Int) {
-        guard let deskID = keyDeskID, var desk = desks[deskID] else { return }
+    func cycleLayout(by delta: Int, in deskID: String? = nil) {
+        guard let deskID = deskID ?? keyDeskID, var desk = desks[deskID] else { return }
         desk.kind = desk.kind.stepped(delta)
         var ids = Layout.visualIDs(desk.layout)
         if let index = ids.firstIndex(of: desk.focusedID) {
@@ -1631,7 +1641,16 @@ extension AppModel {
             switch resolved {
             case .success(let target):
                 guard let pane = openAgentPane(beside: target, zone: zone, command: command, focus: bool(body["focus"], false), share: share(body["ratio"])) else {
-                    return failure("No room for another pane there. Make the window bigger, or close a pane.")
+                    // A full tab group should not stop `aether tab` or `aether run`: start a new group instead.
+                    guard zone == nil, desks[target.desk]?.dropdown != true else {
+                        return failure("No room for another pane there. Make the window bigger, or close a pane.")
+                    }
+                    let previous = desks[target.desk]?.activeTabID
+                    newTab(in: target.desk, command: command, name: body["title"] as? String)
+                    guard let tab = desks[target.desk]?.tabs.last, tab.id != previous else { return failure("Could not open a tab.") }
+                    if !bool(body["focus"], false), let previous { selectTab(previous, in: target.desk) }
+                    AgentDesk.shared.openedBy[tab.focusedID] = target.explicit ? target.pane : ""
+                    return ["ok": true, "pane": tab.focusedID, "tab": tab.id]
                 }
                 applyAgentTitle(pane, body["title"] as? String)
                 return ["ok": true, "pane": pane]
@@ -1671,8 +1690,12 @@ extension AppModel {
             return ["ok": true, "pane": target.pane, "zoomed": desk.maximizedID != nil]
         case "/read":
             guard case .success(let target) = resolved, let pane = panes[target.pane] else { return failure(resolved) }
+            if body["since"] != nil {
+                let part = pane.transcript(since: int(body["since"]), final: bool(body["final"], false), toPrompt: bool(body["prompt"], false), skipWrapped: bool(body["skip"], false))
+                return ["ok": true, "pane": target.pane, "text": part.text, "next": part.next, "cursor": part.cursor]
+            }
             if let count = int(body["lines"]), count > 0 {
-                let dump = String(decoding: pane.chrome.terminal.terminal.getBufferAsData(), as: UTF8.self)
+                let dump = pane.transcript(since: 0, final: true).text
                 return ["ok": true, "pane": target.pane, "text": AgentArgs.tail(dump, lines: min(count, 100_000))]
             }
             return ["ok": true, "pane": target.pane, "text": pane.screenText()]
@@ -1759,20 +1782,176 @@ extension AppModel {
             FinishNotifier.deliver(title: title, body: message, pane: source?.pane ?? "")
             return ["ok": true]
         case "/close":
-            guard case .success(let caller) = resolved, caller.explicit else {
-                return failure("Run this from the pane that opened it, or pass --pane.")
+            // A caller outside Aether names no pane of its own; it owns what it opened from outside, as "".
+            var caller = ""
+            if case .success(let target) = resolved, target.explicit { caller = target.pane }
+            guard case .success(let victim) = AgentArgs.resolvePane(body["target"] as? String ?? "", desks: desks) else {
+                return failure("No pane \(body["target"] as? String ?? "").")
             }
-            let victim = body["target"] as? String ?? ""
-            guard deskID(containing: victim) != nil else { return failure("No pane \(victim).") }
-            guard AgentDesk.shared.openedBy[victim] == caller.pane else {
+            guard AgentDesk.shared.openedBy[victim] == caller else {
                 return failure("You can only close panes you opened.")
             }
             AgentDesk.shared.openedBy[victim] = nil
             closePane(victim, confirm: false)
             return ["ok": true, "pane": victim]
+        case "/resize":
+            guard case .success(let target) = resolved, var desk = desks[target.desk],
+                  let tabIndex = desk.indexOfTab(containing: target.pane) else { return failure(resolved) }
+            guard let edge = (body["edge"] as? String).flatMap(Direction.init(rawValue:)) else {
+                return failure("Say which edge: left, right, up, or down.")
+            }
+            let by = (number(body["by"]) ?? 5) / 100
+            let before = desk.tabs[tabIndex].layout
+            let next = Layout.resize(before, pane: target.pane, edge: edge, by: by)
+            guard next != before else { return failure("That pane has no divider on its \(edge.rawValue) edge.") }
+            desk.tabs[tabIndex].layout = next
+            desk.maximizedID = nil
+            desks[target.desk] = desk
+            controllers[target.desk]?.sync(animated: true)
+            scheduleSave()
+            return ["ok": true, "pane": target.pane]
+        case "/layout":
+            guard case .success(let target) = resolved else { return failure(resolved) }
+            let raw = (body["layout"] as? String ?? "").lowercased()
+            switch raw {
+            case "next": cycleLayout(by: 1, in: target.desk)
+            case "prev", "previous": cycleLayout(by: -1, in: target.desk)
+            case "equalize", "equal": equalize(in: target.desk)
+            default:
+                guard let kind = LayoutKind(rawValue: raw), LayoutKind.cycle.contains(kind) else {
+                    return failure("Use tall, fat, grid, columns, rows, stack, next, prev, or equalize.")
+                }
+                arrange(kind, in: target.desk)
+            }
+            return ["ok": true, "window": target.desk, "layout": desks[target.desk]?.kind.rawValue ?? ""]
+        case "/focus":
+            guard case .success(let target) = resolved, target.explicit else { return failure("Say which pane to focus.") }
+            focus(pane: target.pane)
+            controllers[target.desk]?.window?.makeKeyAndOrderFront(nil)
+            return ["ok": true, "pane": target.pane]
+        case "/window":
+            guard case .success(let target) = resolved, let window = controllers[target.desk]?.window else { return failure(resolved) }
+            // Points from the top-left of the main screen, as people read a screen.
+            let top = NSScreen.screens.first?.frame.maxY ?? window.frame.maxY
+            var frame = window.frame
+            if let width = number(body["width"]), let height = number(body["height"]) {
+                frame.origin.y += frame.height - height
+                frame.size = CGSize(width: max(width, 200), height: max(height, 120))
+            }
+            if let x = number(body["x"]), let y = number(body["y"]) {
+                frame.origin = CGPoint(x: x, y: top - y - frame.height)
+            }
+            if frame != window.frame { window.setFrame(frame, display: true, animate: false) }
+            if bool(body["zoom"], false) { window.zoom(nil) }
+            if bool(body["fullscreen"], false) { window.toggleFullScreen(nil) }
+            if bool(body["front"], false) { window.makeKeyAndOrderFront(nil) }
+            return ["ok": true, "window": target.desk, "frame": Self.frameRow(window.frame, top: top)]
+        case "/tabs":
+            return ["ok": true, "tabs": tabRows()]
+        case "/tab-select", "/tab-rename", "/tab-close", "/tab-move":
+            let deskHint = try? resolved.get().desk
+            guard let (deskID, tabID) = resolveTab(body["tab"], desk: deskHint) else {
+                return failure("No tab \(body["tab"].map { "\($0)" } ?? ""). `aether tabs` lists them.")
+            }
+            switch path {
+            case "/tab-select": selectTab(tabID, in: deskID)
+            case "/tab-rename": renameTab(tabID, in: deskID, to: body["name"] as? String ?? "")
+            case "/tab-close": closeTab(tabID, in: deskID, confirm: false)
+            default:
+                guard let index = int(body["index"]) else { return failure("Pass --index N.") }
+                moveTab(tabID, to: index, in: deskID)
+            }
+            return ["ok": true, "tab": tabID, "window": deskID]
+        case "/set":
+            guard let key = body["key"] as? String, !key.isEmpty else {
+                return ["ok": true, "settings": agentSettings()]
+            }
+            guard Self.agentSettingKeys.contains(key) else {
+                return failure("Aether lets agents set: " + Self.agentSettingKeys.sorted().joined(separator: ", ") + ".")
+            }
+            let value = body["value"] as? String ?? ""
+            if key == "themeName", Themes.named(value) == nil {
+                return failure("No theme \(value). Themes: " + Themes.names().joined(separator: ", ") + ".")
+            }
+            guard let updated = Self.setting(settings, key: key, value: value) else {
+                return failure("\(value) is not a valid \(key).")
+            }
+            updateSettings { $0 = updated }
+            return ["ok": true, "key": key, "value": agentSettings()[key] ?? NSNull()]
         default:
             return failure("Unknown request.")
         }
+    }
+
+    /// Settings an agent may change. Nothing here touches accounts, keys, or what runs on launch.
+    static let agentSettingKeys: Set<String> = [
+        "themeName", "glass", "shade", "text", "fontSize", "fontFamily", "lineHeight", "cornerRadius", "gap",
+        "cursorShape", "cursorBlink", "copyOnSelect", "bell", "blurAmount", "minimumContrast", "notifyOnFinish",
+    ]
+
+    private func agentSettings() -> [String: Any] {
+        let all = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(settings))) as? [String: Any] ?? [:]
+        return all.filter { Self.agentSettingKeys.contains($0.key) }
+    }
+
+    /// `settings` with one key set from text, typed like the value it replaces. Nil when it does not decode.
+    static func setting(_ settings: Settings, key: String, value: String) -> Settings? {
+        guard var all = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(settings))) as? [String: Any] else { return nil }
+        if let current = all[key] as? NSNumber, CFGetTypeID(current) == CFBooleanGetTypeID() {
+            switch value.lowercased() {
+            case "true", "on", "yes", "1": all[key] = true
+            case "false", "off", "no", "0": all[key] = false
+            default: return nil
+            }
+        } else if all[key] is NSNumber {
+            guard let number = Double(value) else { return nil }
+            all[key] = number
+        } else {
+            all[key] = value
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: all),
+              let decoded = try? JSONDecoder().decode(Settings.self, from: data) else { return nil }
+        // Some settings fall back to a default on an unknown word. Refuse that instead of guessing.
+        if let text = all[key] as? String,
+           let back = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded))) as? [String: Any],
+           back[key] as? String != text {
+            return nil
+        }
+        return decoded
+    }
+
+    private static func frameRow(_ frame: CGRect, top: CGFloat) -> [String: Any] {
+        ["x": Int(frame.minX), "y": Int(top - frame.maxY), "width": Int(frame.width), "height": Int(frame.height)]
+    }
+
+    private func tabRows() -> [[String: Any]] {
+        order.compactMap { desks[$0] }.flatMap { desk in
+            desk.tabs.enumerated().map { index, tab -> [String: Any] in
+                [
+                    "id": tab.id, "index": index, "window": desk.id, "title": tab.title(from: desk.panes),
+                    "active": tab.id == desk.activeTabID, "panes": Layout.visualIDs(tab.layout),
+                ]
+            }
+        }
+    }
+
+    /// A tab by id, unique 8-character prefix, or index in `desk`.
+    private func resolveTab(_ raw: Any?, desk: String?) -> (String, String)? {
+        if let index = int(raw) ?? (raw as? String).flatMap({ Int($0) }) {
+            guard let deskID = desk, let tabs = desks[deskID]?.tabs, tabs.indices.contains(index) else { return nil }
+            return (deskID, tabs[index].id)
+        }
+        guard let text = (raw as? String)?.lowercased(), !text.isEmpty else { return nil }
+        let matches = desks.values.flatMap { desk in desk.tabs.map { (desk.id, $0.id) } }
+            .filter { $0.1.lowercased() == text || (text.count >= 8 && $0.1.lowercased().hasPrefix(text)) }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    private func number(_ raw: Any?) -> Double? {
+        if let value = raw as? Double { return value }
+        if let value = raw as? Int { return Double(value) }
+        if let text = raw as? String { return Double(text) }
+        return nil
     }
 
     /// Adds a pane beside `target` in the target's own window. Focus and window order stay put
@@ -1814,10 +1993,8 @@ extension AppModel {
         if let share {
             tuneShare(deskID: target.desk, paneID: paneID, share: min(max(share, 0.1), 0.8))
         }
-        if target.explicit {
-            AgentDesk.shared.openedBy = AgentDesk.shared.openedBy.filter { panes[$0.key] != nil }
-            AgentDesk.shared.openedBy[paneID] = target.pane
-        }
+        AgentDesk.shared.openedBy = AgentDesk.shared.openedBy.filter { panes[$0.key] != nil }
+        AgentDesk.shared.openedBy[paneID] = target.explicit ? target.pane : ""
         return paneID
     }
 
@@ -1907,6 +2084,8 @@ extension AppModel {
                 "focused": id == keyDeskID,
                 "panes": paneIDs.count,
                 "tabs": desk.tabs.count,
+                "frame": controllers[id]?.window.map { Self.frameRow($0.frame, top: NSScreen.screens.first?.frame.maxY ?? 0) } ?? [:],
+                "fullscreen": controllers[id]?.window?.styleMask.contains(.fullScreen) ?? false,
             ]
         }
     }

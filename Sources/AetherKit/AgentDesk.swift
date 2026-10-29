@@ -13,6 +13,8 @@ final class AgentDesk {
         "/tab", "/split", "/open", "/font", "/zoom", "/read", "/view",
         "/status", "/notify", "/close", "/title", "/send", "/wait",
         "/windows", "/move", "/order", "/find", "/screenshot", "/workspace",
+        "/resize", "/layout", "/focus", "/window", "/tabs", "/tab-select", "/tab-rename",
+        "/tab-close", "/tab-move", "/set",
     ]
     /// Which pane asked for each pane, so an agent can close only what it opened.
     var openedBy: [String: String] = [:]
@@ -79,10 +81,10 @@ final class AgentDesk {
         AgentSkills.install(
             skill: AgentCLI.skill + "\n",
             agents: AgentCLI.agents + "\n",
-            binary: script,
             home: FileManager.default.homeDirectoryForCurrentUser,
             env: ProcessInfo.processInfo.environment,
-            path: ProcessInfo.processInfo.environment["PATH"] ?? ""
+            // Apps opened from Finder get a bare PATH, so look where agents usually install too.
+            path: (ProcessInfo.processInfo.environment["PATH"] ?? "") + ":/opt/homebrew/bin:/usr/local/bin:" + System.home() + "/.local/bin"
         )
     }
 
@@ -361,7 +363,13 @@ enum AgentCLI {
       echo "aether: python3 is required. Install it with: xcode-select --install" >&2
       exit 1
     fi
-    exec python3 - "$@" <<'PY'
+    # The copy in "Aether Dev/bin" talks to Aether Dev, not to Aether.
+    if [ -z "${AETHER_AGENT_PLIST:-}" ] && [ -f "${0%/*}/../agent.plist" ]; then
+      AETHER_AGENT_PLIST="${0%/*}/../agent.plist"
+      export AETHER_AGENT_PLIST
+    fi
+    # The program goes in as -c, not on stdin, so stdin stays free for `aether mcp`.
+    program=$(cat <<'PY'
     import base64, json, os, re, sys
     
     VERSION = "4"
@@ -374,7 +382,8 @@ enum AgentCLI {
     COMMANDS = (
         "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
         "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
-        "find", "screenshot", "workspace", "hook", "mcp", "help",
+        "find", "screenshot", "workspace", "resize", "layout", "equalize", "focus", "window",
+        "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "set", "imgcat", "hook", "mcp", "help",
     )
     
     
@@ -424,7 +433,16 @@ enum AgentCLI {
       move        Reorder a pane in its window.
       order       Set the pane order of a window.
       zoom        Make this pane fill its window, or put it back.
+      resize      Move a pane's edge to make it bigger or smaller.
+      layout      Arrange the window: tall, fat, grid, columns, rows, stack.
+      equalize    Give every pane in the window the same share.
+      focus       Move the keyboard into a pane.
+      window      Resize, move, zoom, or full-screen a window.
+      tabs        List the tab groups.
+      tab-select  Show a tab group. Also tab-rename, tab-close, tab-move.
       font        Make the type bigger or smaller.
+      set         Change a setting, like the theme or the glass.
+      imgcat      Show an image inline in this pane.
       status      Show what you are doing on this pane's header.
       notify      Post a macOS notification.
       title       Set this pane's title.
@@ -521,13 +539,15 @@ enum AgentCLI {
         "run": """usage: aether run [--pane <id>] [--title T] [--timeout N] [--] <command...>
     
     Run a command and wait until it finishes. Prints the command's output as it
-    appears, then exits with the command's status. Without --pane, opens a new tab.
+    appears, then exits with the command's status. Without --pane, opens a new pane
+    and closes it when the command ends, unless you pass --keep.
     SIGINT (Ctrl-C on aether run) sends ctrl+c to the pane's job.
     
     Options:
       --title <text>                  Name the pane.
       --timeout <seconds>             Give up after this many seconds.
-      --focus                         Move the keyboard into the pane.""" + COMMON + """
+      --focus                         Move the keyboard into the pane.
+      --keep                          Leave the new pane open after the command ends.""" + COMMON + """
     
     Examples:
       aether run -- make test
@@ -675,6 +695,128 @@ enum AgentCLI {
     
     Example:
       aether mcp""",
+        "resize": """usage: aether resize [pane-id] (--grow <edge> | --shrink <edge>) [--by N]
+    
+    Move one edge of a pane. --grow right pushes its right edge out; --shrink right
+    pulls it in. Edges: left, right, up, down. N is percent of the split (default 5).
+    
+    Options:
+      --grow <edge>                   Push this edge outward.
+      --shrink <edge>                 Pull this edge inward.
+      --by <N>                        How far, in percent. Default: 5.""" + COMMON + """
+    
+    Examples:
+      aether resize 50BBAE3B --grow right --by 10
+      aether resize --shrink down""",
+        "layout": """usage: aether layout <tall|fat|grid|columns|rows|stack|next|prev|equalize>
+    
+    Arrange the panes of a window. Prints the layout.
+    
+    Options:""" + COMMON + """
+    
+    Examples:
+      aether layout grid
+      aether layout next --window any""",
+        "equalize": """usage: aether equalize
+    
+    Give every pane in the window the same share.
+    
+    Options:""" + COMMON + """
+    
+    Example:
+      aether equalize""",
+        "focus": """usage: aether focus <pane-id>
+    
+    Move the keyboard into a pane, showing its tab group and bringing its window
+    to the front.
+    
+    Options:""" + COMMON + """
+    
+    Example:
+      aether focus 50BBAE3B""",
+        "window": """usage: aether window [--size WxH] [--position X,Y] [--zoom] [--fullscreen] [--front]
+    
+    Resize or move a window. Points are measured from the top-left of the main
+    screen. Prints the window's frame. --zoom and --fullscreen toggle.
+    
+    Options:
+      --size <WxH>                    New size in points, like 1200x800.
+      --position <X,Y>                New top-left corner, like 40,60.
+      --zoom                          Toggle zoom (the green button).
+      --fullscreen                    Toggle full screen.
+      --front                         Bring the window to the front.""" + COMMON + """
+    
+    Examples:
+      aether window --size 1400x900 --position 0,40
+      aether window --fullscreen""",
+        "tabs": """usage: aether tabs
+    
+    List every tab group: index, id, window, panes, and title. The shown tab is
+    marked with *.
+    
+    Options:
+      --json                          Print the raw reply.
+    
+    Example:
+      aether tabs""",
+        "tab-select": """usage: aether tab-select <tab-id|index>
+    
+    Show a tab group. An index counts from 0 in your window (or --window).
+    
+    Options:""" + COMMON + """
+    
+    Example:
+      aether tab-select 1""",
+        "tab-rename": """usage: aether tab-rename <tab-id|index> <name>
+    
+    Name a tab group. An empty name goes back to the automatic one.
+    
+    Options:""" + COMMON + """
+    
+    Example:
+      aether tab-rename 0 school""",
+        "tab-close": """usage: aether tab-close <tab-id|index>
+    
+    Close a tab group and every pane in it, without asking.
+    
+    Options:""" + COMMON + """
+    
+    Example:
+      aether tab-close 2""",
+        "tab-move": """usage: aether tab-move <tab-id|index> --index N
+    
+    Move a tab group to position N (from 0) in its window.
+    
+    Options:
+      --index <N>                     Where it goes.""" + COMMON + """
+    
+    Example:
+      aether tab-move 2 --index 0""",
+        "set": """usage: aether set [key] [value]
+    
+    Change a setting. With no key, print the settings agents may change.
+    Keys: themeName, glass, shade, text, fontSize, fontFamily, lineHeight,
+    cornerRadius, gap, cursorShape, cursorBlink, copyOnSelect, bell, blurAmount,
+    minimumContrast, notifyOnFinish.
+    
+    Options:
+      --json                          Print the raw reply.
+    
+    Examples:
+      aether set
+      aether set themeName Dracula
+      aether set fontSize 15""",
+        "imgcat": """usage: aether imgcat <file> [--width N]
+    
+    Draw an image (PNG, JPEG, GIF) inline in the pane you run it in, with the
+    iTerm2 image protocol. Aether also draws kitty graphics and sixel.
+    
+    Options:
+      --width <N>                     Width in cells. Default: the image's own size.
+    
+    Examples:
+      aether imgcat chart.png
+      aether run --keep -- aether imgcat /tmp/shot.png --width 40""",
         "help": """usage: aether help [command]
     
     Show help for aether or one command.""",
@@ -700,7 +842,7 @@ enum AgentCLI {
         "workspace": (TARGET | {"--title"}, JSON, True),
         "hook": (set(), set(), False),
         "send": (TARGET | {"--keys"}, {"--enter"} | JSON, False),
-        "run": (TARGET | {"--title", "--timeout"}, {"--focus"} | JSON, True),
+        "run": (TARGET | {"--title", "--timeout"}, {"--focus", "--keep"} | JSON, True),
         "wait": (TARGET | {"--timeout"}, {"--until-idle", "--exit", "--until-exit"} | JSON, False),
         "windows": (set(), JSON, False),
         "move": (TARGET | {"--before", "--after", "--index"}, JSON, False),
@@ -708,6 +850,18 @@ enum AgentCLI {
         "find": (TARGET | {"--title", "--command"}, JSON, False),
         "screenshot": (TARGET | {"--out"}, JSON, False),
         "mcp": (set(), set(), False),
+        "resize": (TARGET | {"--grow", "--shrink", "--by"}, JSON, False),
+        "layout": (TARGET, JSON, False),
+        "equalize": (TARGET, JSON, False),
+        "focus": (TARGET, JSON, False),
+        "window": (TARGET | {"--size", "--position"}, {"--zoom", "--fullscreen", "--front"} | JSON, False),
+        "tabs": (set(), JSON, False),
+        "tab-select": (TARGET, JSON, False),
+        "tab-rename": (TARGET, JSON, False),
+        "tab-close": (TARGET, JSON, False),
+        "tab-move": (TARGET | {"--index"}, JSON, False),
+        "set": (set(), JSON, False),
+        "imgcat": ({"--width"}, set(), False),
     }
     
     
@@ -762,6 +916,10 @@ enum AgentCLI {
         if positional and is_pane_id(positional[0]):
             pane = positional.pop(0)
         return pane
+    
+    
+    def not_a_pane(word):
+        return Usage(f"{word} is not a pane id. Ids look like 50BBAE3B; `aether view` lists them.")
     
     
     def targeting(opts, pane):
@@ -934,20 +1092,10 @@ enum AgentCLI {
         return re.sub(r"[\x00-\x1f\x7f]", " ", text)
     
     
-    def added_text(previous, current):
-        if current.startswith(previous):
-            return current[len(previous):]
-        n = min(len(previous), len(current))
-        i = 0
-        while i < n and previous[i] == current[i]:
-            i += 1
-        return current[i:]
-    
-    
-    def watch(pane, until, timeout, stream=False, after_prompts=None):
+    def watch(pane, until, timeout, since=None, after_prompts=None, skip=False):
+        """Poll until the pane is idle or exited. With `since`, stream its new lines to stdout."""
         import signal, time
         deadline = time.monotonic() + timeout if timeout else None
-        previous = ""
         sent_interrupt = False
         saw_busy = after_prompts is None
     
@@ -961,40 +1109,45 @@ enum AgentCLI {
             except Exception:
                 raise KeyboardInterrupt
     
+        def pump(final, prompt):
+            nonlocal since, skip
+            body = {"since": since, "final": final, "prompt": prompt, "skip": skip}
+            part = request("/read", merge(targeting({}, pane), body), pane)
+            if part.get("text"):
+                skip = False
+                sys.stdout.write(part["text"])
+                sys.stdout.flush()
+            if isinstance(part.get("next"), int):
+                since = part["next"]
+    
         old = signal.signal(signal.SIGINT, handle)
         try:
             while True:
                 state = request("/wait", targeting({}, pane), pane)
-                if stream:
-                    dump = request("/read", merge(targeting({}, pane), {"lines": 100000}), pane)
-                    text = dump.get("text") or ""
-                    delta = added_text(previous, text)
-                    if delta:
-                        sys.stdout.write(delta if delta.endswith("\n") or not text.endswith("\n") else delta)
-                        sys.stdout.flush()
-                    previous = text
                 exited = bool(state.get("exited"))
                 idle = bool(state.get("idle"))
-                busy = (not idle) and (not exited)
-                if busy:
+                if not idle and not exited:
                     saw_busy = True
                 prompts = state.get("prompts")
                 prompts = prompts if isinstance(prompts, int) else 0
                 integrated = bool(state.get("integrated"))
-                if until == "exit" and exited:
+                if until == "exit" or exited:
+                    done = exited
+                elif after_prompts is None:
+                    done = idle
+                elif integrated:
+                    done = prompts > after_prompts
+                else:
+                    done = idle and saw_busy
+                if since is not None:
+                    pump(done and exited, done and not exited)
+                if done:
+                    if sent_interrupt:
+                        state["interrupted"] = True
                     return state
-                if until == "idle":
-                    if exited:
-                        return state
-                    if after_prompts is not None and integrated and prompts > after_prompts:
-                        return state
-                    if after_prompts is not None and (not integrated) and idle and saw_busy:
-                        return state
-                    if after_prompts is None and idle:
-                        return state
                 if deadline is not None and time.monotonic() >= deadline:
                     raise Failure("timed out waiting for that pane.")
-                time.sleep(0.08)
+                time.sleep(0.1)
         finally:
             signal.signal(signal.SIGINT, old)
     
@@ -1006,7 +1159,13 @@ enum AgentCLI {
         print(
             "You are in Aether, a native macOS terminal.\n"
             f"This pane's id is {pane}. The `aether` CLI is on PATH.\n"
-            "Use it to split, open workspace tabs, send keys, run commands, and read screens.\n"
+            "Use it to split, open workspace tabs, send keys, run commands, and read screens:\n"
+            "  aether run -- make test            run in a new pane, stream output, exit with its status\n"
+            "  id=$(aether tab --title job)       open a shell pane and print its id\n"
+            "  aether send $id 'npm test' --enter type into a pane; --keys ctrl+c interrupts it\n"
+            "  aether wait $id --until-idle       block until its prompt is back\n"
+            "  aether read $id --lines 50         print its output\n"
+            "  aether view                        list panes and what they are running\n"
             "Do not guess tmux, iTerm, or Terminal.app keystrokes.\n"
             "`aether workspace` is a new tab group; `aether tab` is a new pane in this group.\n"
             "Run `aether help` for the rest."
@@ -1064,37 +1223,60 @@ enum AgentCLI {
     
     
     def mcp():
+        # MCP's stdio transport is one JSON-RPC message per line. Content-Length framing is accepted too.
+        framed = False
+    
         def read_message():
-            headers = {}
+            nonlocal framed
             while True:
                 line = sys.stdin.buffer.readline()
                 if not line:
                     return None
-                if line in (b"\r\n", b"\n"):
-                    break
-                name, _, value = line.decode("utf-8", "replace").partition(":")
-                headers[name.strip().lower()] = value.strip()
-            length = int(headers.get("content-length") or 0)
-            if length <= 0:
-                return None
-            payload = sys.stdin.buffer.read(length)
-            return json.loads(payload)
+                if line.strip() == b"":
+                    continue
+                if line.lower().startswith(b"content-length:"):
+                    framed = True
+                    length = int(line.split(b":", 1)[1].strip() or 0)
+                    while sys.stdin.buffer.readline() not in (b"\r\n", b"\n", b""):
+                        pass
+                    line = sys.stdin.buffer.read(length)
+                try:
+                    return json.loads(line)
+                except ValueError:
+                    write_message({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
     
         def write_message(message):
             raw = json.dumps(message, separators=(",", ":")).encode()
-            sys.stdout.buffer.write(f"Content-Length: {len(raw)}\r\n\r\n".encode() + raw)
+            if framed:
+                sys.stdout.buffer.write(f"Content-Length: {len(raw)}\r\n\r\n".encode() + raw)
+            else:
+                sys.stdout.buffer.write(raw + b"\n")
             sys.stdout.buffer.flush()
     
         def tools():
+            args = {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Arguments as on the command line, after the command name. Example: [\"50BBAE3B\", \"--lines\", \"50\"].",
+            }
             return [
-                {"name": name, "description": HELP.get(name, "").split("\n")[0], "inputSchema": {"type": "object", "additionalProperties": True}}
-                for name in COMMANDS if name not in ("help", "mcp")
+                {
+                    "name": name,
+                    "description": HELP.get(name, ""),
+                    "inputSchema": {"type": "object", "properties": {"args": args}, "additionalProperties": True},
+                }
+                for name in COMMANDS if name not in ("help", "mcp", "hook", "imgcat")
             ]
     
         def call(name, arguments):
             import contextlib, io
             argv = [name]
+            extra = (arguments or {}).get("args")
+            if isinstance(extra, str):
+                extra = [extra]
             for key, value in (arguments or {}).items():
+                if key == "args":
+                    continue
                 flag = "--" + key.replace("_", "-")
                 if value is True:
                     argv.append(flag)
@@ -1107,6 +1289,8 @@ enum AgentCLI {
                     argv.extend(["--", value] if name == "run" else [value])
                 else:
                     argv.extend([flag, str(value)])
+            if isinstance(extra, list):
+                argv[1:1] = [str(item) for item in extra]
             out, err = io.StringIO(), io.StringIO()
             code = 0
             try:
@@ -1132,15 +1316,19 @@ enum AgentCLI {
             message = read_message()
             if message is None:
                 return 0
+            if not isinstance(message, dict):
+                continue
             method = message.get("method")
             ident = message.get("id")
             if method == "initialize":
                 write_message({"jsonrpc": "2.0", "id": ident, "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": (message.get("params") or {}).get("protocolVersion") or "2025-06-18",
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "aether", "version": VERSION},
                 }})
-            elif method == "notifications/initialized":
+            elif method == "ping":
+                write_message({"jsonrpc": "2.0", "id": ident, "result": {}})
+            elif ident is None:
                 continue
             elif method == "tools/list":
                 write_message({"jsonrpc": "2.0", "id": ident, "result": {"tools": tools()}})
@@ -1184,6 +1372,8 @@ enum AgentCLI {
             pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
         elif cmd == "run":
             pane = take_pane(positional, opts, env=False)
+        elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move"):
+            pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
         else:
             pane = take_pane(positional, opts)
         raw = opts.get("--json")
@@ -1228,10 +1418,7 @@ enum AgentCLI {
             return finish(reply, reply.get("pane"))
         if cmd == "read":
             if positional:
-                raise Usage(
-                    f"unexpected {positional[0]}. "
-                    f"Pass a pane id as `aether read {positional[0]}` or `--pane {positional[0]}`."
-                )
+                raise not_a_pane(positional[0])
             body = {}
             if "--lines" in opts:
                 lines = number(opts["--lines"], "--lines")
@@ -1265,7 +1452,7 @@ enum AgentCLI {
             return finish(reply, "\n".join(rows))
         if cmd == "zoom":
             if positional:
-                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether zoom {positional[0]}` or `--pane {positional[0]}`.")
+                raise not_a_pane(positional[0])
             reply = call("/zoom", {})
             return finish(reply)
         if cmd == "font":
@@ -1326,12 +1513,15 @@ enum AgentCLI {
             timeout = number(opts["--timeout"], "--timeout") if "--timeout" in opts else None
             if pane:
                 before = call("/wait", {})
+                if before.get("exited"):
+                    raise Failure("that pane has exited. Run without --pane to open a new one.")
                 after = before.get("prompts") if isinstance(before.get("prompts"), int) else 0
-                body = {"text": line, "enter": True}
-                call("/send", body)
+                start = call("/read", {"since": None}).get("cursor")
+                call("/send", {"text": line, "enter": True})
                 if opts.get("--title"):
                     call("/title", {"text": opts["--title"]})
-                state = watch(pane, "idle", timeout, stream=not raw, after_prompts=after)
+                since = None if raw or not isinstance(start, int) else start + 1
+                state = watch(pane, "idle", timeout, since=since, after_prompts=after, skip=True)
                 if raw:
                     return finish(state)
                 code = state.get("lastStatus")
@@ -1342,22 +1532,26 @@ enum AgentCLI {
             body["command"] = line
             reply = call("/tab", body)
             target = reply.get("pane") or pane
-            if raw:
-                print(json.dumps(reply, indent=2))
-            state = watch(target, "exit", timeout, stream=not raw)
+            state = watch(target, "exit", timeout, since=None if raw else 0)
             if raw:
                 print(json.dumps(state, indent=2))
-            if state.get("exited") and isinstance(state.get("exitCode"), int):
+            if not opts.get("--keep"):
+                try:
+                    request("/close", {"target": target}, None)
+                except Failure:
+                    pass
+            if isinstance(state.get("exitCode"), int):
                 return int(state["exitCode"])
-            return 0
+            # No status means a signal ended it: ours (ctrl+c) or someone else's.
+            return 130 if state.get("interrupted") else 1
         if cmd == "wait":
             if positional:
-                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether wait {positional[0]}` or `--pane {positional[0]}`.")
+                raise not_a_pane(positional[0])
             if opts.get("--until-idle") and (opts.get("--exit") or opts.get("--until-exit")):
                 raise Usage("pick one of --until-idle or --exit.")
             until = "exit" if (opts.get("--exit") or opts.get("--until-exit")) else "idle"
             timeout = number(opts["--timeout"], "--timeout") if "--timeout" in opts else None
-            state = watch(pane, until, timeout, stream=False)
+            state = watch(pane, until, timeout)
             return finish(state)
         if cmd == "find":
             if positional:
@@ -1374,7 +1568,7 @@ enum AgentCLI {
             return finish(reply, "\n".join(rows))
         if cmd == "move":
             if positional:
-                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether move {positional[0]} --before <id>`.")
+                raise not_a_pane(positional[0])
             body = {}
             if "--before" in opts:
                 body["before"] = opts["--before"]
@@ -1398,12 +1592,106 @@ enum AgentCLI {
             return finish(reply, order)
         if cmd == "screenshot":
             if positional:
-                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether screenshot {positional[0]}`.")
+                raise not_a_pane(positional[0])
             body = {}
             if "--out" in opts:
                 body["path"] = os.path.abspath(os.path.expanduser(opts["--out"]))
             reply = call("/screenshot", body)
             return finish(reply, reply.get("path"))
+        if cmd == "resize":
+            if positional:
+                raise not_a_pane(positional[0])
+            if ("--grow" in opts) == ("--shrink" in opts):
+                raise Usage("pass --grow <edge> or --shrink <edge>, like `aether resize --grow right`.")
+            edge = (opts.get("--grow") or opts.get("--shrink")).lower()
+            edge = {"top": "up", "bottom": "down"}.get(edge, edge)
+            if edge not in ("left", "right", "up", "down"):
+                raise Usage(f"unknown edge {edge}. Use left, right, up, or down.")
+            by = number(opts.get("--by", "5"), "--by")
+            reply = call("/resize", {"edge": edge, "by": by if "--grow" in opts else -by})
+            return finish(reply)
+        if cmd in ("layout", "equalize"):
+            if cmd == "equalize":
+                if positional:
+                    raise not_a_pane(positional[0])
+                name = "equalize"
+            elif len(positional) != 1:
+                raise Usage("give one layout: tall, fat, grid, columns, rows, stack, next, prev, or equalize.")
+            else:
+                name = positional[0]
+            reply = call("/layout", {"layout": name})
+            return finish(reply, reply.get("layout") if cmd == "layout" else None)
+        if cmd == "focus":
+            if positional:
+                raise not_a_pane(positional[0])
+            if not pane:
+                raise Usage("say which pane, like `aether focus 50BBAE3B`.")
+            return finish(call("/focus", {}))
+        if cmd == "window":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}. See `aether help window`.")
+            body = {}
+            if "--size" in opts:
+                match = re.match(r"^(\d+)[x,](\d+)$", opts["--size"].lower())
+                if not match:
+                    raise Usage("--size looks like 1200x800.")
+                body["width"], body["height"] = int(match.group(1)), int(match.group(2))
+            if "--position" in opts:
+                match = re.match(r"^(-?\d+)[,x](-?\d+)$", opts["--position"].lower())
+                if not match:
+                    raise Usage("--position looks like 40,60.")
+                body["x"], body["y"] = int(match.group(1)), int(match.group(2))
+            for flag in ("--zoom", "--fullscreen", "--front"):
+                if opts.get(flag):
+                    body[flag[2:]] = True
+            reply = call("/window", body)
+            frame = reply.get("frame") or {}
+            return finish(reply, f"{frame.get('width')}x{frame.get('height')} at {frame.get('x')},{frame.get('y')}")
+        if cmd == "tabs":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}.")
+            reply = request("/tabs", {}, None)
+            rows = []
+            for row in reply.get("tabs", []):
+                mark = "*" if row.get("active") else " "
+                rows.append(f"{mark} {row.get('index')}  {row.get('id', '')}  window {str(row.get('window', ''))[:8]}  {len(row.get('panes') or [])} panes  {row.get('title', '')}")
+            return finish(reply, "\n".join(rows))
+        if cmd.startswith("tab-"):
+            if not positional:
+                raise Usage(f"give a tab id or index, like `aether {cmd} 1`. `aether tabs` lists them.")
+            body = {"tab": positional.pop(0)}
+            if cmd == "tab-rename":
+                body["name"] = " ".join(positional)
+                positional = []
+            if cmd == "tab-move":
+                if "--index" not in opts:
+                    raise Usage("pass --index N.")
+                body["index"] = int(number(opts["--index"], "--index"))
+            if positional:
+                raise Usage(f"unexpected {positional[0]}.")
+            return finish(call("/" + cmd, body))
+        if cmd == "set":
+            if len(positional) == 1 or len(positional) > 2:
+                raise Usage("give a key and a value, like `aether set fontSize 15`, or nothing to list them.")
+            body = {"key": positional[0], "value": positional[1]} if positional else {}
+            reply = request("/set", body, None)
+            if not positional:
+                rows = [f"{key} = {value}" for key, value in sorted((reply.get("settings") or {}).items())]
+                return finish(reply, "\n".join(rows))
+            return finish(reply, f"{reply.get('key')} = {reply.get('value')}")
+        if cmd == "imgcat":
+            if len(positional) != 1:
+                raise Usage("give one image file, like `aether imgcat chart.png`.")
+            try:
+                with open(os.path.expanduser(positional[0]), "rb") as handle:
+                    data = handle.read()
+            except OSError as error:
+                raise Failure(f"could not read {positional[0]}: {error.strerror}.")
+            width = f";width={int(number(opts['--width'], '--width'))}" if "--width" in opts else ""
+            name = base64.b64encode(os.path.basename(positional[0]).encode()).decode()
+            sys.stdout.write(f"\x1b]1337;File=name={name};size={len(data)};inline=1{width}:" + base64.b64encode(data).decode() + "\a\n")
+            sys.stdout.flush()
+            return 0
         if cmd == "skill":
             if positional:
                 raise Usage(f"unexpected {positional[0]}.")
@@ -1440,6 +1728,8 @@ enum AgentCLI {
         print(f"aether: unexpected error: {error}", file=sys.stderr)
         sys.exit(1)
     PY
+    )
+    exec python3 -c "$program" "$@"
     """#
 
     static let skill = #"""
@@ -1457,7 +1747,7 @@ enum AgentCLI {
     - `aether split --right --ratio 30 -- npm run dev` opens a terminal beside you and prints its id. Sides: `--right`, `--left`, `--up`, `--down`.
     - `aether tab -- command` adds a terminal to this tab group and prints its id.
     - `aether workspace --title school` opens a new tab group in the window. Terminals in other groups keep running.
-    - `aether run -- make test` runs a command in a new tab, streams output, and exits with that command's status. `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
+    - `aether run -- make test` runs a command in a new pane, streams output, exits with that command's status, and closes the pane (`--keep` leaves it). `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
     - `aether send --keys ctrl+c` types into a pane. `aether send y --enter` answers a prompt. `--keys` accepts `ctrl+c`, `enter`, `up`, `tab`, `esc`, and comma-separated chords.
     - `aether wait <id> --exit` blocks until that pane's job exits. `--until-idle` waits for a prompt.
     - `aether open localhost:3000 --right --ratio 40` shows a page beside you.
@@ -1471,6 +1761,12 @@ enum AgentCLI {
     - `aether close <id>` closes a pane you opened.
     - `aether screenshot --out /tmp/pane.png` saves a PNG of a pane.
     - `aether zoom` fills the window with your pane, or puts it back.
+    - `aether resize <id> --grow right --by 10` / `--shrink down` moves one edge of a pane. `aether layout tall|fat|grid|columns|rows|stack|next` arranges a window; `aether equalize` evens it out.
+    - `aether window --size 1400x900 --position 0,40` resizes and moves a window (points from the top-left of the main screen). `--zoom`, `--fullscreen`, and `--front` toggle. `aether windows --json` shows each frame.
+    - `aether focus <id>` moves the keyboard into a pane and brings its window forward.
+    - `aether tabs` lists tab groups. `aether tab-select 1`, `aether tab-rename 1 school`, `aether tab-move 1 --index 0`, `aether tab-close 1` take an index (from 0) or a tab id.
+    - `aether set` lists settings agents may change; `aether set themeName Dracula`, `aether set fontSize 15`, `aether set glass clear`.
+    - `aether imgcat chart.png` draws an image inline in your pane (iTerm2 protocol). Aether also draws kitty graphics and sixel, so `kitty +kitten icat` and `img2sixel` work too. `aether open file.pdf` shows a PDF beside you.
     - `aether font 1` or `aether font -1` changes the type size. `aether font 0` resets it.
     - `aether skill` installs this skill and AGENTS.md.
     - `aether mcp` speaks MCP on stdin/stdout (one tool per command).
@@ -1507,7 +1803,7 @@ enum AgentCLI {
     aether close "$id"
     ```
     
-    `aether run -- make test` is the one-shot form: new tab, stream output, exit with the command's status. Ctrl-C on `aether run` sends ctrl+c into the pane. `--pane` is required to type into an existing pane; `$AETHER_PANE` is not enough.
+    `aether run -- make test` is the one-shot form: new pane, stream output, exit with the command's status, close the pane (`--keep` leaves it). Ctrl-C on `aether run` sends ctrl+c into the pane. `--pane` is required to type into an existing pane; `$AETHER_PANE` is not enough.
     
     ## Commands
     
@@ -1522,6 +1818,12 @@ enum AgentCLI {
     | `view` / `windows` / `find` | Discover panes. |
     | `title` / `status` / `notify` | Label and signal. |
     | `move` / `order` | Reorder panes in a window. |
+    | `resize` / `layout` / `equalize` | Size panes and arrange a window. |
+    | `window` | Size, move, zoom, or full-screen a window. |
+    | `focus` | Move the keyboard into a pane. |
+    | `tabs` / `tab-select` / `tab-rename` / `tab-move` / `tab-close` | Tab groups. |
+    | `set` | Theme, glass, font size, and other safe settings. |
+    | `imgcat` | Draw an image inline (kitty graphics and sixel work too). |
     | `close` | Close a pane you opened. |
     | `screenshot` | PNG of a pane. |
     | `mcp` | MCP stdio, one tool per command. |
