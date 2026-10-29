@@ -54,6 +54,36 @@
 	<string>A program running in Aether wants to read or change files on a network drive.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Commands you run in Aether, like arp or ssh, need to see devices on your local network.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>A program running in Aether wants to read your calendars.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>A program running in Aether wants to use your calendars.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>A program running in Aether wants to read your reminders.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>A program running in Aether wants to use your reminders.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>A program running in Aether wants to use your contacts.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A program running in Aether wants to use your photos.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>A program running in Aether wants to add to your photos.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>A program running in Aether wants to use your location.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>A program running in Aether wants to use your location.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>A program running in Aether wants to use Bluetooth.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>A program running in Aether wants to use Bluetooth.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>A program running in Aether wants to use speech recognition.</string>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>A program running in Aether wants to use your music library.</string>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>A program running in Aether wants to use tracking.</string>
+	<key>NSFocusStatusUsageDescription</key>
+	<string>A program running in Aether wants to see Focus status.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_ssh._tcp</string>

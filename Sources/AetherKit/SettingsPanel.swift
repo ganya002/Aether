@@ -533,6 +533,12 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         form.note("Without the Dock icon, open Aether with the dropdown shortcut or from Spotlight.")
 
         form.section()
+        let givePermissions = NSButton(title: "Give All Permissions…", target: self, action: #selector(giveAllPermissions))
+        givePermissions.bezelStyle = .push
+        form.row("Permissions:", givePermissions)
+        form.note("Asks macOS for camera, microphone, folders, Accessibility, Full Disk Access, and the rest, one dialog at a time.")
+
+        form.section()
         let reveal = NSButton(title: "Show config.json in Finder", target: self, action: #selector(revealConfig))
         reveal.bezelStyle = .push
         let reset = NSButton(title: "Reset All Settings…", target: self, action: #selector(resetAll))
@@ -1154,6 +1160,10 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
     @objc private func revealConfig() {
         ConfigStore.save(AppModel.shared.settings)
         NSWorkspace.shared.activateFileViewerSelecting([ConfigStore.fileURL()])
+    }
+
+    @objc private func giveAllPermissions() {
+        PermissionGrant.present(from: window)
     }
 
     // MARK: Reading

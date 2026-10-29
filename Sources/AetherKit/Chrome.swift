@@ -9,6 +9,7 @@ enum PaletteAction: Equatable {
     case openConfig
     case glass(GlassStyle)
     case help
+    case giveAllPermissions
     case saveWorkspace
     case openWorkspace(String)
     case renameWorkspace(String)
@@ -655,6 +656,7 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
             keywords: ["glass", "transparency"]
         ))
         rows.append(PaletteRow(title: "Open Config File", detail: UserConfigCenter.displayPath, kind: .action(.openConfig), symbol: "doc.text", keywords: ["settings", "dotfiles", "config", "preferences"]))
+        rows.append(PaletteRow(title: "Give All Permissions", detail: "Ask macOS for every permission Aether can prompt for", kind: .action(.giveAllPermissions), symbol: "checkmark.shield", keywords: ["tcc", "privacy", "grant", "allow", "camera", "microphone", "full disk", "accessibility"]))
         rows.append(PaletteRow(title: "Check for updates", detail: "", kind: .action(.checkForUpdates), symbol: "arrow.down.circle", keywords: ["upgrade", "version"]))
         rows.append(PaletteRow(title: "Aether help", detail: "Open the README on GitHub", kind: .action(.help), symbol: "questionmark.circle", keywords: ["docs", "manual"]))
         return rows

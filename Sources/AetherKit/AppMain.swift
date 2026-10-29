@@ -363,6 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .openConfig: UserConfigCenter.shared.openFile()
             case .glass(let style): model.updateSettings { $0.glass = style }
             case .help: openHelp()
+            case .giveAllPermissions: PermissionGrant.present(from: NSApp.keyWindow)
             case .saveWorkspace: model.promptSaveWorkspace()
             case .openWorkspace(let name): model.openWorkspace(name)
             case .renameWorkspace(let name): model.promptRenameWorkspace(name)
@@ -542,6 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             bind(.settings, item("Settings…", .settings)),
             plain("Check for Updates…", #selector(checkForUpdatesPressed)),
+            plain("Give All Permissions…", #selector(giveAllPermissionsPressed)),
             .separator(),
             secure,
             .separator(),
@@ -744,6 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc private func checkForUpdatesPressed() { checkForUpdates() }
+    @objc private func giveAllPermissionsPressed() { PermissionGrant.present(from: NSApp.keyWindow) }
     @objc private func helpPressed() { openHelp() }
     @objc private func reportIssue() { NSWorkspace.shared.open(Self.issueURL) }
     @objc private func arrangeWindows() { model.arrangeWindows() }
