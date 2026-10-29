@@ -871,36 +871,91 @@ enum ProcessIcon {
             NSGraphicsContext.restoreGraphicsState()
             return
         }
-        let radius = rect.width * 0.27
+        let style = TileStyle.of(key.name)
+        let radius = rect.width * 0.3
         let tile = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-        let gradient = NSGradient(
-            starting: NSColor(srgbRed: 0.27, green: 0.29, blue: 0.34, alpha: 1),
-            ending: NSColor(srgbRed: 0.11, green: 0.12, blue: 0.15, alpha: 1)
-        )
-        gradient?.draw(in: tile, angle: -90)
+        NSGradient(starting: style.top, ending: style.bottom)?.draw(in: tile, angle: -90)
         NSGraphicsContext.restoreGraphicsState()
-        NSColor.white.withAlphaComponent(0.14).setStroke()
+        // Light catches the top edge only, as on the app icon.
+        NSGraphicsContext.saveGraphicsState()
+        tile.addClip()
         let rim = NSBezierPath(roundedRect: rect.insetBy(dx: 0.25, dy: 0.25), xRadius: radius, yRadius: radius)
-        rim.lineWidth = 0.5
+        rim.lineWidth = 0.75
+        NSColor.white.withAlphaComponent(0.28).setStroke()
+        NSGraphicsContext.current?.cgContext.clip(to: NSRect(x: rect.minX, y: rect.midY, width: rect.width, height: rect.height / 2))
         rim.stroke()
-        let glyph = glyphName(key.name)
-        if let symbol = NSImage(systemSymbolName: glyph, accessibilityDescription: key.name)?
-            .withSymbolConfiguration(.init(pointSize: rect.width * 0.48, weight: .semibold)) {
-            let tinted = symbol.tinted(NSColor.white.withAlphaComponent(dimmed ? 0.75 : 0.95))
-            let size = tinted.size
-            tinted.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
+        NSGraphicsContext.restoreGraphicsState()
+
+        let ink = NSColor.white.withAlphaComponent(dimmed ? 0.78 : 0.97)
+        if let symbol = style.symbol {
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: key.name)?
+                .withSymbolConfiguration(.init(pointSize: rect.width * 0.46, weight: .bold)) {
+                let tinted = image.tinted(ink)
+                let size = tinted.size
+                tinted.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
+            }
+        } else {
+            drawPrompt(in: rect, ink: ink, cursor: style.cursor.withAlphaComponent(dimmed ? 0.8 : 1))
         }
     }
 
-    private static func glyphName(_ name: String) -> String {
-        switch name.lowercased() {
-        case "ssh", "mosh", "et": "network"
-        case "vim", "nvim", "vi", "nano", "emacs", "hx", "helix", "micro": "pencil"
-        case "git", "lazygit", "tig", "gitui": "arrow.triangle.branch"
-        case "htop", "btop", "top", "glances", "bottom", "btm": "gauge.with.dots.needle.33percent"
-        case "python", "python3", "ipython": "chevron.left.forwardslash.chevron.right"
-        case "man", "less", "more", "bat": "doc.text"
-        default: "chevron.right"
+    /// The app icon's mark, drawn small: a chevron and a cursor.
+    private static func drawPrompt(in rect: NSRect, ink: NSColor, cursor: NSColor) {
+        let unit = rect.width
+        let left = rect.minX + unit * 0.27, tip = rect.minX + unit * 0.5
+        // The rect is flipped in the strip, so "up" is smaller y; the shape is symmetric either way.
+        let mid = rect.midY - unit * 0.03
+        let reach = unit * 0.2
+        let chevron = NSBezierPath()
+        chevron.move(to: NSPoint(x: left, y: mid - reach))
+        chevron.line(to: NSPoint(x: tip, y: mid))
+        chevron.line(to: NSPoint(x: left, y: mid + reach))
+        chevron.lineWidth = max(1.6, unit * 0.12)
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        ink.setStroke()
+        chevron.stroke()
+        let height = max(1.6, unit * 0.11)
+        let bar = NSRect(x: tip + unit * 0.06, y: mid + reach - height / 2, width: unit * 0.2, height: height)
+        cursor.setFill()
+        NSBezierPath(roundedRect: bar, xRadius: height / 2, yRadius: height / 2).fill()
+    }
+
+    /// One color per kind of program, so a glance at the strip says what each tab is doing.
+    private struct TileStyle {
+        var top: NSColor
+        var bottom: NSColor
+        var symbol: String?
+        var cursor: NSColor = NSColor(srgbRed: 0.49, green: 0.89, blue: 0.96, alpha: 1)
+
+        static func of(_ name: String) -> TileStyle {
+            func rgb(_ hex: UInt32) -> NSColor {
+                NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+            }
+            switch name.lowercased() {
+            case "ssh", "mosh", "et", "telnet", "nc":
+                return TileStyle(top: rgb(0x4C8DF6), bottom: rgb(0x1F4FC4), symbol: "network")
+            case "vim", "nvim", "vi", "nano", "emacs", "hx", "helix", "micro":
+                return TileStyle(top: rgb(0x3FCF7A), bottom: rgb(0x14803F), symbol: "pencil.line")
+            case "git", "lazygit", "tig", "gitui", "gh":
+                return TileStyle(top: rgb(0xF5843C), bottom: rgb(0xC2410C), symbol: "arrow.triangle.branch")
+            case "htop", "btop", "top", "glances", "bottom", "btm":
+                return TileStyle(top: rgb(0xB06CF5), bottom: rgb(0x6D28C9), symbol: "waveform.path.ecg")
+            case "python", "python3", "ipython", "ruby", "irb", "lua", "ghci":
+                return TileStyle(top: rgb(0xEBB82E), bottom: rgb(0xA66A08), symbol: "curlybraces")
+            case "man", "less", "more", "bat", "tail":
+                return TileStyle(top: rgb(0x7B8798), bottom: rgb(0x3B4556), symbol: "text.alignleft")
+            case "make", "cargo", "swift", "go", "gradle", "xcodebuild", "cmake", "ninja":
+                return TileStyle(top: rgb(0xE85D75), bottom: rgb(0xA3203D), symbol: "hammer.fill")
+            case "ping", "arp", "curl", "wget", "nmap", "traceroute", "dig":
+                return TileStyle(top: rgb(0x2EC4C9), bottom: rgb(0x0E7C86), symbol: "dot.radiowaves.left.and.right")
+            default:
+                if shells.contains(name.lowercased()) {
+                    return TileStyle(top: rgb(0x3A4154), bottom: rgb(0x171B26), symbol: nil)
+                }
+                // Anything else running: the prompt mark on the app's own indigo.
+                return TileStyle(top: rgb(0x5B5FE8), bottom: rgb(0x2E2A9E), symbol: nil, cursor: rgb(0xC7D2FE))
+            }
         }
     }
 
@@ -922,7 +977,6 @@ enum ProcessIcon {
         case "cursor", "cursor-agent": "com.todesktop.230313mzl4w4u92"
         case "code", "code-insiders": "com.microsoft.VSCode"
         case "docker", "com.docker.cli", "docker-compose": "com.docker.docker"
-        case "python", "python3": "org.python.python"
         case "bun": "com.oven-sh.bun"
         case "fish": "com.ridiculousfish.fishapp"
         case "iterm2", "iterm": "com.googlecode.iterm2"
