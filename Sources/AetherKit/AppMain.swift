@@ -38,6 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.settingsPanel.show()
         }
         buildMenus()
+        if ProcessInfo.processInfo.environment["AETHER_RELAUNCHED"] == "1" {
+            // Restarted by an update from a background shell: come forward with the restored windows.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NSApp.activate()
+            }
+        }
         FinishNotifier.install()
         AetherTerminal.cleanDropStash()
         LocalNetworkAccess.start()

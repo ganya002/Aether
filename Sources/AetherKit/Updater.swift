@@ -911,7 +911,9 @@ enum UpdateInstaller {
       for name in CFFIXED_USER_HOME AETHER_PORT AETHER_DEV AETHER_UPDATE_FEED; do
         if [[ -n "${!name:-}" ]]; then keep+=(--env "$name=${!name}"); fi
       done
-      open ${keep[@]+"${keep[@]}"} "$dest" || true
+      # Opened by a background shell, macOS keeps the app behind; this asks it to come forward.
+      keep+=(--env AETHER_RELAUNCHED=1)
+      open "${keep[@]}" "$dest" || true
     }
     fail() {
       say "update failed: $1"
