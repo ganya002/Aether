@@ -79,6 +79,14 @@ import Testing
     #expect(settings.baseFontSize == 13)
     #expect(settings.notifyAfterSeconds == 10)
     #expect(settings.gap == 6)
+    #expect(!settings.gpuRendering)
+}
+
+@Test func gpuRenderingSurvivesARoundTrip() throws {
+    let settings = try JSONDecoder().decode(Settings.self, from: Data("{\"gpuRendering\": true}".utf8))
+    #expect(settings.gpuRendering)
+    let again = try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(settings))
+    #expect(again.gpuRendering)
 }
 
 @Test func configThatIsNotJSONIsRejected() {

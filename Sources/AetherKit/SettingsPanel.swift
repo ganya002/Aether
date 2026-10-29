@@ -362,6 +362,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
     private let shellExit = NSPopUpButton(frame: .zero, pullsDown: false)
     private let pasteWarning = NSButton(checkboxWithTitle: "Warn before pasting several lines", target: nil, action: nil)
     private let copyOnSelect = NSButton(checkboxWithTitle: "Copy text as soon as it's selected", target: nil, action: nil)
+    private let gpuRendering = NSButton(checkboxWithTitle: "GPU rendering", target: nil, action: nil)
     private let bell = NSSegmentedControl(labels: BellStyle.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
     private let scrollback = NSPopUpButton(frame: .zero, pullsDown: false)
 
@@ -563,6 +564,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         form.row("Selection:", copyOnSelect)
         form.row("Bell:", bell)
         form.row("Scrollback:", scrollback)
+        form.row("Drawing:", gpuRendering)
+        form.note("Draws text with Metal instead of CoreGraphics. Experimental: it is not faster yet and uses a little more CPU.")
         form.section()
         form.note("macOS asks once for Local Network access. Allow it if you want arp, mDNS, and other LAN commands to show real devices.")
         return SettingsPage.scrolling(form)
@@ -685,7 +688,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
             popup.target = self
             popup.action = #selector(changed)
         }
-        for box in [updates, notify, dock, cursorBlink, pasteWarning, copyOnSelect, snap, dropdown, dropdownHide] {
+        for box in [updates, notify, dock, cursorBlink, pasteWarning, copyOnSelect, gpuRendering, snap, dropdown, dropdownHide] {
             box.target = self
             box.action = #selector(changed)
         }
@@ -913,6 +916,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
             settings.shellExit = ShellExit.allCases[max(0, shellExit.indexOfSelectedItem)]
             settings.warnMultilinePaste = pasteWarning.state == .on
             settings.copyOnSelect = copyOnSelect.state == .on
+            settings.gpuRendering = gpuRendering.state == .on
             settings.bell = BellStyle.allCases[max(0, bell.selectedSegment)]
             if let lines = scrollback.selectedItem?.representedObject as? Int {
                 settings.scrollbackLines = lines
@@ -1142,6 +1146,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         shellExit.selectItem(at: ShellExit.allCases.firstIndex(of: settings.shellExit) ?? 0)
         pasteWarning.state = settings.warnMultilinePaste ? .on : .off
         copyOnSelect.state = settings.copyOnSelect ? .on : .off
+        gpuRendering.state = settings.gpuRendering ? .on : .off
         bell.selectedSegment = BellStyle.allCases.firstIndex(of: settings.bell) ?? 0
         let lines = settings.scrollbackLines
         fill(scrollback, SettingsFormat.choices(SettingsFormat.scrollbackChoices, including: lines), current: lines) { SettingsFormat.scrollback($0) }

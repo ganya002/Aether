@@ -284,6 +284,30 @@ final class AetherTerminal: LocalProcessTerminalView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         matchScreenScale()
+        syncRenderer()
+    }
+
+    /// Draw with SwiftTerm's Metal renderer instead of CoreGraphics.
+    var gpuRendering = false {
+        didSet { syncRenderer() }
+    }
+    /// Set once Metal fails, so every pane does not retry a device or shader that will not work.
+    private static var metalFailed = false
+
+    /// SwiftTerm wants a window before it builds the Metal view, so this runs again when the pane lands in one.
+    private func syncRenderer() {
+        let wanted = gpuRendering && !Self.metalFailed
+        guard window != nil, wanted != isUsingMetalRenderer else { return }
+        do {
+            try setUseMetal(wanted)
+            // The layer still holds the last CoreGraphics frame, and Metal draws over it on a clear
+            // background, so old text ghosted under new text. draw(_:) is a no-op under Metal, so this clears it.
+            if wanted { needsDisplay = true }
+        } catch {
+            Self.metalFailed = true
+            NSLog("Aether: GPU rendering unavailable, drawing with CoreGraphics: \(error)")
+            try? setUseMetal(false)
+        }
     }
 
     override func viewDidChangeBackingProperties() {
@@ -1489,6 +1513,21 @@ final class PaneController {
         veil.withAlphaComponent(1).setFill()
         pixels.fill()
         rep.draw(in: pixels, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        let terminal = chrome.terminal
+        if terminal.isUsingMetalRenderer {
+            // Metal frames never reach cacheDisplay's bitmap, so draw the text the CoreGraphics way on top.
+            let frame = chrome.convert(terminal.bounds, from: terminal)
+            let scale = CGFloat(rep.pixelsWide) / bounds.width
+            context.cgContext.saveGState()
+            context.cgContext.scaleBy(x: scale, y: scale)
+            context.cgContext.translateBy(x: frame.minX, y: frame.minY)
+            context.cgContext.clip(to: terminal.bounds)
+            // SwiftTerm paints cell backgrounds with a copy blend, which would punch holes through the veil without a layer of its own.
+            context.cgContext.beginTransparencyLayer(auxiliaryInfo: nil)
+            terminal.drawTerminalContents(dirtyRect: terminal.bounds, context: context.cgContext, bufferOffset: terminal.terminal.getTopVisibleRow())
+            context.cgContext.endTransparencyLayer()
+            context.cgContext.restoreGState()
+        }
         NSGraphicsContext.restoreGraphicsState()
         canvas.size = rep.size
         guard let png = canvas.representation(using: .png, properties: [:]) else { return nil }
@@ -1682,6 +1721,7 @@ final class PaneController {
             view.changeScrollback(settings.scrollbackLines)
         }
         view.copyOnSelect = settings.copyOnSelect
+        view.gpuRendering = settings.gpuRendering
         view.onBell = { [weak self] in self?.ring() }
         veil = Self.color(look.veil)
         chrome.setBodyShade(veil.withAlphaComponent(look.shade))

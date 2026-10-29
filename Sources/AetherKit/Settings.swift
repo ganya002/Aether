@@ -199,6 +199,9 @@ public struct Settings: Codable, Equatable, Sendable {
     public var dropdownHideOnFocusLoss: Bool = true
     /// Prompt marks, command notifications, and titles from zsh, bash, and fish. See ShellIntegration.
     public var shellIntegration: Bool = true
+    /// Draw terminal text with Metal. Panes fall back to CoreGraphics when Metal is missing or its shaders fail to compile.
+    /// Off by default: SwiftTerm's Metal path measured no faster than CoreGraphics and used more CPU per frame.
+    public var gpuRendering: Bool = false
 
     public static let currentVersion = 2
 
@@ -296,6 +299,7 @@ public struct Settings: Codable, Equatable, Sendable {
         dropdownHeight = field(.dropdownHeight, 0.44)
         dropdownHideOnFocusLoss = field(.dropdownHideOnFocusLoss, true)
         shellIntegration = field(.shellIntegration, true)
+        gpuRendering = field(.gpuRendering, false)
         clamp()
     }
 

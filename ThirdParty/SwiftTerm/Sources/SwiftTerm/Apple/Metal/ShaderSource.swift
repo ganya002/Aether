@@ -1,3 +1,7 @@
+// Aether: Shaders.metal as a string. The renderer compiles it at runtime with
+// makeLibrary(source:), so the package builds with the Command Line Tools,
+// which do not ship the `metal` compiler.
+let embeddedMetalShaderSource = #"""
 #include <metal_stdlib>
 using namespace metal;
 
@@ -121,3 +125,4 @@ vertex ColorOut terminal_cell_color_vertex(uint vid [[vertex_id]],
 fragment float4 terminal_color_fragment(ColorOut in [[stage_in]]) {
     return in.color;
 }
+"""#
