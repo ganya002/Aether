@@ -249,6 +249,8 @@ struct ConfigKey: Sendable {
         choice("shell-exit", \.shellExit, "What a terminal does when its shell exits."),
         flag("warn-multiline-paste", \.warnMultilinePaste, "Ask before pasting several lines into a shell that would run each."),
         flag("copy-on-select", \.copyOnSelect, "Copy text as soon as it's selected."),
+        flag("restore-contents", \.restoreContents, "Show each terminal's old text again after Aether restarts."),
+        flag("gpu-rendering", \.gpuRendering, "Draw text with Metal. Experimental, and not faster yet."),
         choice("bell", \.bell, "Bell."),
         ConfigKey(name: "scrollback", help: "Lines of scrollback per terminal, 0 to 1000000.", apply: { settings, value in
             settings.scrollbackLines = Int(try number(value, 0...1_000_000))

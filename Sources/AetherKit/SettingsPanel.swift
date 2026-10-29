@@ -1211,7 +1211,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
             "cursor-shape": [cursorShape], "cursor-blink": [cursorBlink], "unfocused-panes": [rest], "blur-amount": [blur.slider],
             "corner-radius": [radius.slider], "gap": [gap.slider], "snap-windows": [snap],
             "option-as-meta": [optionKey], "shell-exit": [shellExit], "warn-multiline-paste": [pasteWarning],
-            "copy-on-select": [copyOnSelect], "bell": [bell], "scrollback": [scrollback],
+            "copy-on-select": [copyOnSelect], "restore-contents": [restoreContents], "gpu-rendering": [gpuRendering], "bell": [bell], "scrollback": [scrollback],
             "notify-on-finish": [notify], "notify-after": [notifyAfter], "confirm-close": [confirmClose],
             "hide-dock-icon": [dock], "check-for-updates": [updates], "dropdown": [dropdown],
             "dropdown-height": [dropdownHeight.slider], "dropdown-hide-on-focus-loss": [dropdownHide],
