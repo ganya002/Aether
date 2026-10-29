@@ -8,7 +8,8 @@ final class AgentDesk {
     static let shared = AgentDesk()
     private var listener: NWListener?
     private let token: String
-    static let port: UInt16 = System.isDev ? 17394 : 17393
+    /// AETHER_PORT lets a second test copy run beside Aether and Aether Dev.
+    static let port: UInt16 = ProcessInfo.processInfo.environment["AETHER_PORT"].flatMap(UInt16.init) ?? (System.isDev ? 17394 : 17393)
     static let routes: Set<String> = [
         "/tab", "/split", "/open", "/font", "/zoom", "/read", "/view",
         "/status", "/notify", "/close", "/title", "/send", "/wait",

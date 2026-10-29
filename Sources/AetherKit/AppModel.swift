@@ -399,6 +399,17 @@ final class AppModel {
         scheduleSave()
     }
 
+    /// Drops a tab at `index` in its window's tab order, as dragging it in the titlebar does.
+    func moveTab(_ tabID: String, to index: Int, in deskID: String) {
+        guard var desk = desks[deskID], let from = desk.tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let tab = desk.tabs.remove(at: from)
+        desk.tabs.insert(tab, at: min(max(0, index), desk.tabs.count))
+        guard desk.tabs.map(\.id) != desks[deskID]?.tabs.map(\.id) else { return }
+        desks[deskID] = desk
+        controllers[deskID]?.reloadTabs()
+        scheduleSave()
+    }
+
     func cycleTab(by delta: Int) {
         guard let deskID = keyDeskID, let desk = desks[deskID], desk.tabs.count > 1 else { return }
         let count = desk.tabs.count

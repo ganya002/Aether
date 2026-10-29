@@ -163,3 +163,14 @@ import Testing
     #expect(AppAction.nextTab.defaultChord.key == "\t")
     #expect(AppAction.nextTab.defaultChord.modifiers == NSEvent.ModifierFlags.control.rawValue)
 }
+
+@Test func tabWidthsFitTheTrack() {
+    // Room for everyone: each tab keeps its width, clamped to 96...220.
+    #expect(WorkspaceTabStrip.fit([50, 150, 400], into: 1000) == [96, 150, 220])
+    // Crowded: they share the room evenly, and a short tab never grows past what it asked for.
+    #expect(WorkspaceTabStrip.fit([200, 200, 100], into: 304) == [100, 100, 100])
+    #expect(WorkspaceTabStrip.fit([200, 200, 96], into: 404) == [133, 133, 96])
+    // Very crowded: never smaller than an icon.
+    #expect(WorkspaceTabStrip.fit(Array(repeating: 200, count: 10), into: 100).allSatisfy { $0 == 36 })
+    #expect(WorkspaceTabStrip.fit([], into: 100).isEmpty)
+}

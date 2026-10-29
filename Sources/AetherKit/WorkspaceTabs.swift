@@ -1,21 +1,41 @@
 import AppKit
 
-/// The chips in the titlebar, next to the traffic lights: one per workspace tab, then +.
+/// The titlebar, right of the traffic lights: where you are, the workspace tabs in a
+/// track, then the launcher and +. The selected tab sits on a pill that slides between tabs.
 @MainActor
 final class WorkspaceTabStrip: NSView {
     var deskID = ""
+    private let place = WorkspacePlace()
+    private let track = NSView()
+    private let pill = NSView()
     private var chips: [WorkspaceTabChip] = []
-    private let plus = WorkspaceTabPlus()
+    private var separators: [NSView] = []
+    private let launch = TitlebarButton(symbol: "command", label: "Launch a command")
+    private let plus = TitlebarButton(symbol: "plus", label: "New tab")
+    private var tone: TextTone = .light
+    private var selectedID = ""
+    private var drag: (chip: WorkspaceTabChip, grab: CGFloat, moved: Bool)?
+    private var laidOut = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        autoresizingMask = [.width]
+        track.wantsLayer = true
+        pill.wantsLayer = true
+        addSubview(place)
+        addSubview(track)
+        track.addSubview(pill)
+        launch.target = self
+        launch.action = #selector(openLauncher)
         plus.target = self
         plus.action = #selector(addTab)
+        addSubview(launch)
         addSubview(plus)
+        setAccessibilityElement(true)
         setAccessibilityRole(.tabGroup)
         setAccessibilityLabel("Workspace tabs")
+        applyTone()
     }
 
     @available(*, unavailable)
@@ -38,81 +58,281 @@ final class WorkspaceTabStrip: NSView {
         }
         let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
             .compactMap { window.standardWindowButton($0)?.frame.maxX }
-        let leading = (buttons.max() ?? 70) + 10
-        let height = titlebar.bounds.height
-        frame = NSRect(x: leading, y: 0, width: max(48, titlebar.bounds.width - leading - 8), height: height)
+        let leading = (buttons.max() ?? 70) + 14
+        let next = NSRect(x: leading, y: 0, width: max(48, titlebar.bounds.width - leading - 8), height: titlebar.bounds.height)
+        if frame != next { frame = next }
     }
 
-    func reload(_ desk: Desk) {
-        let items = desk.tabs.map { tab -> WorkspaceTabChip.Item in
-            let liveTitle = AppModel.shared.panes[tab.focusedID]?.customTitle
-                ?? AppModel.shared.panes[tab.focusedID]?.title
-                ?? tab.title(from: desk.panes)
-            return WorkspaceTabChip.Item(
+    func reload(_ desk: Desk, tone: TextTone) {
+        if tone != self.tone {
+            self.tone = tone
+            applyTone()
+        }
+        let items = desk.tabs.map { tab in
+            WorkspaceTabChip.Item(
                 id: tab.id,
-                title: liveTitle,
+                label: Self.label(for: tab, in: desk),
                 selected: tab.id == desk.activeTabID,
-                icons: WorkspaceTabStrip.icons(for: tab),
+                icons: Self.icons(for: tab),
                 closable: desk.tabs.count > 1
             )
         }
-        while chips.count < items.count {
-            let chip = WorkspaceTabChip()
-            chip.onSelect = { [weak self] id in
-                guard let self else { return }
-                AppModel.shared.selectTab(id, in: self.deskID)
+        let focused = AppModel.shared.panes[desk.focusedID]
+        place.set(folder: focused.map { Self.folderName($0.cwd) } ?? "", host: System.hostName)
+
+        // Mid-drag the strip owns the order; take the new labels and leave the rest for the drop.
+        if drag != nil {
+            for chip in chips {
+                if let item = items.first(where: { $0.id == chip.item.id }) { chip.item = item }
             }
-            chip.onClose = { [weak self] id in
-                guard let self else { return }
-                AppModel.shared.closeTab(id, in: self.deskID)
-            }
-            chip.onRename = { [weak self] id in
-                guard let self else { return }
-                WorkspaceTabStrip.rename(tab: id, in: self.deskID)
-            }
-            addSubview(chip)
-            chips.append(chip)
+            return
         }
-        while chips.count > items.count {
-            chips.removeLast().removeFromSuperview()
+        var fresh: [WorkspaceTabChip] = []
+        let byID = Dictionary(chips.map { ($0.item.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var next: [WorkspaceTabChip] = []
+        for item in items {
+            if let chip = byID[item.id] {
+                next.append(chip)
+            } else {
+                let chip = makeChip()
+                fresh.append(chip)
+                next.append(chip)
+            }
         }
+        let gone = chips.filter { chip in !items.contains { $0.id == chip.item.id } }
+        chips = next
         for (chip, item) in zip(chips, items) {
+            chip.tone = tone
             chip.item = item
         }
-        layoutChips()
+        let selection = items.first(where: \.selected)?.id ?? ""
+        let changed = !fresh.isEmpty || !gone.isEmpty || selection != selectedID
+        selectedID = selection
+        for chip in gone { dismiss(chip) }
+        layoutStrip(animated: laidOut && changed, fresh: fresh)
+        laidOut = true
+    }
+
+    private func makeChip() -> WorkspaceTabChip {
+        let chip = WorkspaceTabChip()
+        chip.onSelect = { [weak self] id in
+            guard let self else { return }
+            AppModel.shared.selectTab(id, in: self.deskID)
+        }
+        chip.onClose = { [weak self] id in
+            guard let self else { return }
+            AppModel.shared.closeTab(id, in: self.deskID)
+        }
+        chip.onRename = { [weak self] id in
+            guard let self else { return }
+            WorkspaceTabStrip.rename(tab: id, in: self.deskID)
+        }
+        chip.onHover = { [weak self] in self?.refreshSeparators() }
+        chip.onDrag = { [weak self] chip, event, phase in self?.track(chip, event, phase) }
+        track.addSubview(chip)
+        return chip
+    }
+
+    private func dismiss(_ chip: WorkspaceTabChip) {
+        chip.onHover = nil
+        Motion.group(Motion.close, {
+            chip.animator().alphaValue = 0
+            if !Motion.reduced {
+                chip.animator().frame = NSRect(x: chip.frame.minX, y: chip.frame.minY, width: max(0, chip.frame.width * 0.6), height: chip.frame.height)
+            }
+        }, done: {
+            chip.removeFromSuperview()
+        })
     }
 
     override func layout() {
         super.layout()
-        layoutChips()
+        if drag == nil { layoutStrip(animated: false, fresh: []) }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
-        if hit === self { return nil }
+        // Empty titlebar still drags the window and double-click still zooms it.
+        if hit === self || hit === track || hit === pill { return nil }
         return hit
     }
 
-    private func layoutChips() {
-        let height = min(24, max(18, bounds.height - 6))
-        let y = max(0, (bounds.height - height) / 2)
-        let plusWidth: CGFloat = height
+    // MARK: Layout
+
+    nonisolated static let inset: CGFloat = 3
+    nonisolated static let gap: CGFloat = 2
+
+    private func layoutStrip(animated: Bool, fresh: [WorkspaceTabChip]) {
+        let height = bounds.height
+        let button: CGFloat = 26
+        let chipHeight = min(28, max(20, height - 14))
+        let trackHeight = chipHeight + Self.inset * 2
+        let midY = (height - trackHeight) / 2
+
+        plus.frame = NSRect(x: bounds.width - button, y: (height - button) / 2, width: button, height: button)
+        launch.frame = NSRect(x: plus.frame.minX - button - 2, y: plus.frame.minY, width: button, height: button)
+
+        let showPlace = bounds.width > 560 && !place.isEmpty
+        place.isHidden = !showPlace
         var x: CGFloat = 0
-        let gap: CGFloat = 6
-        let budget = max(0, bounds.width - plusWidth - 8)
-        let count = max(chips.count, 1)
-        let fitted = (budget - gap * CGFloat(count - 1)) / CGFloat(count)
-        let maxEach = min(176, max(24, fitted))
-        for chip in chips {
-            let width = min(chip.preferredWidth(height: height), maxEach)
-            chip.frame = NSRect(x: x, y: y, width: width, height: height)
-            x += width + gap
+        if showPlace {
+            let width = min(170, place.preferredWidth)
+            place.frame = NSRect(x: 0, y: 0, width: width, height: height)
+            x = width + 14
         }
-        plus.frame = NSRect(x: max(0, bounds.width - plusWidth), y: y, width: plusWidth, height: height)
+
+        let available = max(0, launch.frame.minX - 10 - x)
+        let widths = Self.fit(chips.map { $0.preferredWidth(height: chipHeight) }, into: available - Self.inset * 2)
+        var cursor = Self.inset
+        var frames: [NSRect] = []
+        for width in widths {
+            frames.append(NSRect(x: cursor, y: Self.inset, width: width, height: chipHeight))
+            cursor += width + Self.gap
+        }
+        let trackWidth = chips.isEmpty ? 0 : cursor - Self.gap + Self.inset
+        track.frame = NSRect(x: x, y: midY, width: trackWidth, height: trackHeight)
+        track.layer?.cornerRadius = trackHeight / 2 - 1
+
+        let selected = chips.firstIndex { $0.item.selected }
+        let pillFrame = selected.map { frames[$0] } ?? .zero
+        let apply = {
+            for (index, chip) in self.chips.enumerated() where chip !== self.drag?.chip {
+                let target = frames[index]
+                if fresh.contains(where: { $0 === chip }) { continue }
+                if animated { chip.animator().frame = target } else { chip.frame = target }
+            }
+            if animated, self.pill.alphaValue > 0, selected != nil {
+                self.pill.animator().frame = pillFrame
+            } else {
+                self.pill.frame = pillFrame
+            }
+            self.pill.alphaValue = selected == nil ? 0 : 1
+        }
+        for chip in fresh {
+            guard let index = chips.firstIndex(where: { $0 === chip }) else { continue }
+            let target = frames[index]
+            chip.frame = animated && !Motion.reduced ? NSRect(x: target.minX, y: target.minY, width: target.width * 0.7, height: target.height) : target
+            chip.alphaValue = animated ? 0 : 1
+        }
+        if animated {
+            Motion.group(Motion.snap, {
+                apply()
+                for chip in fresh {
+                    guard let index = self.chips.firstIndex(where: { $0 === chip }) else { continue }
+                    chip.animator().frame = frames[index]
+                    chip.animator().alphaValue = 1
+                }
+            })
+        } else {
+            apply()
+        }
+        pill.layer?.cornerRadius = chipHeight / 2 - 1
+        refreshSeparators(frames: frames)
     }
+
+    /// Each tab gets the width it asks for, up to 220. When they do not fit, they share the room
+    /// evenly, but never go below an icon's width.
+    nonisolated static func fit(_ wanted: [CGFloat], into room: CGFloat, gap: CGFloat = gap) -> [CGFloat] {
+        guard !wanted.isEmpty else { return [] }
+        let capped = wanted.map { min(220, max(96, $0)) }
+        let gaps = gap * CGFloat(wanted.count - 1)
+        if capped.reduce(0, +) + gaps <= room { return capped }
+        let even = max(36, floor((room - gaps) / CGFloat(wanted.count)))
+        return capped.map { min($0, even) }
+    }
+
+    private func refreshSeparators(frames: [NSRect]? = nil) {
+        let frames = frames ?? chips.map(\.frame)
+        let needed = max(0, chips.count - 1)
+        while separators.count < needed {
+            let line = NSView()
+            line.wantsLayer = true
+            track.addSubview(line, positioned: .above, relativeTo: pill)
+            separators.append(line)
+        }
+        while separators.count > needed {
+            separators.removeLast().removeFromSuperview()
+        }
+        let ink = tone.ink
+        for (index, line) in separators.enumerated() where index + 1 < frames.count {
+            let left = chips[index], right = chips[index + 1]
+            let x = (frames[index].maxX + frames[index + 1].minX) / 2
+            let height = frames[index].height * 0.46
+            line.frame = NSRect(x: round(x) - 0.5, y: frames[index].midY - height / 2, width: 1, height: height)
+            line.layer?.backgroundColor = ink.withAlphaComponent(0.16).cgColor
+            let hidden = left.item.selected || right.item.selected || left.hovering || right.hovering || drag != nil
+            line.animator().alphaValue = hidden ? 0 : 1
+        }
+    }
+
+    private func applyTone() {
+        let ink = tone.ink
+        track.layer?.backgroundColor = ink.withAlphaComponent(tone == .light ? 0.055 : 0.045).cgColor
+        track.layer?.borderColor = ink.withAlphaComponent(0.06).cgColor
+        track.layer?.borderWidth = 0.5
+        pill.layer?.backgroundColor = (tone == .light ? NSColor.white.withAlphaComponent(0.15) : NSColor.white.withAlphaComponent(0.72)).cgColor
+        pill.layer?.borderColor = (tone == .light ? NSColor.white.withAlphaComponent(0.16) : NSColor.black.withAlphaComponent(0.08)).cgColor
+        pill.layer?.borderWidth = 0.5
+        pill.layer?.shadowColor = NSColor.black.cgColor
+        pill.layer?.shadowOpacity = tone == .light ? 0.28 : 0.12
+        pill.layer?.shadowRadius = 3
+        pill.layer?.shadowOffset = CGSize(width: 0, height: -1)
+        place.tone = tone
+        launch.tone = tone
+        plus.tone = tone
+        for chip in chips { chip.tone = tone }
+        refreshSeparators()
+    }
+
+    // MARK: Dragging to reorder
+
+    private func track(_ chip: WorkspaceTabChip, _ event: NSEvent, _ phase: WorkspaceTabChip.DragPhase) {
+        let x = track.convert(event.locationInWindow, from: nil).x
+        switch phase {
+        case .began:
+            drag = (chip, x - chip.frame.minX, false)
+        case .moved:
+            guard var current = drag, current.chip === chip else { return }
+            if !current.moved {
+                guard abs(x - current.grab - chip.frame.minX) > 4 else { return }
+                current.moved = true
+                track.addSubview(chip, positioned: .above, relativeTo: nil)
+                refreshSeparators()
+            }
+            drag = current
+            let maxX = track.bounds.width - Self.inset - chip.frame.width
+            chip.frame.origin.x = min(max(Self.inset, x - current.grab), maxX)
+            if chip.item.selected { pill.frame.origin.x = chip.frame.minX }
+            let index = chips.firstIndex { $0 === chip } ?? 0
+            let target = chips.filter { $0 !== chip }.filter { $0.frame.midX < chip.frame.midX }.count
+            if target != index {
+                chips.remove(at: index)
+                chips.insert(chip, at: target)
+                layoutStrip(animated: true, fresh: [])
+            }
+        case .ended:
+            guard let current = drag, current.chip === chip else { return }
+            drag = nil
+            if current.moved {
+                let index = chips.firstIndex { $0 === chip } ?? 0
+                AppModel.shared.moveTab(chip.item.id, to: index, in: deskID)
+                layoutStrip(animated: true, fresh: [])
+            } else {
+                chip.onSelect?(chip.item.id)
+            }
+        }
+    }
+
+    // MARK: Actions
 
     @objc private func addTab() {
         AppModel.shared.newTab(in: deskID)
+    }
+
+    @objc private func openLauncher() {
+        let item = NSMenuItem()
+        item.representedObject = AppAction.launch.rawValue
+        NSApp.sendAction(Selector(("runAction:")), to: nil, from: item)
     }
 
     static func rename(tab id: String, in deskID: String) {
@@ -122,7 +342,7 @@ final class WorkspaceTabStrip: NSView {
               window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = "Rename Tab"
-        alert.informativeText = "Leave it empty to use the focused terminal's title."
+        alert.informativeText = "Leave it empty to name the tab after what is running in it."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = tab.name ?? ""
         field.placeholderString = tab.title(from: desk.panes)
@@ -138,47 +358,145 @@ final class WorkspaceTabStrip: NSView {
         }
     }
 
-    static func icons(for tab: WorkspaceTab) -> [NSImage] {
-        var images: [NSImage] = []
-        var seen = Set<String>()
+    // MARK: What a tab shows
+
+    /// A named tab shows its name. Otherwise what runs in its focused terminal, then where:
+    /// "npm run dev  ~/site", or "zsh  ~/site" at a prompt.
+    static func label(for tab: WorkspaceTab, in desk: Desk) -> (title: String, detail: String) {
+        let name = tab.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !name.isEmpty { return (name, "") }
+        guard let pane = AppModel.shared.panes[tab.focusedID] else { return (tab.title(from: desk.panes), "") }
+        if let custom = pane.customTitle, !custom.isEmpty { return (custom, "") }
+        let path = System.displayPath(pane.cwd)
+        if pane.runningCommand() != nil {
+            return (pane.title, path)
+        }
+        return (pane.tabProcess().name, path)
+    }
+
+    static func folderName(_ path: String) -> String {
+        let shown = System.displayPath(path)
+        if shown == "~" || shown == "/" { return shown }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    static func icons(for tab: WorkspaceTab) -> [ProcessIcon.Key] {
+        var keys: [ProcessIcon.Key] = []
         for id in Layout.visualIDs(tab.layout) {
             guard let pane = AppModel.shared.panes[id] else { continue }
             let process = pane.tabProcess()
-            let key = process.path ?? process.name
-            guard seen.insert(key).inserted else { continue }
-            images.append(ProcessIcon.image(name: process.name, path: process.path))
-            if images.count == 3 { break }
+            let key = ProcessIcon.Key(name: process.name, path: process.path.flatMap(ProcessIcon.bundle(containing:)))
+            guard !keys.contains(key) else { continue }
+            keys.append(key)
+            if keys.count == 3 { break }
         }
-        return images
+        return keys
+    }
+}
+
+extension TextTone {
+    /// The color drawn on the glass: white for light text, near-black for dark.
+    var ink: NSColor {
+        self == .dark ? NSColor(srgbRed: 0.09, green: 0.1, blue: 0.12, alpha: 1) : .white
+    }
+}
+
+/// The folder you are in and the Mac you are on, left of the tabs.
+@MainActor
+private final class WorkspacePlace: NSView {
+    private var folder = ""
+    private var host = ""
+    var tone: TextTone = .light { didSet { needsDisplay = true } }
+
+    var isEmpty: Bool { folder.isEmpty }
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func set(folder: String, host: String) {
+        guard folder != self.folder || host != self.host else { return }
+        self.folder = folder
+        self.host = host
+        setAccessibilityLabel("\(folder) on \(host)")
+        needsDisplay = true
+    }
+
+    private var titleFont: NSFont { .systemFont(ofSize: 12.5, weight: .semibold) }
+    private var hostFont: NSFont { .systemFont(ofSize: 10.5, weight: .regular) }
+
+    var preferredWidth: CGFloat {
+        let title = (folder as NSString).size(withAttributes: [.font: titleFont]).width
+        let sub = (host as NSString).size(withAttributes: [.font: hostFont]).width
+        return ceil(26 + max(title, sub))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let ink = tone.ink
+        if let symbol = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular)) {
+            let tinted = symbol.tinted(ink.withAlphaComponent(0.62))
+            let size = tinted.size
+            tinted.draw(in: NSRect(x: 0, y: (bounds.height - size.height) / 2, width: size.width, height: size.height))
+        }
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        let x: CGFloat = 26
+        let width = bounds.width - x
+        let top = bounds.midY - 15
+        (folder as NSString).draw(in: NSRect(x: x, y: top, width: width, height: 16), withAttributes: [
+            .font: titleFont, .foregroundColor: ink.withAlphaComponent(0.92), .paragraphStyle: style,
+        ])
+        (host as NSString).draw(in: NSRect(x: x, y: top + 16, width: width, height: 14), withAttributes: [
+            .font: hostFont, .foregroundColor: ink.withAlphaComponent(0.5), .paragraphStyle: style,
+        ])
     }
 }
 
 @MainActor
 private final class WorkspaceTabChip: NSView {
-    struct Item {
+    struct Item: Equatable {
         var id: String
-        var title: String
+        var label: (title: String, detail: String)
         var selected: Bool
-        var icons: [NSImage]
+        var icons: [ProcessIcon.Key]
         var closable: Bool
+
+        static func == (a: Item, b: Item) -> Bool {
+            a.id == b.id && a.label == b.label && a.selected == b.selected && a.icons == b.icons && a.closable == b.closable
+        }
     }
 
-    var item = Item(id: "", title: "", selected: false, icons: [], closable: false) {
-        didSet { needsDisplay = true; setAccessibilityValue(item.title) }
+    enum DragPhase { case began, moved, ended }
+
+    var item = Item(id: "", label: ("", ""), selected: false, icons: [], closable: false) {
+        didSet {
+            guard item != oldValue else { return }
+            needsDisplay = true
+            setAccessibilityLabel(item.label.title)
+            setAccessibilityValue(item.label.detail)
+            setAccessibilitySelected(item.selected)
+        }
+    }
+    var tone: TextTone = .light {
+        didSet { if tone != oldValue { needsDisplay = true } }
     }
     var onSelect: ((String) -> Void)?
     var onClose: ((String) -> Void)?
     var onRename: ((String) -> Void)?
-    private var hover = false
-    private var pressed = false
+    var onHover: (() -> Void)?
+    var onDrag: ((WorkspaceTabChip, NSEvent, DragPhase) -> Void)?
+    private(set) var hovering = false
+    private var overClose = false
+    private var pressedClose = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.masksToBounds = true
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
-        setAccessibilityRole(.button)
-        setAccessibilityLabel("Workspace tab")
+        layer?.cornerCurve = .continuous
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.radioButton)
     }
 
     @available(*, unavailable)
@@ -187,178 +505,304 @@ private final class WorkspaceTabChip: NSView {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
 
+    private var titleFont: NSFont { .systemFont(ofSize: 12, weight: .medium) }
+    private var detailFont: NSFont { .systemFont(ofSize: 12, weight: .regular) }
+
     func preferredWidth(height: CGFloat) -> CGFloat {
-        let icon = iconsWidth(height: height)
-        let label = (item.title as NSString).size(withAttributes: [.font: font]).width
-        let close: CGFloat = (item.closable && (item.selected || hover)) ? 16 : 0
-        return ceil(7 + icon + (icon > 0 ? 5 : 0) + min(label, 118) + close + 8)
+        let title = (item.label.title as NSString).size(withAttributes: [.font: titleFont]).width
+        let detail = item.label.detail.isEmpty ? 0 : 6 + (item.label.detail as NSString).size(withAttributes: [.font: detailFont]).width
+        return ceil(10 + iconsWidth(height: height) + 7 + title + detail + 26)
     }
 
-    private var font: NSFont { .systemFont(ofSize: 11, weight: .medium) }
+    private func iconSize(height: CGFloat) -> CGFloat { floor(height - 10) }
 
     private func iconsWidth(height: CGFloat) -> CGFloat {
-        let size = height - 8
-        let count = CGFloat(item.icons.count)
-        guard count > 0 else { return 0 }
-        return size + max(0, count - 1) * (size - 6)
+        let size = iconSize(height: height)
+        guard !item.icons.isEmpty else { return size }
+        return size + CGFloat(item.icons.count - 1) * size * 0.55
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let selected = item.selected
-        let fill = selected ? 0.22 : (hover || pressed ? 0.12 : 0.05)
-        let stroke = selected ? 0.34 : 0.12
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
-        NSColor.white.withAlphaComponent(fill).setFill()
-        path.fill()
-        NSColor.white.withAlphaComponent(stroke).setStroke()
-        path.lineWidth = 1
-        path.stroke()
+    private var closeRect: NSRect {
+        NSRect(x: bounds.width - 22, y: (bounds.height - 16) / 2, width: 16, height: 16)
+    }
 
-        var x: CGFloat = 7
-        let iconSize = bounds.height - 8
-        let iconY = (bounds.height - iconSize) / 2
-        for (index, image) in item.icons.enumerated() {
-            let rect = NSRect(x: x, y: iconY, width: iconSize, height: iconSize)
-            ProcessIcon.draw(image, in: rect, emphasized: selected || hover)
-            x += index == item.icons.count - 1 ? iconSize + 5 : iconSize - 6
+    private var showsClose: Bool { item.closable && (hovering || item.selected) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let ink = tone.ink
+        let selected = item.selected
+        if hovering, !selected {
+            ink.withAlphaComponent(0.06).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2 - 1, yRadius: bounds.height / 2 - 1).fill()
         }
-        let closeSpace: CGFloat = (item.closable && (selected || hover)) ? 16 : 0
-        let labelRect = NSRect(x: x, y: 0, width: max(8, bounds.width - x - 8 - closeSpace), height: bounds.height)
-        let color = NSColor.labelColor.withAlphaComponent(selected ? 0.92 : 0.62)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        (item.title as NSString).draw(in: labelRect.insetBy(dx: 0, dy: (bounds.height - 14) / 2), withAttributes: [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph,
+
+        let size = iconSize(height: bounds.height)
+        var x: CGFloat = 8
+        let iconY = (bounds.height - size) / 2
+        let keys = item.icons.isEmpty ? [ProcessIcon.Key(name: "zsh", path: nil)] : item.icons
+        // Drawn back to front so the first icon sits on top, like a fanned stack.
+        let rects = keys.indices.map { NSRect(x: x + CGFloat($0) * size * 0.55, y: iconY, width: size, height: size) }
+        for (key, rect) in zip(keys, rects).reversed() {
+            ProcessIcon.draw(key, in: rect, dimmed: !selected && !hovering)
+        }
+        x += iconsWidth(height: bounds.height) + 7
+
+        let closeRoom: CGFloat = showsClose ? 24 : 10
+        let room = max(0, bounds.width - x - closeRoom)
+        let alpha: CGFloat = selected ? 0.95 : (hovering ? 0.8 : 0.6)
+        let line = NSMutableAttributedString(string: item.label.title, attributes: [
+            .font: titleFont, .foregroundColor: ink.withAlphaComponent(alpha),
         ])
-        if item.closable, selected || hover {
-            let closeRect = NSRect(x: bounds.width - 16, y: (bounds.height - 10) / 2, width: 10, height: 10)
-            let xPath = NSBezierPath()
-            xPath.move(to: NSPoint(x: closeRect.minX + 1.5, y: closeRect.minY + 1.5))
-            xPath.line(to: NSPoint(x: closeRect.maxX - 1.5, y: closeRect.maxY - 1.5))
-            xPath.move(to: NSPoint(x: closeRect.maxX - 1.5, y: closeRect.minY + 1.5))
-            xPath.line(to: NSPoint(x: closeRect.minX + 1.5, y: closeRect.maxY - 1.5))
-            xPath.lineWidth = 1.2
-            xPath.lineCapStyle = .round
-            NSColor.labelColor.withAlphaComponent(0.7).setStroke()
-            xPath.stroke()
+        if !item.label.detail.isEmpty {
+            line.append(NSAttributedString(string: "  " + item.label.detail, attributes: [
+                .font: detailFont, .foregroundColor: ink.withAlphaComponent(alpha * 0.55),
+            ]))
+        }
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
+        if room > 8 {
+            let textHeight = ceil(titleFont.ascender - titleFont.descender)
+            line.draw(with: NSRect(x: x, y: (bounds.height - textHeight) / 2 - 0.5, width: room, height: textHeight),
+                      options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        }
+
+        if showsClose, bounds.width > 64 {
+            let rect = closeRect
+            if overClose {
+                ink.withAlphaComponent(pressedClose ? 0.22 : 0.13).setFill()
+                NSBezierPath(ovalIn: rect).fill()
+            }
+            let glyph = rect.insetBy(dx: 5, dy: 5)
+            let cross = NSBezierPath()
+            cross.move(to: NSPoint(x: glyph.minX, y: glyph.minY))
+            cross.line(to: NSPoint(x: glyph.maxX, y: glyph.maxY))
+            cross.move(to: NSPoint(x: glyph.maxX, y: glyph.minY))
+            cross.line(to: NSPoint(x: glyph.minX, y: glyph.maxY))
+            cross.lineWidth = 1.3
+            cross.lineCapStyle = .round
+            ink.withAlphaComponent(overClose ? 0.9 : 0.55).setStroke()
+            cross.stroke()
         }
     }
 
     override func mouseEntered(with event: NSEvent) {
-        hover = true
+        hovering = true
         needsDisplay = true
+        onHover?()
     }
 
     override func mouseExited(with event: NSEvent) {
-        hover = false
-        pressed = false
+        hovering = false
+        overClose = false
         needsDisplay = true
+        onHover?()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let inside = showsClose && closeRect.insetBy(dx: -3, dy: -3).contains(convert(event.locationInWindow, from: nil))
+        if inside != overClose {
+            overClose = inside
+            needsDisplay = true
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
-        pressed = true
-        needsDisplay = true
         if event.clickCount == 2 {
             onRename?(item.id)
-            pressed = false
             return
         }
+        let local = convert(event.locationInWindow, from: nil)
+        if showsClose, closeRect.insetBy(dx: -3, dy: -3).contains(local) {
+            pressedClose = true
+            needsDisplay = true
+            return
+        }
+        onDrag?(self, event, .began)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !pressedClose else { return }
+        onDrag?(self, event, .moved)
     }
 
     override func mouseUp(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        pressed = false
-        needsDisplay = true
-        guard bounds.contains(local) else { return }
-        if item.closable, local.x > bounds.width - 18 {
-            onClose?(item.id)
+        if pressedClose {
+            pressedClose = false
+            needsDisplay = true
+            if closeRect.insetBy(dx: -3, dy: -3).contains(convert(event.locationInWindow, from: nil)) {
+                onClose?(item.id)
+            }
             return
         }
-        onSelect?(item.id)
+        guard event.clickCount < 2 else { return }
+        onDrag?(self, event, .ended)
+    }
+
+    /// Middle-click closes, as in a browser.
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2, item.closable,
+              bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onClose?(item.id)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Rename Tab", action: #selector(rename), keyEquivalent: "")
+        menu.addItem(withTitle: "Rename Tab…", action: #selector(rename), keyEquivalent: "")
         if item.closable {
+            menu.addItem(.separator())
             menu.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "")
         }
         for entry in menu.items { entry.target = self }
         return menu
     }
 
+    override func accessibilityPerformPress() -> Bool {
+        onSelect?(item.id)
+        return true
+    }
+
     @objc private func rename() { onRename?(item.id) }
     @objc private func closeTab() { onClose?(item.id) }
 }
 
+/// A round, borderless titlebar button that lights up under the pointer.
 @MainActor
-private final class WorkspaceTabPlus: NSButton {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        bezelStyle = .inline
+private final class TitlebarButton: NSButton {
+    var tone: TextTone = .light { didSet { refresh() } }
+    private var hovering = false
+
+    init(symbol: String, label: String) {
+        super.init(frame: .zero)
         isBordered = false
         title = ""
-        image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New tab")
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
         imagePosition = .imageOnly
-        contentTintColor = NSColor.labelColor.withAlphaComponent(0.55)
-        imageScaling = .scaleProportionallyDown
-        setAccessibilityLabel("New tab")
+        imageScaling = .scaleNone
+        toolTip = label
+        setAccessibilityLabel(label)
         focusRingType = .none
         wantsLayer = true
-        layer?.cornerRadius = 7
-        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.cornerCurve = .continuous
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+        refresh()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
     override var mouseDownCanMoveWindow: Bool { false }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; refresh() }
+    override func mouseExited(with event: NSEvent) { hovering = false; refresh() }
+
+    private func refresh() {
+        let ink = tone.ink
+        contentTintColor = ink.withAlphaComponent(hovering ? 0.9 : 0.58)
+        layer?.backgroundColor = ink.withAlphaComponent(hovering ? 0.1 : 0).cgColor
+    }
+}
+
+private extension NSImage {
+    func tinted(_ color: NSColor) -> NSImage {
+        let image = NSImage(size: size, flipped: false) { rect in
+            self.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
 }
 
 enum ProcessIcon {
-    static func image(name: String, path: String?) -> NSImage {
-        if let path, let app = bundle(containing: path) {
+    struct Key: Hashable {
+        var name: String
+        /// The .app the process runs from, when it runs from one.
+        var path: String?
+    }
+
+    /// Looking up an app's icon reads the disk. The strip refreshes every second, so remember them.
+    @MainActor private static var cache: [Key: NSImage?] = [:]
+
+    @MainActor static func appIcon(_ key: Key) -> NSImage? {
+        if let hit = cache[key] { return hit }
+        let image = lookup(key)
+        cache[key] = image
+        return image
+    }
+
+    @MainActor private static func lookup(_ key: Key) -> NSImage? {
+        if let app = key.path {
             return NSWorkspace.shared.icon(forFile: app)
         }
-        let token = name.lowercased()
-        if shells.contains(token) {
-            return symbol(name)
-        }
+        let token = key.name.lowercased()
+        if shells.contains(token) { return nil }
         if let identifier = bundleID(token),
            let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) {
             return NSWorkspace.shared.icon(forFile: url.path)
         }
-        let applications = "/Applications/\(name).app"
+        let applications = "/Applications/\(key.name).app"
         if FileManager.default.fileExists(atPath: applications) {
             return NSWorkspace.shared.icon(forFile: applications)
         }
-        if let path, FileManager.default.fileExists(atPath: path), bundle(containing: path) != nil {
-            return NSWorkspace.shared.icon(forFile: path)
-        }
-        return symbol(name)
+        return nil
     }
 
-    static func draw(_ image: NSImage, in rect: NSRect, emphasized: Bool) {
+    /// An app's own icon, or a dark tile with a terminal glyph for shells and plain commands.
+    @MainActor static func draw(_ key: Key, in rect: NSRect, dimmed: Bool) {
         NSGraphicsContext.saveGraphicsState()
-        let path = NSBezierPath(ovalIn: rect)
-        path.addClip()
-        NSColor.white.withAlphaComponent(emphasized ? 0.16 : 0.08).setFill()
-        path.fill()
-        image.draw(in: rect.insetBy(dx: 0.5, dy: 0.5), from: .zero, operation: .sourceOver, fraction: emphasized ? 1 : 0.9)
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+        shadow.shadowBlurRadius = 2
+        shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+        shadow.set()
+        if let image = appIcon(key) {
+            image.draw(in: rect.insetBy(dx: -1, dy: -1), from: .zero, operation: .sourceOver, fraction: dimmed ? 0.85 : 1)
+            NSGraphicsContext.restoreGraphicsState()
+            return
+        }
+        let radius = rect.width * 0.27
+        let tile = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        let gradient = NSGradient(
+            starting: NSColor(srgbRed: 0.27, green: 0.29, blue: 0.34, alpha: 1),
+            ending: NSColor(srgbRed: 0.11, green: 0.12, blue: 0.15, alpha: 1)
+        )
+        gradient?.draw(in: tile, angle: -90)
         NSGraphicsContext.restoreGraphicsState()
-        NSColor.white.withAlphaComponent(emphasized ? 0.4 : 0.2).setStroke()
-        let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 0.4, dy: 0.4))
-        ring.lineWidth = 0.8
-        ring.stroke()
+        NSColor.white.withAlphaComponent(0.14).setStroke()
+        let rim = NSBezierPath(roundedRect: rect.insetBy(dx: 0.25, dy: 0.25), xRadius: radius, yRadius: radius)
+        rim.lineWidth = 0.5
+        rim.stroke()
+        let glyph = glyphName(key.name)
+        if let symbol = NSImage(systemSymbolName: glyph, accessibilityDescription: key.name)?
+            .withSymbolConfiguration(.init(pointSize: rect.width * 0.48, weight: .semibold)) {
+            let tinted = symbol.tinted(NSColor.white.withAlphaComponent(dimmed ? 0.75 : 0.95))
+            let size = tinted.size
+            tinted.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
+        }
     }
 
-    private static let shells: Set<String> = ["zsh", "bash", "sh", "dash", "ksh", "nu", "pwsh"]
-
-    private static func symbol(_ name: String) -> NSImage {
-        NSImage(systemSymbolName: "terminal.fill", accessibilityDescription: name) ?? NSImage()
+    private static func glyphName(_ name: String) -> String {
+        switch name.lowercased() {
+        case "ssh", "mosh", "et": "network"
+        case "vim", "nvim", "vi", "nano", "emacs", "hx", "helix", "micro": "pencil"
+        case "git", "lazygit", "tig", "gitui": "arrow.triangle.branch"
+        case "htop", "btop", "top", "glances", "bottom", "btm": "gauge.with.dots.needle.33percent"
+        case "python", "python3", "ipython": "chevron.left.forwardslash.chevron.right"
+        case "man", "less", "more", "bat": "doc.text"
+        default: "chevron.right"
+        }
     }
+
+    private static let shells: Set<String> = ["zsh", "bash", "sh", "dash", "ksh", "nu", "pwsh", "-zsh", "-bash"]
 
     static func bundle(containing path: String) -> String? {
         var url = URL(fileURLWithPath: path)

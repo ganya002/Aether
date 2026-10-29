@@ -101,6 +101,9 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.titlebarSeparatorStyle = .none
+        // An empty toolbar makes the titlebar tall enough for the tab strip and centers the traffic lights in it.
+        window.toolbar = Self.titlebarToolbar()
+        window.toolbarStyle = .unifiedCompact
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -172,8 +175,20 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     func reloadTabs() {
         guard let desk = AppModel.shared.desks[deskID] else { return }
-        tabs.reload(desk)
+        // The dropdown has no traffic lights or tabs, so it gets the short titlebar.
+        if desk.dropdown, window?.toolbar != nil {
+            window?.toolbar = nil
+        }
+        tabs.reload(desk, tone: AppModel.shared.settings.text.effective)
         tabs.attach(to: window, dropdown: desk.dropdown)
+    }
+
+    private static func titlebarToolbar() -> NSToolbar {
+        let toolbar = NSToolbar(identifier: "AetherTitlebar")
+        toolbar.showsBaselineSeparator = false
+        toolbar.allowsUserCustomization = false
+        toolbar.displayMode = .iconOnly
+        return toolbar
     }
 
     func presentAnimated() {
@@ -572,6 +587,8 @@ final class DeskCanvas: NSView {
     private let hud = LayoutHUD()
     private var hudToken = 0
     private var layoutGeneration = 0
+    /// The tab shown last time, so switching tabs can slide toward the one picked.
+    private var shownTab: (id: String, index: Int)?
     private var dimToken = 0
     private var restFrostVisible = false
 
@@ -616,6 +633,13 @@ final class DeskCanvas: NSView {
             placed = Layout.place(desk.layout, in: area, gap: CGFloat(settings.gap))
         }
 
+        // Switching tabs slides the old layout out and the new one in from the side the tab sits on.
+        var slide: CGFloat = 0
+        if let shown = shownTab, shown.id != desk.activeTabID, animated, !Motion.reduced {
+            slide = min(56, bounds.width * 0.05) * (desk.activeIndex >= shown.index ? 1 : -1)
+        }
+        shownTab = (desk.activeTabID, desk.activeIndex)
+
         let live = Set(desk.layout.panes)
         var departing: [PaneChrome] = []
         for subview in subviews {
@@ -631,7 +655,7 @@ final class DeskCanvas: NSView {
             let fresh = chrome.superview !== self
             if fresh {
                 chrome.alphaValue = 0
-                chrome.frame = Motion.reduced ? item.frame : Self.scaled(item.frame, by: 0.9)
+                chrome.frame = Motion.reduced ? item.frame : slide != 0 ? item.frame.offsetBy(dx: slide, dy: 0) : Self.scaled(item.frame, by: 0.9)
                 addSubview(chrome)
             }
             let revealing = chrome.isHidden || chrome.alphaValue < 0.05
@@ -643,7 +667,7 @@ final class DeskCanvas: NSView {
             if animated && (fresh || revealing || !Self.nearly(chrome.frame, item.frame)) {
                 if revealing && !fresh {
                     chrome.alphaValue = 0
-                    chrome.frame = item.frame
+                    chrome.frame = slide != 0 ? item.frame.offsetBy(dx: slide, dy: 0) : item.frame
                 }
                 motions.append((chrome, item.frame, 1))
             } else {
@@ -686,7 +710,7 @@ final class DeskCanvas: NSView {
                 for chrome in departing {
                     chrome.animator().alphaValue = 0
                     if !Motion.reduced {
-                        chrome.animator().frame = Self.scaled(chrome.frame, by: 0.92)
+                        chrome.animator().frame = slide != 0 ? chrome.frame.offsetBy(dx: -slide, dy: 0) : Self.scaled(chrome.frame, by: 0.92)
                     }
                 }
                 for grip in oldDividers {

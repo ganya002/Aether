@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SystemConfiguration
 
 enum System {
     /// The side-by-side development build. It keeps its own settings, sessions, and control port,
@@ -163,6 +164,12 @@ enum System {
             return (name, path)
         }
     }
+
+    /// The Mac's name as Sharing shows it ("Gabriel's MacBook Air"). Read once; it rarely changes.
+    static let hostName: String = {
+        if let name = SCDynamicStoreCopyComputerName(nil, nil) as String?, !name.isEmpty { return name }
+        return ProcessInfo.processInfo.hostName.replacingOccurrences(of: ".local", with: "")
+    }()
 
     static func supportDirectory() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
