@@ -1,6 +1,6 @@
 // swift-tools-version:6.0
-// Vendored from SwiftTerm 1.20.0 (MIT). The Metal shader is excluded because
-// the Command Line Tools do not ship `metal`. Aether uses the CoreGraphics renderer.
+// Vendored from SwiftTerm 1.20.0 (MIT). The Command Line Tools do not ship `metal`,
+// so Shaders.metal lives in ShaderSource.swift as a string compiled at runtime.
 
 import PackageDescription
 
@@ -30,7 +30,7 @@ let package = Package(
             name: "SwiftTerm",
             dependencies: ["AetherSpawn"],
             path: "Sources/SwiftTerm",
-            exclude: ["Mac/README.md", "Apple/Metal/Shaders.metal"],
+            exclude: ["Mac/README.md"],
             plugins: [
                 .plugin(name: "SwiftTermBuildInfoPlugin"),
             ]

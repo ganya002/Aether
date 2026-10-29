@@ -201,6 +201,9 @@ public struct Settings: Codable, Equatable, Sendable {
     public var shellIntegration: Bool = true
     /// Save each pane's text and show it again, above a new prompt, after Aether restarts.
     public var restoreContents: Bool = true
+    /// Draw terminal text with Metal. Panes fall back to CoreGraphics when Metal is missing or its shaders fail to compile.
+    /// Off by default: SwiftTerm's Metal path measured no faster than CoreGraphics and used more CPU per frame.
+    public var gpuRendering: Bool = false
 
     public static let currentVersion = 2
 
@@ -299,6 +302,7 @@ public struct Settings: Codable, Equatable, Sendable {
         dropdownHideOnFocusLoss = field(.dropdownHideOnFocusLoss, true)
         shellIntegration = field(.shellIntegration, true)
         restoreContents = field(.restoreContents, true)
+        gpuRendering = field(.gpuRendering, false)
         clamp()
     }
 

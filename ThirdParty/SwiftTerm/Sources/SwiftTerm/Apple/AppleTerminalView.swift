@@ -1762,7 +1762,7 @@ extension TerminalView {
 
     
     // TODO: this should not render any lines outside the dirtyRect
-    func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
+    public func drawTerminalContents (dirtyRect: CGRect, context: CGContext, bufferOffset: Int)
     {
         let lineDescent = CTFontGetDescent(fontSet.normal)
         let lineLeading = CTFontGetLeading(fontSet.normal)

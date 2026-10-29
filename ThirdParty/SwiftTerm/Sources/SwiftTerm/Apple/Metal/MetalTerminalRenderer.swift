@@ -3039,7 +3039,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 return source
             }
         }
-        return nil
+        return embeddedMetalShaderSource
     }
 
     private static func findMetallibURL() -> URL? {

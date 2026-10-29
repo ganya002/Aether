@@ -2009,6 +2009,7 @@ extension AppModel {
     static let agentSettingKeys: Set<String> = [
         "themeName", "glass", "shade", "text", "fontSize", "fontFamily", "lineHeight", "cornerRadius", "gap",
         "cursorShape", "cursorBlink", "copyOnSelect", "bell", "blurAmount", "minimumContrast", "notifyOnFinish",
+        "gpuRendering",
     ]
 
     private func agentSettings() -> [String: Any] {

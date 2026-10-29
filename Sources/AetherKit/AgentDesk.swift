@@ -831,7 +831,7 @@ enum AgentCLI {
     Change a setting. With no key, print the settings agents may change.
     Keys: themeName, glass, shade, text, fontSize, fontFamily, lineHeight,
     cornerRadius, gap, cursorShape, cursorBlink, copyOnSelect, bell, blurAmount,
-    minimumContrast, notifyOnFinish.
+    minimumContrast, notifyOnFinish, gpuRendering.
     
     Options:
       --json                          Print the raw reply.
