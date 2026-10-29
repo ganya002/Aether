@@ -2,6 +2,10 @@
 
 A native macOS terminal. Every pane is a real shell, and the window is Liquid Glass: it refracts whatever is actually behind it. There is no wallpaper image and no browser.
 
+![Aether. A shell and a page, with the desktop showing through the glass.](docs/screenshots/hero.png)
+
+Clear glass, in the picture. Regular, the default, is the same window with more shade.
+
 Open as many windows as you want, split them, and drag a pane out into a window of its own. Windows snap to each other when you let go. Hold Option to skip the snap.
 
 Requires macOS 26 or later.
