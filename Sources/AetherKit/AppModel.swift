@@ -214,6 +214,7 @@ final class AppModel {
         if portable == nil, (snapshot?.version ?? 0) < Settings.currentVersion, settings.glass == .clear {
             settings.glass = .regular
         }
+        settings = UserConfigCenter.shared.start(settings)
         if let snapshot {
             for saved in snapshot.desks {
                 restore(saved)
@@ -222,7 +223,7 @@ final class AppModel {
         if desks.isEmpty {
             newWindow()
         }
-        ConfigStore.save(settings)
+        ConfigStore.save(UserConfigCenter.shared.forWindow(settings))
         applyDock()
         if settings.notifyOnFinish {
             FinishNotifier.requestQuietPermissionIfUndecided()
@@ -858,6 +859,12 @@ final class AppModel {
         applySettings()
     }
 
+    /// A short message over the front window that fades on its own, like a config file mistake.
+    func flashNotice(_ text: String) {
+        guard let deskID = keyDeskID else { return }
+        controllers[deskID]?.canvas.flash(text, linger: 6, announce: true)
+    }
+
     func updateSettings(_ body: (inout Settings) -> Void) {
         body(&settings)
         settings.clamp()
@@ -1395,7 +1402,7 @@ final class AppModel {
         applyDock()
         HotkeyCenter.apply(enabled: settings.dropdownEnabled && !System.isDev, chord: settings.keys.chord(.dropdown))
         UpdateCenter.shared.applyPreference()
-        ConfigStore.save(settings)
+        ConfigStore.save(UserConfigCenter.shared.forWindow(settings))
         NotificationCenter.default.post(name: .aetherBindingsChanged, object: nil)
         scheduleSave()
     }
@@ -1559,7 +1566,7 @@ final class AppModel {
                 activeTabID: desk.activeTabID
             )
         }
-        SessionStore.save(Snapshot(version: Settings.currentVersion, settings: settings, desks: saved))
+        SessionStore.save(Snapshot(version: Settings.currentVersion, settings: UserConfigCenter.shared.forWindow(settings), desks: saved))
     }
 
     private static func initialTitle(command: String?, cwd: String) -> String {
@@ -1926,6 +1933,8 @@ extension AppModel {
             }
             updateSettings { $0 = updated }
             return ["ok": true, "key": key, "value": agentSettings()[key] ?? NSNull()]
+        case "/config":
+            return UserConfigCenter.shared.agentReply(body)
         default:
             return failure("Unknown request.")
         }

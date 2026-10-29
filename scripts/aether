@@ -24,7 +24,7 @@ COMMANDS = (
     "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
     "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
     "find", "screenshot", "workspace", "resize", "layout", "equalize", "focus", "window",
-    "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "set", "imgcat", "hook", "mcp", "help",
+    "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "set", "config", "imgcat", "hook", "mcp", "help",
 )
 
 
@@ -83,6 +83,7 @@ Commands:
   tab-select  Show a tab group. Also tab-rename, tab-close, tab-move.
   font        Make the type bigger or smaller.
   set         Change a setting, like the theme or the glass.
+  config      Find, check, or print the config file.
   imgcat      Show an image inline in this pane.
   status      Show what you are doing on this pane's header.
   notify      Post a macOS notification.
@@ -447,6 +448,22 @@ Examples:
   aether set
   aether set themeName Dracula
   aether set fontSize 15""",
+    "config": """usage: aether config <path|check|defaults> [file]
+
+The config file holds `key = value` lines that win over the Settings
+window. It lives at ~/.config/aether/config ($XDG_CONFIG_HOME/aether/config).
+Aether reloads it when you save.
+
+  path       Print where the file is.
+  check      List mistakes in the file, or in [file]. Exits 1 if there are any.
+  defaults   Print every key, commented out, at its default.
+
+Options:
+  --json                          Print the raw reply.
+
+Examples:
+  aether config check
+  aether config defaults > ~/.config/aether/config""",
     "imgcat": """usage: aether imgcat <file> [--width N]
 
 Draw an image (PNG, JPEG, GIF) inline in the pane you run it in, with the
@@ -502,6 +519,7 @@ SPECS = {
     "tab-close": (TARGET, JSON, False),
     "tab-move": (TARGET | {"--index"}, JSON, False),
     "set": (set(), JSON, False),
+    "config": (set(), JSON, False),
     "imgcat": ({"--width"}, set(), False),
 }
 
@@ -1013,7 +1031,7 @@ def main(argv):
         pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
     elif cmd == "run":
         pane = take_pane(positional, opts, env=False)
-    elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move"):
+    elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move", "config"):
         pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
     else:
         pane = take_pane(positional, opts)
@@ -1320,6 +1338,33 @@ def main(argv):
             rows = [f"{key} = {value}" for key, value in sorted((reply.get("settings") or {}).items())]
             return finish(reply, "\n".join(rows))
         return finish(reply, f"{reply.get('key')} = {reply.get('value')}")
+    if cmd == "config":
+        action = positional.pop(0) if positional else "path"
+        if action not in ("path", "check", "defaults"):
+            raise Usage("use `aether config path`, `aether config check [file]`, or `aether config defaults`.")
+        body = {"action": action}
+        if action == "check" and positional:
+            path = os.path.abspath(os.path.expanduser(positional.pop(0)))
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    body["text"] = handle.read()
+            except OSError as error:
+                raise Failure(f"could not read {path}: {error.strerror}.")
+            body["file"] = path
+        if positional:
+            raise Usage(f"unexpected {positional[0]}.")
+        reply = request("/config", body, None)
+        if raw or action == "path":
+            return finish(reply, reply.get("path"))
+        if action == "defaults":
+            sys.stdout.write(reply.get("text") or "")
+            return 0
+        problems = reply.get("problems") or []
+        for problem in problems:
+            print(problem.get("text"))
+        if not problems:
+            print(f"{reply.get('path')}: ok, {reply.get('settings', 0)} settings")
+        return 1 if problems else 0
     if cmd == "imgcat":
         if len(positional) != 1:
             raise Usage("give one image file, like `aether imgcat chart.png`.")

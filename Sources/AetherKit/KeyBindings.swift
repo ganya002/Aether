@@ -922,13 +922,14 @@ final class ShortcutButton: NSButton {
         font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         target = self
         action = #selector(pressed)
-        toolTip = "Click, then press the new keys. Delete removes it. Esc cancels."
+        toolTip = Self.hint
         self.recorder = recorder
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(greaterThanOrEqualToConstant: 92).isActive = true
     }
 
     private weak var recorder: ShortcutRecorder?
+    static let hint = "Click, then press the new keys. Delete removes it. Esc cancels."
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
@@ -1020,6 +1021,7 @@ final class KeybindBoard: NSView {
             row.isHidden = !shown.contains(action)
             let chord = map.chord(action)
             row.setChord(chord, recording: recorder.recording == action, follow: chord.follow.flatMap(AppAction.init(rawValue:)))
+            row.lock(line: UserConfigCenter.shared.config.sources["keybind:\(action.rawValue)"])
         }
         empty.isHidden = !shown.isEmpty
     }
@@ -1078,6 +1080,14 @@ final class KeybindRow: NSView {
         reset.isHidden = stock || recording
         layer?.backgroundColor = recording ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor : nil
         needsLayout = true
+    }
+
+    /// A shortcut the config file sets can't be changed here.
+    func lock(line: Int?) {
+        chord.isEnabled = line == nil
+        chord.toolTip = line.map(UserConfigCenter.lockNote) ?? ShortcutButton.hint
+        reset.isEnabled = line == nil
+        then.isEnabled = line == nil
     }
 
     override func layout() {

@@ -67,6 +67,26 @@ Unfocused panes dim by default. Settings can blur them, or leave them as they ar
 
 The portable settings file is `~/Library/Application Support/Aether/config.json`. Sessions, including open panes, stay in `session.json` beside it. Terminals reopen as shells in the directory they were left in. A terminal that was running a command does not run it again; it offers Run Again instead. If config.json stops being valid JSON, Aether moves it aside as `config.json.bad-<time>`, says so, and starts with defaults. A single bad value only resets that setting.
 
+## Config file
+
+For dotfiles, Aether also reads `~/.config/aether/config` (or `$XDG_CONFIG_HOME/aether/config`). It is Ghostty-style `key = value` lines, with `#` comments:
+
+```
+# ~/.config/aether/config
+theme = Tokyo Night
+font-family = "JetBrains Mono"
+font-size = 14
+glass = clear
+cursor-shape = block
+option-as-meta = left
+keybind = cmd+shift+t=new_tab
+keybind = cmd+k=unbind
+```
+
+A value in the file wins over the Settings window. Settings says so at the top and greys out each control the file sets; its tooltip names the line. Aether reloads the file when you save it, including from editors that save by renaming, like vim. A mistake never stops Aether from starting: it shows a short message such as ``config line 12: unknown key `fontsize` — did you mean `font-size`?`` and skips that line. If a key appears twice, the last one wins. `key =` with nothing after it leaves that setting to the Settings window.
+
+⌘P › Open Config File creates the file with every key commented out, then opens it. From a shell, `aether config path` prints where it is, `aether config check` lists mistakes (and exits 1), and `aether config defaults` prints the commented template.
+
 ## Credits
 
 Built by Gabby (ganya002), with help from Botty (Grokky-Bot-Cutie).
