@@ -353,6 +353,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .openConfig: UserConfigCenter.shared.openFile()
             case .glass(let style): model.updateSettings { $0.glass = style }
             case .help: openHelp()
+            case .saveWorkspace: model.promptSaveWorkspace()
+            case .openWorkspace(let name): model.openWorkspace(name)
+            case .renameWorkspace(let name): model.promptRenameWorkspace(name)
+            case .deleteWorkspace(let name): model.confirmDeleteWorkspace(name)
             }
         }
     }

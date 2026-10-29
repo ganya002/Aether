@@ -1522,6 +1522,7 @@ final class PaneController {
     /// Clears the screen and the scrollback and keeps the line the cursor is on, as ⌘K does in Terminal.app.
     /// A shell sitting at its prompt also gets ⌃L, so it redraws the whole prompt with whatever was typed.
     func clearBuffer() {
+        Scrollback.forget(id)
         let view = chrome.terminal
         guard let term = view.terminal else { return }
         if term.isCurrentBufferAlternate {
@@ -1606,7 +1607,15 @@ final class PaneController {
         return settings.shellExit == .close && code == 0 && plain
     }
 
+    /// Text saved from this pane last session. The first local launch draws it above the new prompt.
+    var restoredScrollback: (text: String, date: Date)?
+
     private func launchLocal() {
+        if let saved = restoredScrollback {
+            restoredScrollback = nil
+            let cols = chrome.terminal.terminal?.cols ?? 80
+            chrome.terminal.feed(text: saved.text + Scrollback.divider(saved.date, cols: cols))
+        }
         let shell = System.userShell()
         let directory = FileManager.default.fileExists(atPath: cwd) ? cwd : System.home()
         cwd = directory

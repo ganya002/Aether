@@ -42,6 +42,7 @@ aether close "$id"
 | `window` | Size, move, zoom, or full-screen a window. |
 | `focus` | Move the keyboard into a pane. |
 | `tabs` / `tab-select` / `tab-rename` / `tab-move` / `tab-close` | Tab groups. |
+| `workspaces` / `workspace-save` / `workspace-open` | Named sets of tabs with their layouts and commands. |
 | `set` | Theme, glass, font size, and other safe settings. |
 | `config` | `path`, `check`, or `defaults` for `~/.config/aether/config`. |
 | `imgcat` | Draw an image inline (kitty graphics and sixel work too). |

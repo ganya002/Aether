@@ -133,6 +133,7 @@ final class AppModel {
     private var focusHistory: [String: [String]] = [:]
     private var busySince: [String: (date: Date, command: String)] = [:]
     private var lazySaveItem: DispatchWorkItem?
+    private var scrollbackSaved = Date.distantPast
     private var confirmedDeskClose: Set<String> = []
     private var asking: Set<String> = []
     /// Set when the person already agreed to stop running terminals, such as Restart to Update.
@@ -388,6 +389,32 @@ final class AppModel {
         controllers[deskID]?.sync(animated: true)
         startSoon(paneID)
         scheduleSave()
+    }
+
+    /// Adds whole tab groups, panes and all, to a window, or to a new window when `deskID` is nil.
+    /// Saved workspaces open through here. Returns the window.
+    func openTabs(_ tabs: [WorkspaceTab], panes states: [PaneState], in deskID: String?) -> String? {
+        guard let first = tabs.first else { return nil }
+        let target = deskID.flatMap { id in desks[id]?.dropdown == false && controllers[id] != nil ? id : nil }
+        let id = target ?? UUID().uuidString
+        var desk = desks[id] ?? Desk(
+            id: id, layout: first.layout, kind: first.kind, focusedID: first.focusedID, maximizedID: nil,
+            broadcast: false, frame: cascadedFrame(), panes: [:], tabs: []
+        )
+        desk.tabs = target == nil ? tabs : desk.tabs + tabs
+        desk.activeTabID = first.id
+        for state in states { desk.panes[state.id] = state }
+        desks[id] = desk
+        if target == nil {
+            order.append(id)
+            _ = makeController(desk)
+        }
+        for state in states { makePane(state, settings: settings) }
+        controllers[id]?.sync(animated: target != nil)
+        if target == nil { controllers[id]?.presentAnimated() }
+        for state in states { startSoon(state.id) }
+        scheduleSave()
+        return id
     }
 
     func selectTab(_ tabID: String, in deskID: String) {
@@ -1116,6 +1143,7 @@ final class AppModel {
     func shutdownAll() {
         // Saved panes keep their Cloud terminals for next launch. The dropdown is not saved, so its terminal ends.
         let unsaved = Set(dropdownID.flatMap { desks[$0]?.panes.keys }.map(Array.init) ?? [])
+        if !CommandLine.arguments.contains("--smoke") { saveScrollback(force: true) }
         for (id, pane) in panes {
             if unsaved.contains(id) { pane.endRemoteSession() }
             pane.shutdown()
@@ -1317,6 +1345,9 @@ final class AppModel {
                 plain.title = Self.initialTitle(command: nil, cwd: pane.cwd)
             }
             makePane(plain, settings: settings)
+            if settings.restoreContents, pane.remoteSession == nil {
+                self.panes[pane.id]?.restoredScrollback = Scrollback.load(pane.id)
+            }
             let last = (pane.command ?? pane.lastRan)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !last.isEmpty {
                 self.panes[pane.id]?.offerRerun(last)
@@ -1567,6 +1598,25 @@ final class AppModel {
             )
         }
         SessionStore.save(Snapshot(version: Settings.currentVersion, settings: UserConfigCenter.shared.forWindow(settings), desks: saved))
+        saveScrollback(force: false)
+    }
+
+    /// Writes the text of every saved pane, and deletes the copies of panes that are gone.
+    /// ponytail: panes are re-read at most every 30 seconds, since 5,000 lines each is not free;
+    /// quitting always writes. Track output per pane if a crash should lose less.
+    private func saveScrollback(force: Bool) {
+        let saved = order.compactMap { desks[$0] }.filter { !$0.dropdown }.flatMap(\.allPaneIDs)
+        let keep = settings.restoreContents ? Set(saved) : []
+        var texts: [String: String] = [:]
+        if !keep.isEmpty, force || Date().timeIntervalSince(scrollbackSaved) > 30 {
+            scrollbackSaved = Date()
+            for id in keep {
+                guard let view = panes[id]?.chrome.terminal, view.remoteSession == nil,
+                      let term = view.terminal, let text = Scrollback.ansi(term) else { continue }
+                texts[id] = text
+            }
+        }
+        Scrollback.save(texts, keep: keep, wait: force)
     }
 
     private static func initialTitle(command: String?, cwd: String) -> String {
@@ -1917,6 +1967,21 @@ extension AppModel {
                 moveTab(tabID, to: index, in: deskID)
             }
             return ["ok": true, "tab": tabID, "window": deskID]
+        case "/workspaces":
+            return ["ok": true, "workspaces": Self.workspaceRows(WorkspaceStore.load())]
+        case "/workspace-save":
+            let name = (body["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return failure("Give the workspace a name.") }
+            let deskID = (try? resolved.get().desk) ?? keyDeskID
+            guard let saved = saveWorkspace(name, deskID: deskID) else { return failure("No window to save.") }
+            return ["ok": true, "workspace": Self.workspaceRows([saved])[0]]
+        case "/workspace-open":
+            let name = body["name"] as? String ?? ""
+            guard let deskID = openWorkspace(name) else {
+                let names = WorkspaceStore.load().map(\.name)
+                return failure("No workspace \(name)." + (names.isEmpty ? " Save one with `aether workspace-save <name>`." : " Saved: " + names.joined(separator: ", ") + "."))
+            }
+            return ["ok": true, "window": deskID, "tabs": desks[deskID]?.tabs.map(\.id) ?? []]
         case "/set":
             guard let key = body["key"] as? String, !key.isEmpty else {
                 return ["ok": true, "settings": agentSettings()]
