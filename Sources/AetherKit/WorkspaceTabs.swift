@@ -16,12 +16,16 @@ final class WorkspaceTabStrip: NSView {
     private var selectedID = ""
     private var drag: (chip: WorkspaceTabChip, grab: CGFloat, moved: Bool)?
     private var laidOut = false
+    /// How far the tabs are scrolled when there are more than fit.
+    private var scrollX: CGFloat = 0
+    private var scrollToSelection = true
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         autoresizingMask = [.width]
         track.wantsLayer = true
+        track.layer?.masksToBounds = true
         pill.wantsLayer = true
         addSubview(place)
         addSubview(track)
@@ -74,7 +78,8 @@ final class WorkspaceTabStrip: NSView {
                 label: Self.label(for: tab, in: desk),
                 selected: tab.id == desk.activeTabID,
                 icons: Self.icons(for: tab),
-                closable: desk.tabs.count > 1
+                closable: desk.tabs.count > 1,
+                status: tab.id == desk.activeTabID ? .none : Self.status(for: tab)
             )
         }
         let focused = AppModel.shared.panes[desk.focusedID]
@@ -107,6 +112,7 @@ final class WorkspaceTabStrip: NSView {
         }
         let selection = items.first(where: \.selected)?.id ?? ""
         let changed = !fresh.isEmpty || !gone.isEmpty || selection != selectedID
+        if changed { scrollToSelection = true }
         selectedID = selection
         for chip in gone { dismiss(chip) }
         layoutStrip(animated: laidOut && changed, fresh: fresh)
@@ -150,6 +156,14 @@ final class WorkspaceTabStrip: NSView {
         if drag == nil { layoutStrip(animated: false, fresh: []) }
     }
 
+    /// A wheel or trackpad swipe over the tabs scrolls them when there are more than fit.
+    override func scrollWheel(with event: NSEvent) {
+        let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
+        guard drag == nil, delta != 0 else { return super.scrollWheel(with: event) }
+        scrollX -= event.hasPreciseScrollingDeltas ? delta : delta * 12
+        layoutStrip(animated: false, fresh: [])
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
         // Empty titlebar still drags the window and double-click still zooms it.
@@ -182,14 +196,25 @@ final class WorkspaceTabStrip: NSView {
         }
 
         let available = max(0, launch.frame.minX - 10 - x)
-        let widths = Self.fit(chips.map { $0.preferredWidth(height: chipHeight) }, into: available - Self.inset * 2)
+        let widths = Self.fit(chips.map { $0.preferredWidth(height: chipHeight) }, into: available - Self.inset * 2,
+                              keep: chips.firstIndex { $0.item.selected })
         var cursor = Self.inset
         var frames: [NSRect] = []
         for width in widths {
             frames.append(NSRect(x: cursor, y: Self.inset, width: width, height: chipHeight))
             cursor += width + Self.gap
         }
-        let trackWidth = chips.isEmpty ? 0 : cursor - Self.gap + Self.inset
+        let contentWidth = chips.isEmpty ? 0 : cursor - Self.gap + Self.inset
+        let trackWidth = min(contentWidth, available)
+        let overflow = max(0, contentWidth - trackWidth)
+        if let selected = chips.firstIndex(where: { $0.item.selected }), scrollToSelection, overflow > 0 {
+            let frame = frames[selected]
+            if frame.minX - scrollX < Self.inset { scrollX = frame.minX - Self.inset }
+            if frame.maxX - scrollX > trackWidth - Self.inset { scrollX = frame.maxX - trackWidth + Self.inset }
+        }
+        scrollToSelection = false
+        scrollX = min(max(0, scrollX), overflow)
+        frames = frames.map { $0.offsetBy(dx: -scrollX, dy: 0) }
         track.frame = NSRect(x: x, y: midY, width: trackWidth, height: trackHeight)
         track.layer?.cornerRadius = trackHeight / 2 - 1
 
@@ -232,13 +257,20 @@ final class WorkspaceTabStrip: NSView {
 
     /// Each tab gets the width it asks for, up to 220. When they do not fit, they share the room
     /// evenly, but never go below an icon's width.
-    nonisolated static func fit(_ wanted: [CGFloat], into room: CGFloat, gap: CGFloat = gap) -> [CGFloat] {
+    /// The tab at `keep` (the selected one) stays readable, up to 150, while the rest squeeze.
+    nonisolated static func fit(_ wanted: [CGFloat], into room: CGFloat, keep: Int? = nil, gap: CGFloat = gap) -> [CGFloat] {
         guard !wanted.isEmpty else { return [] }
         let capped = wanted.map { min(220, max(96, $0)) }
         let gaps = gap * CGFloat(wanted.count - 1)
         if capped.reduce(0, +) + gaps <= room { return capped }
         let even = max(36, floor((room - gaps) / CGFloat(wanted.count)))
-        return capped.map { min($0, even) }
+        var widths = capped.map { min($0, even) }
+        if let keep, widths.indices.contains(keep), wanted.count > 1 {
+            let kept = min(capped[keep], max(even, 150))
+            let rest = max(36, floor((room - gaps - kept) / CGFloat(wanted.count - 1)))
+            widths = capped.indices.map { $0 == keep ? kept : min(capped[$0], rest) }
+        }
+        return widths
     }
 
     private func refreshSeparators(frames: [NSRect]? = nil) {
@@ -374,6 +406,16 @@ final class WorkspaceTabStrip: NSView {
         return (pane.tabProcess().name, path)
     }
 
+    /// What a tab in the background is up to: a red or green dot for a command that finished
+    /// while you were away, or a pulse while something still runs.
+    static func status(for tab: WorkspaceTab) -> WorkspaceTabChip.Status {
+        let unseen = AppModel.shared.unseenFinishes[tab.id]
+        if let unseen, unseen != 0 { return .failed }
+        let busy = Layout.visualIDs(tab.layout).contains { AppModel.shared.panes[$0]?.runningCommand() != nil }
+        if busy { return .busy }
+        return unseen == nil ? .none : .succeeded
+    }
+
     static func folderName(_ path: String) -> String {
         let shown = System.displayPath(path)
         if shown == "~" || shown == "/" { return shown }
@@ -454,18 +496,23 @@ private final class WorkspacePlace: NSView {
 }
 
 @MainActor
-private final class WorkspaceTabChip: NSView {
+final class WorkspaceTabChip: NSView {
     struct Item: Equatable {
         var id: String
         var label: (title: String, detail: String)
         var selected: Bool
         var icons: [ProcessIcon.Key]
         var closable: Bool
+        var status: Status = .none
 
         static func == (a: Item, b: Item) -> Bool {
-            a.id == b.id && a.label == b.label && a.selected == b.selected && a.icons == b.icons && a.closable == b.closable
+            a.id == b.id && a.label == b.label && a.selected == b.selected && a.icons == b.icons
+                && a.closable == b.closable && a.status == b.status
         }
     }
+
+    enum Status: Equatable { case none, busy, succeeded, failed }
+    private let badge = CALayer()
 
     enum DragPhase { case began, moved, ended }
 
@@ -476,10 +523,11 @@ private final class WorkspaceTabChip: NSView {
             setAccessibilityLabel(item.label.title)
             setAccessibilityValue(item.label.detail)
             setAccessibilitySelected(item.selected)
+            if item.status != oldValue.status { refreshBadge() }
         }
     }
     var tone: TextTone = .light {
-        didSet { if tone != oldValue { needsDisplay = true } }
+        didSet { if tone != oldValue { needsDisplay = true; refreshBadge() } }
     }
     var onSelect: ((String) -> Void)?
     var onClose: ((String) -> Void)?
@@ -497,6 +545,45 @@ private final class WorkspaceTabChip: NSView {
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
         setAccessibilityElement(true)
         setAccessibilityRole(.radioButton)
+        badge.cornerRadius = 4.5
+        badge.borderWidth = 1.5
+        badge.isHidden = true
+        layer?.addSublayer(badge)
+    }
+
+    override func layout() {
+        super.layout()
+        let size = iconSize(height: bounds.height)
+        // The top-right corner of the front icon.
+        badge.frame = CGRect(x: 8 + size - 6, y: (bounds.height - size) / 2 - 3, width: 9, height: 9)
+    }
+
+    private func refreshBadge() {
+        badge.removeAllAnimations()
+        badge.isHidden = item.status == .none
+        badge.borderColor = NSColor(white: tone == .light ? 0.18 : 0.92, alpha: 1).cgColor
+        switch item.status {
+        case .none:
+            setAccessibilityHelp(nil)
+        case .busy:
+            badge.backgroundColor = NSColor.controlAccentColor.cgColor
+            setAccessibilityHelp("Running")
+            guard !Motion.reduced else { break }
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1
+            pulse.toValue = 0.35
+            pulse.duration = 0.9
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            badge.add(pulse, forKey: "pulse")
+        case .succeeded:
+            badge.backgroundColor = NSColor.systemGreen.cgColor
+            setAccessibilityHelp("Finished")
+        case .failed:
+            badge.backgroundColor = NSColor.systemRed.cgColor
+            setAccessibilityHelp("Failed")
+        }
     }
 
     @available(*, unavailable)
@@ -562,9 +649,9 @@ private final class WorkspaceTabChip: NSView {
         style.lineBreakMode = .byTruncatingTail
         line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
         if room > 8 {
-            let textHeight = ceil(titleFont.ascender - titleFont.descender)
-            line.draw(with: NSRect(x: x, y: (bounds.height - textHeight) / 2 - 0.5, width: room, height: textHeight),
-                      options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+            // One line, truncated: a box shorter than the line fragment would draw nothing at all.
+            let textHeight = ceil(titleFont.ascender - titleFont.descender + titleFont.leading) + 2
+            line.draw(in: NSRect(x: x, y: (bounds.height - textHeight) / 2, width: room, height: textHeight))
         }
 
         if showsClose, bounds.width > 64 {

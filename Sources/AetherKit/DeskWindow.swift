@@ -675,6 +675,10 @@ final class DeskCanvas: NSView {
                 chrome.alphaValue = 1
             }
         }
+        // Panes in background tabs still need their exits and titles heard, not just the ones on screen.
+        for id in desk.allPaneIDs where !visible.contains(id) {
+            if let pane = AppModel.shared.panes[id] { wire(pane) }
+        }
         for id in desk.layout.panes where !visible.contains(id) {
             guard let chrome = AppModel.shared.panes[id]?.chrome else { continue }
             if animated && !chrome.isHidden {

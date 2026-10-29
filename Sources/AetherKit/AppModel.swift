@@ -393,6 +393,7 @@ final class AppModel {
         guard var desk = desks[deskID], desk.tabs.contains(where: { $0.id == tabID }) else { return }
         guard desk.activeTabID != tabID else { return }
         noteFocusLeaving(deskID, desk.focusedID)
+        unseenFinishes[tabID] = nil
         desk.activeTabID = tabID
         desks[deskID] = desk
         controllers[deskID]?.sync(animated: true)
@@ -452,6 +453,7 @@ final class AppModel {
             desk.panes[paneID] = nil
         }
         let wasActive = desk.activeTabID == tabID
+        unseenFinishes[tabID] = nil
         desk.tabs.remove(at: index)
         if wasActive {
             desk.activeTabID = desk.tabs[min(index, desk.tabs.count - 1)].id
@@ -851,10 +853,23 @@ final class AppModel {
         }
     }
 
+    /// A command in a tab you are not looking at finished. Its tab shows the result until you open it.
+    private func noteUnseenFinish(_ paneID: String, code: Int32?) {
+        guard let deskID = deskID(containing: paneID), let desk = desks[deskID],
+              let index = desk.indexOfTab(containing: paneID), desk.tabs[index].id != desk.activeTabID else { return }
+        let tabID = desk.tabs[index].id
+        // A failure stays red until seen, even if a later command in the tab succeeds.
+        if unseenFinishes[tabID].map({ $0 == 0 }) ?? true {
+            unseenFinishes[tabID] = code ?? 0
+        }
+        controllers[deskID]?.reloadTabs()
+    }
+
     func noteExit(_ paneID: String, code: Int32?) {
         guard let deskID = deskID(containing: paneID), var desk = desks[deskID] else { return }
         desk.panes[paneID]?.exitCode = code
         desks[deskID] = desk
+        noteUnseenFinish(paneID, code: code)
         if let pane = panes[paneID], let started = busySince.removeValue(forKey: paneID) {
             notifyFinished(pane, command: started.command, since: started.date, exitCode: code)
         }
@@ -1410,9 +1425,13 @@ final class AppModel {
         busySince[paneID] = (Date(), line)
     }
 
+    /// Tabs whose command finished while another tab was showing, with the exit status, until you look.
+    private(set) var unseenFinishes: [String: Int32] = [:]
+
     func shellCommandFinished(_ paneID: String, _ finished: FinishedCommand) {
         busySince[paneID] = nil
         guard let pane = panes[paneID] else { return }
+        noteUnseenFinish(paneID, code: finished.exitCode)
         notifyFinished(pane, command: finished.line, since: finished.started, exitCode: finished.exitCode)
     }
 
@@ -1422,7 +1441,8 @@ final class AppModel {
         guard elapsed >= settings.notifyAfterSeconds else { return }
         guard let deskID = deskID(containing: pane.id) else { return }
         let window = controllers[deskID]?.window
-        let visibleHere = NSApp.isActive && window?.isKeyWindow == true && !NSApp.isHidden
+        let shownTab = desks[deskID].map { $0.indexOfTab(containing: pane.id) == $0.activeIndex } ?? false
+        let visibleHere = NSApp.isActive && window?.isKeyWindow == true && !NSApp.isHidden && shownTab
         guard !visibleHere else { return }
         let text = ShellIntegration.notification(for: FinishedCommand(line: command, started: started, elapsed: elapsed, exitCode: exitCode))
         FinishNotifier.deliver(title: text.title, body: text.body, pane: pane.id)

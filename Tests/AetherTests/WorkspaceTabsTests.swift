@@ -173,4 +173,7 @@ import Testing
     // Very crowded: never smaller than an icon.
     #expect(WorkspaceTabStrip.fit(Array(repeating: 200, count: 10), into: 100).allSatisfy { $0 == 36 })
     #expect(WorkspaceTabStrip.fit([], into: 100).isEmpty)
+    // Crowded, the selected tab stays readable and the others share what is left.
+    #expect(WorkspaceTabStrip.fit([200, 200, 200, 200], into: 306, keep: 2) == [50, 50, 150, 50])
+    #expect(WorkspaceTabStrip.fit([200, 200], into: 1000, keep: 0) == [200, 200])
 }
