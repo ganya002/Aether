@@ -337,6 +337,8 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
     private let updates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
     private let checkNow = NSButton(title: "Check Now", target: nil, action: nil)
     private let updateStatus = NSTextField(labelWithString: "")
+    private let updateRing = UpdateRing(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+    private let installUpdate = NSButton(title: "Restart to Update", target: nil, action: nil)
     private let versionLine = NSTextField(labelWithString: "")
     private let notify = NSButton(checkboxWithTitle: "Notify when a command finishes in the background", target: nil, action: nil)
     private let notifyAfter = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -496,7 +498,15 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         updateStatus.font = .systemFont(ofSize: 12)
         updateStatus.textColor = .secondaryLabelColor
         updateStatus.lineBreakMode = .byTruncatingTail
-        let checkRow = NSStackView(views: [checkNow, updateStatus])
+        installUpdate.bezelStyle = .push
+        installUpdate.tintProminence = .primary
+        installUpdate.target = self
+        installUpdate.action = #selector(installUpdatePressed)
+        installUpdate.isHidden = true
+        updateRing.isHidden = true
+        updateRing.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        updateRing.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        let checkRow = NSStackView(views: [checkNow, updateRing, updateStatus, installUpdate])
         checkRow.orientation = .horizontal
         checkRow.alignment = .centerY
         checkRow.spacing = 10
@@ -827,6 +837,10 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         UpdateCenter.shared.onStatus = { [weak self] message in
             self?.updateStatus.stringValue = message
         }
+        UpdateCenter.shared.onStage = { [weak self] stage in
+            self?.showUpdate(stage)
+        }
+        if let stage = UpdateCenter.shared.lastStage { showUpdate(stage) }
         SessionHub.shared.onLink = { [weak self] link in
             self?.cloudStatus.stringValue = link.title
             self?.cloudStatus.textColor = {
@@ -1120,9 +1134,21 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
     @objc private func checkForUpdates() {
         updateStatus.stringValue = "Checking…"
         Task {
-            let message = await UpdateCenter.shared.checkNow()
-            self.updateStatus.stringValue = message
+            // The answer arrives through onStatus and onStage, with the time it was checked.
+            _ = await UpdateCenter.shared.checkNow(card: false)
         }
+    }
+
+    @objc private func installUpdatePressed() {
+        UpdateCenter.shared.installNow()
+    }
+
+    /// The same ring and words as the update card, in one line.
+    private func showUpdate(_ stage: UpdateStage) {
+        updateRing.isHidden = false
+        updateRing.show(stage)
+        updateStatus.stringValue = stage.summary
+        if case .ready = stage { installUpdate.isHidden = false } else { installUpdate.isHidden = true }
     }
 
     @objc private func revealConfig() {

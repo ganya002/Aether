@@ -37,8 +37,12 @@ jobs:
         run: |
           tag="build-${GITHUB_SHA}"
           build="$(/usr/libexec/PlistBuddy -c "Print :AetherBuild" dist/Aether.app/Contents/Info.plist)"
-          notes="Update ${GITHUB_SHA}
+          version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/Aether.app/Contents/Info.plist)"
+          # The commit message is the release notes the update card shows. Co-author lines aren't news.
+          message="$(git log -1 --format=%B "$GITHUB_SHA" | grep -vi '^co-authored-by:' || true)"
+          notes="${message}
 
+          aether-version: ${version}
           aether-build: ${build}"
           assets=(Aether.app.zip Aether.app.zip.sha256)
           if [[ -f Aether.app.zip.sig ]]; then

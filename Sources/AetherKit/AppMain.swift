@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         SecureKeyboard.restore()
         NSApp.activate(ignoringOtherApps: true)
         showOnboarding()
+        UpdateDemo.autoplay()
         guard !System.isDev else { return }
         offerMoveToApplications()
         UpdateCenter.shared.start()
@@ -474,7 +475,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func checkForUpdates() {
         Task { @MainActor in
             let message = await UpdateCenter.shared.checkNow()
-            guard !message.isEmpty, message != "Update ready", let deskID = self.model.keyDeskID else { return }
+            // The update card shows every other answer.
+            guard message == UpdateCenter.devBuild, let deskID = self.model.keyDeskID else { return }
             self.model.controllers[deskID]?.flashLayout(message)
         }
     }
