@@ -21,6 +21,11 @@ final class AetherTerminal: LocalProcessTerminalView {
     var warnMultilinePaste = true
     var copyOnSelect = false
     var onBell: (() -> Void)?
+    /// Keyboard copy mode while it is on, and the header pill's text for it. See CopyMode.swift.
+    var copyMode: CopyMode?
+    var onCopyMode: ((String?) -> Void)?
+    /// File paths under the pointer and Quick Look. See Paths.swift.
+    var pathPeek = PathPeek()
     /// Set when the selection changes, so a click that leaves an old selection alone does not copy it over the clipboard again.
     private var selectionMoved = false
     /// True while SwiftTerm answers the program itself (cursor reports, color queries, mouse and focus reports).
@@ -49,6 +54,7 @@ final class AetherTerminal: LocalProcessTerminalView {
             }
         }
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+        installPathLinks()
     }
 
     /// Core Image blur on the stage caches a bitmap of this view. Dirtying
@@ -192,6 +198,11 @@ final class AetherTerminal: LocalProcessTerminalView {
         super.send(source: self, data: data)
     }
 
+    override func scrolled(source: TerminalView, position: Double) {
+        super.scrolled(source: source, position: position)
+        placeCopyBlock()
+    }
+
     override func interpretKeyEvents(_ eventArray: [NSEvent]) {
         var rest: [NSEvent] = []
         for event in eventArray {
@@ -209,15 +220,24 @@ final class AetherTerminal: LocalProcessTerminalView {
 
     /// SwiftTerm reads `optionAsMetaKey` once per key. For "Left Option is Meta" it is set just before each key
     /// from the device bits, 0x20 for the left Option key.
+    /// Copy mode and Quick Look take their keys here first, since SwiftTerm's keyDown clears the selection.
     private static func installOptionMonitor() {
         guard optionMonitor == nil else { return }
         optionMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
-            MainActor.assumeIsolated {
-                guard let terminal = event.window?.firstResponder as? AetherTerminal, terminal.optionMode == .leftMeta else { return }
-                let left = event.modifierFlags.rawValue & 0x20 != 0
-                terminal.optionAsMetaKey = event.modifierFlags.contains(.option) && left
+            let taken = MainActor.assumeIsolated { () -> Bool in
+                guard let terminal = event.window?.firstResponder as? AetherTerminal else { return false }
+                if terminal.copyMode != nil, !event.modifierFlags.contains(.command) {
+                    terminal.handleCopyKey(event)
+                    return true
+                }
+                if terminal.quickLookKey(event) { return true }
+                if terminal.optionMode == .leftMeta {
+                    let left = event.modifierFlags.rawValue & 0x20 != 0
+                    terminal.optionAsMetaKey = event.modifierFlags.contains(.option) && left
+                }
+                return false
             }
-            return event
+            return taken ? nil : event
         }
     }
 
@@ -265,6 +285,7 @@ final class AetherTerminal: LocalProcessTerminalView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         syncRemoteSize()
+        refreshCopyMode()
     }
 
     /// SwiftTerm only reports size changes while a local process runs, so Cloud panes tell the server here.
@@ -296,15 +317,8 @@ final class AetherTerminal: LocalProcessTerminalView {
         super.requestOpenLink(source: source, link: link, params: params)
     }
 
+    /// ⌘-click on a path or link goes through SwiftTerm to `requestOpenLink`. See `installPathLinks`.
     override func mouseUp(with event: NSEvent) {
-        if event.modifierFlags.contains(.command),
-           event.clickCount == 1,
-           !event.modifierFlags.contains(.shift),
-           self.selection?.active != true,
-           let token = token(at: event),
-           PathOpener.open(token, cwd: workingDirectory()) {
-            return
-        }
         super.mouseUp(with: event)
         defer { selectionMoved = false }
         guard copyOnSelect, selectionMoved, selection?.active == true, let text = getSelection(), !text.isEmpty else { return }
@@ -324,33 +338,6 @@ final class AetherTerminal: LocalProcessTerminalView {
     private func matchScreenScale() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         layer?.contentsScale = scale
-    }
-
-    private func token(at event: NSEvent) -> String? {
-        guard let terminal, terminal.cols > 0, terminal.rows > 0 else { return nil }
-        let local = convert(event.locationInWindow, from: nil)
-        guard bounds.contains(local) else { return nil }
-        let cellWidth = max(1, bounds.width / CGFloat(terminal.cols))
-        let cellHeight = max(1, bounds.height / CGFloat(terminal.rows))
-        let column = min(terminal.cols - 1, max(0, Int(local.x / cellWidth)))
-        let row = min(terminal.rows - 1, max(0, Int((bounds.height - local.y) / cellHeight)))
-        guard let line = terminal.getLine(row: row) else { return nil }
-        let text = line.translateToString(trimRight: true)
-        guard !text.isEmpty else { return nil }
-        let pattern = #"(?:https?://|mailto:)[^\s<>\"']+|(?:~|\.\.?|[A-Za-z0-9_])[A-Za-z0-9_./~+\-]*[A-Za-z0-9](?::\d+(?::\d+)?)?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(text.startIndex..., in: text)
-        var found: String?
-        regex.enumerateMatches(in: text, range: range) { match, _, stop in
-            guard let match, let span = Range(match.range, in: text) else { return }
-            let start = text.distance(from: text.startIndex, to: span.lowerBound)
-            let end = text.distance(from: text.startIndex, to: span.upperBound)
-            if column >= start - 1, column <= end {
-                found = String(text[span])
-                stop.pointee = true
-            }
-        }
-        return found
     }
 }
 
@@ -415,6 +402,7 @@ final class PaneChrome: NSView {
         bell.layer?.addSublayer(bellLayer)
         exitBanner.isHidden = true
         header.paneID = paneID
+        terminal.onCopyMode = { [weak header] in header?.setCopyMode($0) }
     }
 
     @available(*, unavailable)
@@ -745,6 +733,7 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
     private(set) var activityState = ""
     private var cloudNote = ""
     private var broadcasting = false
+    private var copyHint: String?
     private(set) var titleText = ""
     private(set) var pathText = ""
     private var focused = false
@@ -883,6 +872,22 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         needsLayout = true
     }
 
+    /// "COPY" and a hint while the pane is in copy mode. Nil hides it.
+    func setCopyMode(_ hint: String?) {
+        guard copyHint != hint else { return }
+        copyHint = hint
+        needsDisplay = true
+        needsLayout = true
+    }
+
+    private var copyText: NSAttributedString? {
+        guard let copyHint else { return nil }
+        let ink = NSColor.black.withAlphaComponent(0.85)
+        let text = NSMutableAttributedString(string: "COPY", attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold), .foregroundColor: ink])
+        text.append(NSAttributedString(string: "  " + copyHint, attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: ink]))
+        return text
+    }
+
     func setActivity(state: String, message: String) {
         activityState = state
         activity = message
@@ -895,14 +900,21 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
         needsDisplay = true
     }
 
-    /// Everything on the right that the title must stay clear of: the Broadcasting pill and the Cloud note.
-    private func rightSide() -> (pill: NSRect?, note: NSRect?, titleRight: CGFloat) {
+    /// Everything on the right that the title must stay clear of: the Copy and Broadcasting pills and the Cloud note.
+    private func rightSide() -> (pill: NSRect?, copy: NSRect?, note: NSRect?, titleRight: CGFloat) {
         var right = bounds.width - 80
         var pill: NSRect?
         if broadcasting {
             let size = Self.pillText.size()
             let frame = NSRect(x: bounds.width - 92 - size.width - 14, y: 5, width: size.width + 14, height: 16)
             pill = frame
+            right = frame.minX - 6
+        }
+        var copy: NSRect?
+        if let text = copyText {
+            let width = min(ceil(text.size().width) + 14, max(44, (right - Self.titleX) * 0.6))
+            let frame = NSRect(x: (pill == nil ? bounds.width - 92 : right) - width, y: 5, width: width, height: 16)
+            copy = frame
             right = frame.minX - 6
         }
         var note: NSRect?
@@ -912,7 +924,7 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
             note = frame
             right = frame.minX - 8
         }
-        return (pill, note, right)
+        return (pill, copy, note, right)
     }
 
     private static let pillText = NSAttributedString(string: "Broadcasting", attributes: [
@@ -977,6 +989,15 @@ final class PaneHeader: NSView, NSViewToolTipOwner {
             NSColor(srgbRed: 0.99, green: 0.66, blue: 0.2, alpha: 0.95).setFill()
             NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8).fill()
             Self.pillText.draw(at: NSPoint(x: frame.minX + 7, y: frame.minY + (frame.height - size.height) / 2))
+        }
+        if let frame = side.copy, let text = copyText {
+            NSColor(srgbRed: 0.45, green: 0.74, blue: 1, alpha: 0.95).setFill()
+            NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8).fill()
+            let style = NSMutableParagraphStyle()
+            style.lineBreakMode = .byTruncatingTail
+            let line = NSMutableAttributedString(attributedString: text)
+            line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
+            line.draw(in: frame.insetBy(dx: 7, dy: (frame.height - text.size().height) / 2))
         }
         if let frame = side.note {
             noteText(ink: ink).draw(in: frame)

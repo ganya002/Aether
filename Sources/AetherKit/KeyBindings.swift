@@ -167,6 +167,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case previousPrompt
     case nextPrompt
     case selectLastOutput
+    case copyMode
 
     /// 1 through 9 for the Focus Terminal actions.
     var paneNumber: Int? {
@@ -240,6 +241,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .previousPrompt: "Previous prompt"
         case .nextPrompt: "Next prompt"
         case .selectLastOutput: "Select last command output"
+        case .copyMode: "Copy mode"
         }
     }
 
@@ -318,6 +320,7 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         case .previousPrompt: return chord(String(UnicodeScalar(NSUpArrowFunctionKey)!), command, kVK_UpArrow)
         case .nextPrompt: return chord(String(UnicodeScalar(NSDownArrowFunctionKey)!), command, kVK_DownArrow)
         case .selectLastOutput: return chord("a", [command, .shift], kVK_ANSI_A)
+        case .copyMode: return chord("c", [command, .shift], kVK_ANSI_C)
         }
     }
 }
@@ -635,7 +638,7 @@ enum ShortcutGroup: String, CaseIterable, Sendable {
         case .focusLeft, .focusRight, .focusUp, .focusDown, .previousPane, .nextPane, .nextTab, .previousTab,
              .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9: .focus
         case .growLeft, .growRight, .growUp, .growDown: .resize
-        case .fontUp, .fontDown, .fontReset, .copy, .paste, .selectAll, .clearBuffer, .insertPath: .text
+        case .fontUp, .fontDown, .fontReset, .copy, .paste, .selectAll, .clearBuffer, .insertPath, .copyMode: .text
         case .find, .findNext, .findPrevious, .previousPrompt, .nextPrompt, .selectLastOutput: .find
         case .launch, .settings, .dropdown, .quit, .shortcuts: .app
         }

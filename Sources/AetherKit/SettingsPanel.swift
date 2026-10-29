@@ -359,6 +359,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
 
     // Terminal
     private let optionKey = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let editor = NSPopUpButton(frame: .zero, pullsDown: false)
     private let shellExit = NSPopUpButton(frame: .zero, pullsDown: false)
     private let pasteWarning = NSButton(checkboxWithTitle: "Warn before pasting several lines", target: nil, action: nil)
     private let copyOnSelect = NSButton(checkboxWithTitle: "Copy text as soon as it's selected", target: nil, action: nil)
@@ -561,6 +562,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         form.row("Paste:", pasteWarning)
         form.note("Only when the shell would run each line as it arrives.")
         form.row("Selection:", copyOnSelect)
+        editor.addItems(withTitles: EditorChoice.allCases.map(\.title))
+        form.row("Open files in:", editor)
+        form.note("⌘-click a path in the output to open it at its line. Automatic uses $VISUAL or $EDITOR when it names an app like VS Code or Zed.")
         form.row("Bell:", bell)
         form.row("Scrollback:", scrollback)
         form.section()
@@ -681,7 +685,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         sessionWhere.target = self
         sessionWhere.action = #selector(changed)
         sessionWhere.segmentDistribution = .fillEqually
-        for popup in [notifyAfter, confirmClose, theme, fontFamily, optionKey, shellExit, scrollback] {
+        for popup in [notifyAfter, confirmClose, theme, fontFamily, optionKey, shellExit, scrollback, editor] {
             popup.target = self
             popup.action = #selector(changed)
         }
@@ -913,6 +917,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
             settings.shellExit = ShellExit.allCases[max(0, shellExit.indexOfSelectedItem)]
             settings.warnMultilinePaste = pasteWarning.state == .on
             settings.copyOnSelect = copyOnSelect.state == .on
+            settings.editor = EditorChoice.allCases[max(0, editor.indexOfSelectedItem)]
             settings.bell = BellStyle.allCases[max(0, bell.selectedSegment)]
             if let lines = scrollback.selectedItem?.representedObject as? Int {
                 settings.scrollbackLines = lines
@@ -1142,6 +1147,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         shellExit.selectItem(at: ShellExit.allCases.firstIndex(of: settings.shellExit) ?? 0)
         pasteWarning.state = settings.warnMultilinePaste ? .on : .off
         copyOnSelect.state = settings.copyOnSelect ? .on : .off
+        editor.selectItem(at: EditorChoice.allCases.firstIndex(of: settings.editor) ?? 0)
         bell.selectedSegment = BellStyle.allCases.firstIndex(of: settings.bell) ?? 0
         let lines = settings.scrollbackLines
         fill(scrollback, SettingsFormat.choices(SettingsFormat.scrollbackChoices, including: lines), current: lines) { SettingsFormat.scrollback($0) }

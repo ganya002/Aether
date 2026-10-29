@@ -1199,7 +1199,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
 
-    var linkHighlightRange: [Terminal.LinkMatch.RowRange]?
+    var linkHighlightRange: [Terminal.LinkMatch.RowRange]? {
+        // Aether: a pointing hand over a link, as in a browser. Back to the I-beam only while the pointer is still here.
+        didSet {
+            if linkHighlightRange != nil {
+                NSCursor.pointingHand.set()
+            } else if oldValue != nil, let window, bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) {
+                NSCursor.iBeam.set()
+            }
+        }
+    }
 
     /**
      * If set to true, this will call the TerminalViewDelegate's rangeChanged method
@@ -3436,7 +3445,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     func ensureCaretIsVisible ()
     {
-        guard !terminal.synchronizedOutputActive else { return }
+        // Aether: replies to the program (cursor reports and the like) must not pull a held view down.
+        guard !terminal.synchronizedOutputActive, !terminal.holdViewport else { return }
         let displayBuffer = terminal.displayBuffer
         let realCaret = displayBuffer.y + displayBuffer.yBase
         let viewportEnd = displayBuffer.yDisp + displayBuffer.rows

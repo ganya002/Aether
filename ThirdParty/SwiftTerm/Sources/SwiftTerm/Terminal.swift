@@ -519,6 +519,12 @@ open class Terminal {
     var scrollInvariantRefreshStart = Int.max
     var scrollInvariantRefreshEnd = -1
     var userScrolling = false
+    /// Aether: holds the viewport still while output arrives, as if the user had scrolled up. Copy mode sets it.
+    public var holdViewport = false
+    /// Aether: a host matcher that runs before the built-in implicit link detection, for things like file paths.
+    /// `.link` uses the given text and columns on the row, `.none` means no link here, `.fallback` runs the built-in detection.
+    public enum HostLink: Sendable { case link(text: String, range: Range<Int>), none, fallback }
+    public var hostLinkMatcher: ((Position) -> HostLink)?
     var lineFeedMode = false
     
     // We do not implement smooth scrolling here, dubious value, but
@@ -6581,7 +6587,7 @@ open class Terminal {
             if !willBufferBeTrimmed {
                 buffer.yBase += 1
                 // Only scroll the ydisp with ybase if the user has not scrolled up
-                if !userScrolling {
+                if !userScrolling && !holdViewport {
                     buffer.yDisp += 1
                 }
             } else {
@@ -6595,7 +6601,7 @@ open class Terminal {
 
                 // When the buffer is full and the user has scrolled up, keep the text
                 // stable unless ydisp is right at the top
-                if userScrolling {
+                if userScrolling || holdViewport {
                     buffer.yDisp = max (buffer.yDisp - 1, 0)
                 }
             }
@@ -6625,7 +6631,7 @@ open class Terminal {
 
         // Move the viewport to the bottom of the buffer unless the user is
         // scrolling.
-        if !userScrolling {
+        if !userScrolling && !holdViewport {
             buffer.yDisp = buffer.yBase
         }
 
@@ -7224,7 +7230,15 @@ open class Terminal {
         case .explicitOnly:
             return nil
         case .explicitAndImplicit:
-            return implicitLinkMatch(at: position, in: buffer)
+            switch hostLinkMatcher?(position) ?? .fallback {
+            case .link(let text, let range):
+                return LinkMatch(text: text, row: position.row, range: range, isExplicit: false,
+                                 rowRanges: [.init(row: position.row, range: range)])
+            case .none:
+                return nil
+            case .fallback:
+                return implicitLinkMatch(at: position, in: buffer)
+            }
         }
     }
 

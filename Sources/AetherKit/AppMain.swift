@@ -408,6 +408,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case .restartPane:
             if let id = focusedPaneID { model.restart(id) }
         case .shortcuts: shortcuts.show()
+        case .copyMode:
+            if let id = focusedPaneID, let pane = model.panes[id] { pane.chrome.terminal.toggleCopyMode() }
         case .previousPrompt, .nextPrompt, .selectLastOutput:
             if let id = focusedPaneID, let pane = model.panes[id], !pane.chrome.terminal.performPromptAction(action) {
                 NSSound.beep()
@@ -579,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             bind(.previousPrompt, item("Previous Prompt", .previousPrompt)),
             bind(.nextPrompt, item("Next Prompt", .nextPrompt)),
             bind(.selectLastOutput, item("Select Last Command Output", .selectLastOutput)),
+            bind(.copyMode, item("Copy Mode", .copyMode)),
             .separator(),
             menu("Find", items: [find, findNext, findPrev, .separator(), useSelection]),
         ]))

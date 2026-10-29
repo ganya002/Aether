@@ -199,6 +199,8 @@ public struct Settings: Codable, Equatable, Sendable {
     public var dropdownHideOnFocusLoss: Bool = true
     /// Prompt marks, command notifications, and titles from zsh, bash, and fish. See ShellIntegration.
     public var shellIntegration: Bool = true
+    /// Where ⌘-clicked file paths open.
+    public var editor: EditorChoice = .automatic
 
     public static let currentVersion = 2
 
@@ -296,6 +298,7 @@ public struct Settings: Codable, Equatable, Sendable {
         dropdownHeight = field(.dropdownHeight, 0.44)
         dropdownHideOnFocusLoss = field(.dropdownHideOnFocusLoss, true)
         shellIntegration = field(.shellIntegration, true)
+        editor = field(.editor, EditorChoice.automatic)
         clamp()
     }
 
