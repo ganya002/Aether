@@ -72,6 +72,8 @@ final class WorkspaceTabStrip: NSView {
             self.tone = tone
             applyTone()
         }
+        launch.toolTip = Self.tip("Launch a command", .launch)
+        plus.toolTip = Self.tip("New tab", .newTab)
         let items = desk.tabs.map { tab in
             WorkspaceTabChip.Item(
                 id: tab.id,
@@ -132,6 +134,14 @@ final class WorkspaceTabStrip: NSView {
         chip.onRename = { [weak self] id in
             guard let self else { return }
             WorkspaceTabStrip.rename(tab: id, in: self.deskID)
+        }
+        chip.onCloseOthers = { [weak self] id in
+            guard let self, let desk = AppModel.shared.desks[self.deskID] else { return }
+            AppModel.shared.selectTab(id, in: self.deskID)
+            // One at a time, so each asks before closing something that is still running.
+            for tab in desk.tabs where tab.id != id {
+                AppModel.shared.closeTab(tab.id, in: self.deskID)
+            }
         }
         chip.onHover = { [weak self] in self?.refreshSeparators() }
         chip.onDrag = { [weak self] chip, event, phase in self?.track(chip, event, phase) }
@@ -357,6 +367,11 @@ final class WorkspaceTabStrip: NSView {
 
     // MARK: Actions
 
+    private static func tip(_ text: String, _ action: AppAction) -> String {
+        let chord = AppModel.shared.settings.keys.chord(action)
+        return chord.key.isEmpty ? text : "\(text)  \(chord.symbol)"
+    }
+
     @objc private func addTab() {
         AppModel.shared.newTab(in: deskID)
     }
@@ -532,6 +547,7 @@ final class WorkspaceTabChip: NSView {
     var onSelect: ((String) -> Void)?
     var onClose: ((String) -> Void)?
     var onRename: ((String) -> Void)?
+    var onCloseOthers: ((String) -> Void)?
     var onHover: (() -> Void)?
     var onDrag: ((WorkspaceTabChip, NSEvent, DragPhase) -> Void)?
     private(set) var hovering = false
@@ -739,6 +755,7 @@ final class WorkspaceTabChip: NSView {
         if item.closable {
             menu.addItem(.separator())
             menu.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "")
+            menu.addItem(withTitle: "Close Other Tabs", action: #selector(closeOthers), keyEquivalent: "")
         }
         for entry in menu.items { entry.target = self }
         return menu
@@ -751,6 +768,7 @@ final class WorkspaceTabChip: NSView {
 
     @objc private func rename() { onRename?(item.id) }
     @objc private func closeTab() { onClose?(item.id) }
+    @objc private func closeOthers() { onCloseOthers?(item.id) }
 }
 
 /// A round, borderless titlebar button that lights up under the pointer.
@@ -767,7 +785,6 @@ private final class TitlebarButton: NSButton {
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
         imagePosition = .imageOnly
         imageScaling = .scaleNone
-        toolTip = label
         setAccessibilityLabel(label)
         focusRingType = .none
         wantsLayer = true
