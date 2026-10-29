@@ -244,6 +244,38 @@ public enum Layout {
         }
     }
 
+    /// Puts panes in `wanted` order by swapping ids in place, so split ratios stay put.
+    public static func ordered(_ node: LayoutNode, as wanted: [String]) -> LayoutNode {
+        let have = visualIDs(node)
+        guard Set(wanted) == Set(have), wanted.count == have.count else { return node }
+        var node = node
+        var current = have
+        for (index, id) in wanted.enumerated() where current[index] != id {
+            node = swap(node, current[index], id)
+            current = visualIDs(node)
+        }
+        return node
+    }
+
+    public static func move(_ node: LayoutNode, id: String, before: String? = nil, after: String? = nil, index: Int? = nil) -> LayoutNode {
+        var ids = visualIDs(node)
+        guard let from = ids.firstIndex(of: id) else { return node }
+        let destination: Int
+        if let before, let at = ids.firstIndex(of: before) {
+            destination = from < at ? at - 1 : at
+        } else if let after, let at = ids.firstIndex(of: after) {
+            destination = from <= at ? at : at + 1
+        } else if let index {
+            destination = min(max(index, 0), ids.count - 1)
+        } else {
+            return node
+        }
+        if from == destination { return node }
+        ids.remove(at: from)
+        ids.insert(id, at: destination)
+        return ordered(node, as: ids)
+    }
+
     public static func swap(_ node: LayoutNode, _ first: String, _ second: String) -> LayoutNode {
         switch node {
         case .pane(let id):

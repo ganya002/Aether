@@ -97,15 +97,18 @@ private func value(_ key: String, _ env: [String]) -> String? {
     #expect(tracker.apply(.prompt(shell: "zsh", exit: nil), at: start) == nil)
     #expect(tracker.active)
     #expect(tracker.shell == "zsh")
+    #expect(tracker.prompts == 1)
     #expect(tracker.apply(.command("cargo build"), at: start) == nil)
     #expect(tracker.running?.line == "cargo build")
     let done = tracker.apply(.prompt(shell: "zsh", exit: 101), at: start.addingTimeInterval(48))
     #expect(done == FinishedCommand(line: "cargo build", started: start, elapsed: 48, exitCode: 101))
     #expect(tracker.running == nil)
     #expect(tracker.lastFinished == done)
+    #expect(tracker.prompts == 2)
     // An empty Enter is a prompt with nothing running; the last command stays.
     #expect(tracker.apply(.prompt(shell: "zsh", exit: nil), at: start.addingTimeInterval(50)) == nil)
     #expect(tracker.lastFinished == done)
+    #expect(tracker.prompts == 3)
 }
 
 @Test func execHandsTheTerminalToSomethingElse() {

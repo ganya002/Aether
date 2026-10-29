@@ -9,7 +9,11 @@ final class AgentDesk {
     private var listener: NWListener?
     private let token: String
     static let port: UInt16 = System.isDev ? 17394 : 17393
-    static let routes: Set<String> = ["/tab", "/split", "/open", "/font", "/zoom", "/read", "/view", "/status", "/notify", "/close"]
+    static let routes: Set<String> = [
+        "/tab", "/split", "/open", "/font", "/zoom", "/read", "/view",
+        "/status", "/notify", "/close", "/title", "/send", "/wait",
+        "/windows", "/move", "/order", "/find", "/screenshot",
+    ]
     /// Which pane asked for each pane, so an agent can close only what it opened.
     var openedBy: [String: String] = [:]
 
@@ -71,6 +75,7 @@ final class AgentDesk {
         let skillDir = System.supportDirectory().appendingPathComponent("skill", isDirectory: true)
         try? FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
         try? (AgentCLI.skill + "\n").write(to: skillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try? (AgentCLI.agents + "\n").write(to: skillDir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
     }
 
     /// Reads until the headers and the whole body have arrived, however TCP splits them.
@@ -248,24 +253,80 @@ enum AgentArgs {
     static let cloudTerminalMissing = "That Cloud terminal isn't open on this Mac."
 
     /// The pane a request is about: the one running its Cloud session, else the one it names,
-    /// else the focused pane of the front window. Without `allowFocusedFallback`, as for requests
-    /// from Cloud, only the session counts: a request never reaches a pane it doesn't run in.
-    static func target(pane: String?, session: String?, desks: [String: Desk], sessions: [String: String], keyDesk: String?, allowFocusedFallback: Bool = true) -> Result<Target, AgentError> {
-        func desk(holding id: String) -> String? {
+    /// else the focused pane of a named window, else the focused pane of the front window.
+    /// Without `allowFocusedFallback`, as for requests from Cloud, only the session counts.
+    static func target(
+        pane: String?,
+        session: String?,
+        desks: [String: Desk],
+        sessions: [String: String],
+        keyDesk: String?,
+        allowFocusedFallback: Bool = true,
+        window: String? = nil,
+        desk namedDesk: String? = nil
+    ) -> Result<Target, AgentError> {
+        func deskHolding(_ id: String) -> String? {
             desks.first { $0.value.panes[id] != nil }?.key
         }
-        if let session, !session.isEmpty, let id = sessions.first(where: { $0.value == session })?.key, let deskID = desk(holding: id) {
+        if let session, !session.isEmpty, let id = sessions.first(where: { $0.value == session })?.key, let deskID = deskHolding(id) {
             return .success(Target(desk: deskID, pane: id, explicit: true))
         }
         guard allowFocusedFallback else { return .failure(AgentError(cloudTerminalMissing)) }
         if let pane, !pane.isEmpty {
-            guard let deskID = desk(holding: pane) else { return .failure(AgentError("No pane \(pane).")) }
-            return .success(Target(desk: deskID, pane: pane, explicit: true))
+            switch resolvePane(pane, desks: desks) {
+            case .success(let id):
+                guard let deskID = deskHolding(id) else { return .failure(AgentError("No pane \(pane).")) }
+                return .success(Target(desk: deskID, pane: id, explicit: true))
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+        if let deskID = resolveDesk(window ?? namedDesk, desks: desks, keyDesk: keyDesk) {
+            guard let focused = desks[deskID]?.focusedID else {
+                return .failure(AgentError("No Aether window is open."))
+            }
+            return .success(Target(desk: deskID, pane: focused, explicit: false))
+        }
+        if window != nil || namedDesk != nil {
+            return .failure(AgentError("No window \(window ?? namedDesk ?? "")."))
+        }
+        if desks.count == 1, let only = desks.keys.first, let focused = desks[only]?.focusedID {
+            return .success(Target(desk: only, pane: focused, explicit: false))
         }
         guard let keyDesk, let focused = desks[keyDesk]?.focusedID else {
+            if desks.count > 1 {
+                return .failure(AgentError("Pass --pane, --window, or --desk. Several windows are open."))
+            }
             return .failure(AgentError("No Aether window is open."))
         }
         return .success(Target(desk: keyDesk, pane: focused, explicit: false))
+    }
+
+    /// Exact id, or a unique prefix of at least 8 characters.
+    static func resolvePane(_ raw: String, desks: [String: Desk]) -> Result<String, AgentError> {
+        let all = desks.values.flatMap(\.panes.keys)
+        if all.contains(raw) { return .success(raw) }
+        let lower = raw.lowercased()
+        let exact = all.filter { $0.lowercased() == lower }
+        if exact.count == 1 { return .success(exact[0]) }
+        guard raw.count >= 8 else { return .failure(AgentError("No pane \(raw).")) }
+        let matches = all.filter { $0.lowercased().hasPrefix(lower) }
+        if matches.count == 1 { return .success(matches[0]) }
+        if matches.count > 1 { return .failure(AgentError("Pane \(raw) is ambiguous.")) }
+        return .failure(AgentError("No pane \(raw)."))
+    }
+
+    /// `this` is the front window, `any` is the front window or the only one.
+    static func resolveDesk(_ raw: String?, desks: [String: Desk], keyDesk: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let token = raw.lowercased()
+        if token == "this" || token == "any" {
+            if let keyDesk, desks[keyDesk] != nil { return keyDesk }
+            return desks.count == 1 ? desks.keys.first : nil
+        }
+        if desks[raw] != nil { return raw }
+        let matches = desks.keys.filter { $0.lowercased() == token || (raw.count >= 8 && $0.lowercased().hasPrefix(token)) }
+        return matches.count == 1 ? matches[0] : nil
     }
 
     /// The last `count` lines of a buffer dump, without the blank rows below the prompt.
@@ -295,11 +356,18 @@ enum AgentCLI {
     exec python3 - "$@" <<'PY'
     import base64, json, os, re, sys
 
-    VERSION = "2"
+    VERSION = "3"
     STATES = ("idle", "working", "blocked", "done", "error")
     DIRECTIONS = {"right": "right", "left": "left", "up": "top", "top": "top", "down": "bottom", "bottom": "bottom", "center": "right"}
     SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
     NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
+    PANE_ID = re.compile(r"^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$")
+    PANE_PREFIX = re.compile(r"^[0-9A-Fa-f]{8,32}$")
+    COMMANDS = (
+        "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
+        "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
+        "find", "screenshot", "mcp", "help",
+    )
 
 
     CURRENT = ""
@@ -322,52 +390,66 @@ enum AgentCLI {
 
     COMMON = """
       --pane <id>                     Act on this pane instead of the one you are in ($AETHER_PANE).
+      --window <id|this|any>          Act in this window. `any` is the front window; with one window you can omit this.
+      --desk <id>                     Same as --window.
       --json                          Print the raw reply."""
 
     HELP = {
         "": """usage: aether <command> [options]
 
-    Control the Aether terminal you are running in. Commands act on your own pane
-    ($AETHER_PANE) unless you pass --pane <id>.
+    Control the Aether terminal. Commands act on your own pane ($AETHER_PANE)
+    unless you pass --pane <id>. Outside Aether, with one window open, that
+    window is used; with several, pass --pane, --window, or --desk.
 
     Commands:
-      split     Open a terminal beside this pane.
-      tab       Add a terminal to this window.
-      open      Show a web page or PDF beside this pane.
-      read      Print this pane's screen.
-      view      List the panes.
-      zoom      Make this pane fill its window, or put it back.
-      font      Make the type bigger or smaller.
-      status    Show what you are doing on this pane's header.
-      notify    Post a macOS notification.
-      title     Set this pane's title.
-      close     Close a pane that you opened.
-      skill     Install the Aether skill for Claude, Cursor, and other agents.
-      help      Show help for a command.
+      split       Open a terminal beside this pane.
+      tab         Add a terminal to this window.
+      open        Show a web page or PDF beside this pane.
+      read        Print this pane's screen.
+      view        List the panes.
+      windows     List the windows.
+      send        Type into a pane, or send keys like ctrl+c.
+      run         Run a command and wait until it finishes.
+      wait        Block until a pane is idle or its job exits.
+      find        Find panes by title or running command.
+      move        Reorder a pane in its window.
+      order       Set the pane order of a window.
+      zoom        Make this pane fill its window, or put it back.
+      font        Make the type bigger or smaller.
+      status      Show what you are doing on this pane's header.
+      notify      Post a macOS notification.
+      title       Set this pane's title.
+      close       Close a pane that you opened.
+      screenshot  Save a PNG of a pane.
+      skill       Install the Aether skill and AGENTS.md for agents.
+      mcp         Speak MCP over stdin/stdout (one tool per command).
+      help        Show help for a command.
 
     Options:
       -h, --help     Show help.
       --version      Show the version.
 
     Run `aether help <command>` for details and examples.""",
-        "split": """usage: aether split [--right|--left|--up|--down] [--ratio N] [--focus] [-- command ...]
+        "split": """usage: aether split [--right|--left|--up|--down] [--ratio N] [--focus] [--title T] [-- command ...]
 
     Open a terminal beside this pane. Prints the new pane's id. Words after --
     run in the new pane; pass one quoted string for pipes and other shell syntax.
     """ + PLACE + COMMON + """
+          --title <text>                  Name the new pane.
 
     Examples:
       aether split --right --ratio 30 -- npm run dev
       aether split --down -- tail -f log.txt
       aether split --left --focus
       aether split --up -- 'make 2>&1 | tee build.log'""",
-        "tab": """usage: aether tab [--focus] [-- command ...]
+        "tab": """usage: aether tab [--focus] [--title T] [-- command ...]
 
     Add a terminal to this pane's window. Prints the new pane's id. Words after --
     run in the new pane.
 
     Options:
-      --focus                         Move the keyboard into the new pane.""" + COMMON + """
+          --focus                         Move the keyboard into the new pane.
+          --title <text>                  Name the new pane.""" + COMMON + """
 
     Examples:
       aether tab
@@ -383,27 +465,107 @@ enum AgentCLI {
       aether open localhost:3000 --right --ratio 40
       aether open web https://example.com
       aether open docs/spec.pdf --down""",
-        "read": """usage: aether read [--lines N]
+        "read": """usage: aether read [pane-id] [--lines N]
 
     Print the text on this pane's screen. With --lines, print the last N lines,
-    including scrollback.
+    including scrollback. A pane id may be positional or --pane.
 
     Options:
       --lines <N>                     How many lines to print.""" + COMMON + """
 
     Examples:
       aether read
-      aether read --lines 200 --pane 5F1C...""",
+      aether read 50BBAE3B --lines 200""",
         "view": """usage: aether view
 
-    List every pane: its id, its window, and its title. The focused pane in each
-    window is marked with *, and your own pane with <.
+    List every pane: its id, window, title, and running command. The focused pane
+    in each window is marked with *, and your own pane with <.
 
     Options:""" + COMMON + """
 
     Example:
-      aether view""",
-        "zoom": """usage: aether zoom
+      aether view
+      aether view --json""",
+        "windows": """usage: aether windows
+
+    List every Aether window and how many panes it has.
+
+    Options:
+      --json                          Print the raw reply.
+
+    Example:
+      aether windows""",
+        "send": """usage: aether send [pane-id] [<text> | --keys <chord>] [--enter]
+
+    Inject keystrokes into a pane as if they were typed. --keys takes named chords
+    separated by commas: ctrl+c, enter, up, tab, esc, ctrl+d.
+
+    Options:
+      --keys <chord>                  Send a key or chord instead of text.
+      --enter                         Press return after the text.""" + COMMON + """
+
+    Examples:
+      aether send --keys ctrl+c
+      aether send 50BBAE3B y --enter
+      aether send --pane 50BBAE3B --keys ctrl+c,enter""",
+        "run": """usage: aether run [--pane <id>] [--title T] [--timeout N] [--] <command...>
+
+    Run a command and wait until it finishes. Prints the command's output as it
+    appears, then exits with the command's status. Without --pane, opens a new tab.
+    SIGINT (Ctrl-C on aether run) sends ctrl+c to the pane's job.
+
+    Options:
+      --title <text>                  Name the pane.
+      --timeout <seconds>             Give up after this many seconds.
+      --focus                         Move the keyboard into the pane.""" + COMMON + """
+
+    Examples:
+      aether run -- make test
+      aether run --pane 50BBAE3B -- npm test""",
+        "wait": """usage: aether wait [pane-id] [--until-idle|--exit] [--timeout N]
+
+    Block until the pane's shell is idle (prompt at the bottom) or its job exits.
+
+    Options:
+      --until-idle                    Return when the shell is at a prompt.
+      --exit, --until-exit            Return when the pane's process exits.
+      --timeout <seconds>             Give up after this many seconds.""" + COMMON + """
+
+    Examples:
+      aether wait 50BBAE3B --exit
+      aether wait --until-idle --timeout 30""",
+        "find": """usage: aether find [--title T] [--command T]
+
+    Find panes whose title or running command contains the text.
+
+    Options:
+      --title <text>                  Match the pane title.
+      --command <text>                Match the running command.""" + COMMON + """
+
+    Examples:
+      aether find --command nmap
+      aether find --title API""",
+        "move": """usage: aether move [pane-id] (--before <id>|--after <id>|--index N)
+
+    Move a pane in its window.
+
+    Options:
+      --before <id>                   Place it before this pane.
+      --after <id>                    Place it after this pane.
+      --index <N>                     Place it at this 0-based index.""" + COMMON + """
+
+    Examples:
+      aether move 50BBAE3B --before AABBCCDD
+      aether move --index 0""",
+        "order": """usage: aether order <pane-id> <pane-id> ...
+
+    Set the pane order of a window. Pass every pane in that window, once.
+
+    Options:""" + COMMON + """
+
+    Example:
+      aether order 50BBAE3B AABBCCDD""",
+        "zoom": """usage: aether zoom [pane-id]
 
     Make this pane fill its window. Run it again to put it back.
 
@@ -442,12 +604,15 @@ enum AgentCLI {
     Example:
       aether notify "Build finished"
     """.rstrip(),
-        "title": """usage: aether title <text>
+        "title": """usage: aether title [pane-id] <text>
 
-    Set this pane's title. Shells and programs may change it again.
+    Set this pane's title.
+
+    Options:""" + COMMON + """
 
     Example:
       aether title "API server"
+      aether title 50BBAE3B "port sweep"
     """.rstrip(),
         "close": """usage: aether close <pane-id>
 
@@ -458,34 +623,61 @@ enum AgentCLI {
     Example:
       id=$(aether split -- npm test) && ... && aether close "$id"
     """.rstrip(),
+        "screenshot": """usage: aether screenshot [pane-id] [--out <path>]
+
+    Save a PNG of the pane. Prints the path.
+
+    Options:
+      --out <path>                    Where to write the PNG.""" + COMMON + """
+
+    Example:
+      aether screenshot --out /tmp/pane.png""",
         "skill": """usage: aether skill
 
-    Install the Aether skill into ~/.claude, ~/.cursor, and ~/.agents. Only tools
-    that are already set up (their folder exists) get it; the rest are listed as skipped.
+    Install the Aether skill and AGENTS.md into ~/.claude, ~/.cursor, and ~/.agents.
+    Only tools that are already set up (their folder exists) get it; the rest are
+    listed as skipped. Also writes AGENTS.md in the current directory if none exists.
 
     Example:
       aether skill""",
+        "mcp": """usage: aether mcp
+
+    Speak the Model Context Protocol on stdin/stdout. Each aether command is one
+    tool, so an MCP client can call send, run, wait, read, and the rest natively.
+
+    Example:
+      aether mcp""",
         "help": """usage: aether help [command]
 
     Show help for aether or one command.""",
     }
 
-    # Value flags take the next word. Bool flags take none.
     PLACE_VALUES = {"--split", "--ratio"}
     PLACE_BOOLS = {"--right", "--left", "--up", "--down", "--top", "--bottom", "--focus"}
+    TARGET = {"--pane", "--window", "--desk"}
+    JSON = {"--json"}
     SPECS = {
-        "split": (PLACE_VALUES | {"--pane"}, PLACE_BOOLS | {"--json"}, True),
-        "tab": ({"--pane"}, {"--focus", "--json"}, True),
-        "open": (PLACE_VALUES | {"--pane"}, PLACE_BOOLS | {"--json"}, False),
-        "read": ({"--pane", "--lines"}, {"--json"}, False),
-        "view": ({"--pane"}, {"--json"}, False),
-        "zoom": ({"--pane"}, {"--json"}, False),
-        "font": ({"--delta"}, {"--json"}, False),
-        "status": ({"--pane"}, {"--json"}, False),
-        "notify": ({"--pane"}, {"--json"}, False),
-        "title": (set(), set(), False),
-        "close": ({"--pane"}, {"--json"}, False),
-        "skill": (set(), set(), False),
+        "split": (PLACE_VALUES | TARGET | {"--title"}, PLACE_BOOLS | JSON, True),
+        "tab": (TARGET | {"--title"}, {"--focus"} | JSON, True),
+        "open": (PLACE_VALUES | TARGET, PLACE_BOOLS | JSON, False),
+        "read": (TARGET | {"--lines"}, JSON, False),
+        "view": (TARGET, JSON, False),
+        "zoom": (TARGET, JSON, False),
+        "font": ({"--delta"}, JSON, False),
+        "status": (TARGET, JSON, False),
+        "notify": (TARGET, JSON, False),
+        "title": (TARGET, JSON, False),
+        "close": (TARGET, JSON, False),
+        "skill": (set(), JSON, False),
+        "send": (TARGET | {"--keys"}, {"--enter"} | JSON, False),
+        "run": (TARGET | {"--title", "--timeout"}, {"--focus"} | JSON, True),
+        "wait": (TARGET | {"--timeout"}, {"--until-idle", "--exit", "--until-exit"} | JSON, False),
+        "windows": (set(), JSON, False),
+        "move": (TARGET | {"--before", "--after", "--index"}, JSON, False),
+        "order": (TARGET, JSON, False),
+        "find": (TARGET | {"--title", "--command"}, JSON, False),
+        "screenshot": (TARGET | {"--out"}, JSON, False),
+        "mcp": (set(), set(), False),
     }
 
 
@@ -512,11 +704,11 @@ enum AgentCLI {
                         i += 1
                         opts[name] = argv[i]
                     else:
-                        raise Usage(f"{name} needs a value.")
+                        raise Usage(f"{name} needs a value. See `aether help {cmd}`.")
                 elif name in bools and not eq:
                     opts[name] = True
                 else:
-                    raise Usage(f"unknown option {word} for `aether {cmd}`.")
+                    raise Usage(f"unknown option {word} for `aether {cmd}`. See `aether help {cmd}`.")
             else:
                 positional.append(word)
             i += 1
@@ -526,6 +718,37 @@ enum AgentCLI {
     def show(cmd):
         print(HELP.get(cmd, HELP[""]))
         return 0
+
+
+    def is_pane_id(word):
+        if PANE_ID.match(word):
+            return True
+        compact = word.replace("-", "")
+        return bool(PANE_PREFIX.match(compact))
+
+
+    def take_pane(positional, opts, env=True):
+        pane = opts.get("--pane") or (os.environ.get("AETHER_PANE", "") if env else "")
+        if positional and is_pane_id(positional[0]):
+            pane = positional.pop(0)
+        return pane
+
+
+    def targeting(opts, pane):
+        body = {}
+        if pane:
+            body["pane"] = pane
+        if opts.get("--window"):
+            body["window"] = opts["--window"]
+        if opts.get("--desk"):
+            body["desk"] = opts["--desk"]
+        return body
+
+
+    def merge(base, extra):
+        body = dict(base)
+        body.update(extra)
+        return body
 
 
     def direction(opts, positional):
@@ -576,16 +799,24 @@ enum AgentCLI {
 
     def place(cmd, opts, positional, command):
         body = {"focus": bool(opts.get("--focus"))}
+        if opts.get("--title"):
+            body["title"] = opts["--title"]
         if cmd == "tab":
             if positional:
-                raise Usage(f"unexpected {positional[0]}. Put the command after --, like `aether tab -- htop`.")
+                raise Usage(
+                    f"unexpected {positional[0]}. "
+                    f"Pass a pane as --pane {positional[0]}, or put the command after --, like `aether tab -- htop`."
+                )
         else:
             body["direction"] = direction(opts, positional if cmd == "split" else [])
             share = ratio(opts)
             if share is not None:
                 body["ratio"] = share
         if cmd == "split" and positional:
-            raise Usage(f"unexpected {positional[0]}. Put the command after --, like `aether split -- npm test`.")
+            raise Usage(
+                f"unexpected {positional[0]}. "
+                f"Pass a pane as --pane {positional[0]}, or put the command after --, like `aether split -- npm test`."
+            )
         if len(command or []) == 1:
             body["command"] = command[0]
         elif command:
@@ -612,18 +843,17 @@ enum AgentCLI {
             raise Failure(f"could not read {path}. Quit and reopen Aether to rewrite it.")
 
 
-    def request(path, body, pane):
+    def request(path, body, pane=None):
         import socket, urllib.error, urllib.request
         if pane:
-            body["pane"] = pane
+            body.setdefault("pane", pane)
         wait = 8
         session = os.environ.get("AETHER_SESSION", "")
         if session:
             body["session"] = session
             payload = {"path": path, "body": body, "session": session}
             url = "http://127.0.0.1:7392/agent"
-            # Commands and pane lists wait for the person at the Mac to allow them.
-            if body.get("command") or path == "/view":
+            if body.get("command") or path in ("/view", "/windows", "/find", "/send"):
                 wait = 125
             headers = {"Authorization": "Bearer " + os.environ.get("AETHER_TOKEN", ""), "Content-Type": "application/json"}
         else:
@@ -674,16 +904,88 @@ enum AgentCLI {
         return re.sub(r"[\x00-\x1f\x7f]", " ", text)
 
 
+    def added_text(previous, current):
+        if current.startswith(previous):
+            return current[len(previous):]
+        n = min(len(previous), len(current))
+        i = 0
+        while i < n and previous[i] == current[i]:
+            i += 1
+        return current[i:]
+
+
+    def watch(pane, until, timeout, stream=False, after_prompts=None):
+        import signal, time
+        deadline = time.monotonic() + timeout if timeout else None
+        previous = ""
+        sent_interrupt = False
+        saw_busy = after_prompts is None
+
+        def handle(_sig, _frame):
+            nonlocal sent_interrupt
+            if sent_interrupt:
+                raise KeyboardInterrupt
+            sent_interrupt = True
+            try:
+                request("/send", merge(targeting({}, pane), {"keys": "ctrl+c"}), pane)
+            except Exception:
+                raise KeyboardInterrupt
+
+        old = signal.signal(signal.SIGINT, handle)
+        try:
+            while True:
+                state = request("/wait", targeting({}, pane), pane)
+                if stream:
+                    dump = request("/read", merge(targeting({}, pane), {"lines": 100000}), pane)
+                    text = dump.get("text") or ""
+                    delta = added_text(previous, text)
+                    if delta:
+                        sys.stdout.write(delta if delta.endswith("\n") or not text.endswith("\n") else delta)
+                        sys.stdout.flush()
+                    previous = text
+                exited = bool(state.get("exited"))
+                idle = bool(state.get("idle"))
+                busy = (not idle) and (not exited)
+                if busy:
+                    saw_busy = True
+                prompts = state.get("prompts")
+                prompts = prompts if isinstance(prompts, int) else 0
+                integrated = bool(state.get("integrated"))
+                if until == "exit" and exited:
+                    return state
+                if until == "idle":
+                    if exited:
+                        return state
+                    if after_prompts is not None and integrated and prompts > after_prompts:
+                        return state
+                    if after_prompts is not None and (not integrated) and idle and saw_busy:
+                        return state
+                    if after_prompts is None and idle:
+                        return state
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise Failure("timed out waiting for that pane.")
+                time.sleep(0.08)
+        finally:
+            signal.signal(signal.SIGINT, old)
+
+
     def install_skill():
         import shutil
         home = os.path.expanduser("~")
         plist = os.environ.get("AETHER_AGENT_PLIST") or os.path.join(home, "Library/Application Support/Aether/agent.plist")
-        candidates = [
-            os.path.join(os.path.dirname(plist), "skill", "SKILL.md"),
+        support = os.path.dirname(plist)
+        skill_candidates = [
+            os.path.join(support, "skill", "SKILL.md"),
             os.path.join(home, "Library/Application Support/Aether/skill/SKILL.md"),
             "/usr/local/share/aether/SKILL.md",
         ]
-        source = next((path for path in candidates if os.path.isfile(path)), None)
+        agents_candidates = [
+            os.path.join(support, "skill", "AGENTS.md"),
+            os.path.join(home, "Library/Application Support/Aether/skill/AGENTS.md"),
+            "/usr/local/share/aether/AGENTS.md",
+        ]
+        source = next((path for path in skill_candidates if os.path.isfile(path)), None)
+        agents = next((path for path in agents_candidates if os.path.isfile(path)), None)
         if not source:
             raise Failure("could not find the Aether skill. Open Aether once so it can write it.")
         installed, skipped = [], []
@@ -696,15 +998,118 @@ enum AgentCLI {
             try:
                 os.makedirs(dest, exist_ok=True)
                 shutil.copy(source, os.path.join(dest, "SKILL.md"))
+                if agents:
+                    shutil.copy(agents, os.path.join(dest, "AGENTS.md"))
                 installed.append(dest)
             except OSError as error:
                 skipped.append(f"{root} ({error.strerror})")
+        cwd_agents = os.path.join(os.getcwd(), "AGENTS.md")
+        if agents and (not os.path.isfile(cwd_agents) or open(cwd_agents, encoding="utf-8").read(20).startswith("# Aether")):
+            try:
+                shutil.copy(agents, cwd_agents)
+                installed.append(cwd_agents)
+            except OSError as error:
+                skipped.append(f"{cwd_agents} ({error.strerror})")
         for dest in installed:
             print(f"installed {dest}")
         for root in skipped:
             print(f"skipped {root}")
         if not installed:
             print("No agent folders found. Create ~/.claude, ~/.cursor, or ~/.agents first.")
+
+
+    def mcp():
+        def read_message():
+            headers = {}
+            while True:
+                line = sys.stdin.buffer.readline()
+                if not line:
+                    return None
+                if line in (b"\r\n", b"\n"):
+                    break
+                name, _, value = line.decode("utf-8", "replace").partition(":")
+                headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length") or 0)
+            if length <= 0:
+                return None
+            payload = sys.stdin.buffer.read(length)
+            return json.loads(payload)
+
+        def write_message(message):
+            raw = json.dumps(message, separators=(",", ":")).encode()
+            sys.stdout.buffer.write(f"Content-Length: {len(raw)}\r\n\r\n".encode() + raw)
+            sys.stdout.buffer.flush()
+
+        def tools():
+            return [
+                {"name": name, "description": HELP.get(name, "").split("\n")[0], "inputSchema": {"type": "object", "additionalProperties": True}}
+                for name in COMMANDS if name not in ("help", "mcp")
+            ]
+
+        def call(name, arguments):
+            import contextlib, io
+            argv = [name]
+            for key, value in (arguments or {}).items():
+                flag = "--" + key.replace("_", "-")
+                if value is True:
+                    argv.append(flag)
+                elif value is False or value is None:
+                    continue
+                elif key in ("command", "text", "message", "argv") and isinstance(value, list):
+                    argv.append("--")
+                    argv.extend(str(item) for item in value)
+                elif key in ("command", "text", "message") and isinstance(value, str) and name in ("run", "send", "notify", "title", "status"):
+                    argv.extend(["--", value] if name == "run" else [value])
+                else:
+                    argv.extend([flag, str(value)])
+            out, err = io.StringIO(), io.StringIO()
+            code = 0
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = main(argv)
+            except SystemExit as error:
+                code = error.code if isinstance(error.code, int) else (0 if not error.code else 1)
+            except Usage as error:
+                err.write(f"aether: {error}\n")
+                code = 2
+            except Failure as error:
+                err.write(f"aether: {error}\n")
+                code = 1
+            text = (out.getvalue() + err.getvalue()).rstrip()
+            if not text:
+                text = f"exit {code}"
+            result = {"content": [{"type": "text", "text": text}]}
+            if code not in (0, None):
+                result["isError"] = True
+            return result
+
+        while True:
+            message = read_message()
+            if message is None:
+                return 0
+            method = message.get("method")
+            ident = message.get("id")
+            if method == "initialize":
+                write_message({"jsonrpc": "2.0", "id": ident, "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "aether", "version": VERSION},
+                }})
+            elif method == "notifications/initialized":
+                continue
+            elif method == "tools/list":
+                write_message({"jsonrpc": "2.0", "id": ident, "result": {"tools": tools()}})
+            elif method == "tools/call":
+                params = message.get("params") or {}
+                try:
+                    result = call(params.get("name"), params.get("arguments") or {})
+                    write_message({"jsonrpc": "2.0", "id": ident, "result": result})
+                except SystemExit as error:
+                    write_message({"jsonrpc": "2.0", "id": ident, "result": {"content": [{"type": "text", "text": f"exit {error.code}"}]}})
+                except Exception as error:
+                    write_message({"jsonrpc": "2.0", "id": ident, "error": {"code": -32000, "message": str(error)}})
+            elif ident is not None:
+                write_message({"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"unknown method {method}"}})
 
 
     def main(argv):
@@ -718,15 +1123,22 @@ enum AgentCLI {
         cmd, rest = argv[0], argv[1:]
         if cmd == "help":
             if rest and rest[0] not in HELP:
-                raise Usage(f"no help for {rest[0]}.")
+                raise Usage(f"no help for {rest[0]}. Commands: " + ", ".join(COMMANDS) + ".")
             return show(rest[0] if rest else "")
+        if cmd == "mcp":
+            return mcp()
         if cmd not in SPECS:
             if cmd.startswith("-"):
                 raise Usage(f"unknown option {cmd}.")
-            raise Usage(f"unknown command {cmd}.")
+            raise Usage(f"unknown command {cmd}. Commands: " + ", ".join(COMMANDS) + ".")
         CURRENT = cmd
         opts, positional, command = parse(cmd, rest)
-        pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
+        if cmd == "close":
+            pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
+        elif cmd == "run":
+            pane = take_pane(positional, opts, env=False)
+        else:
+            pane = take_pane(positional, opts)
         raw = opts.get("--json")
 
         def finish(reply, text=None):
@@ -736,8 +1148,14 @@ enum AgentCLI {
                 print(text)
             return 0
 
+        def call(path, body=None):
+            payload = targeting(opts, pane)
+            if body:
+                payload.update(body)
+            return request(path, payload, pane)
+
         if cmd in ("split", "tab"):
-            reply = request("/" + cmd, place(cmd, opts, positional, command), pane)
+            reply = call("/" + cmd, place(cmd, opts, positional, command))
             return finish(reply, reply.get("pane"))
         if cmd == "open":
             if not positional:
@@ -759,35 +1177,49 @@ enum AgentCLI {
             body = place(cmd, opts, [], None)
             body["kind"] = kind
             body["target"] = target
-            reply = request("/open", body, pane)
+            reply = call("/open", body)
             return finish(reply, reply.get("pane"))
         if cmd == "read":
             if positional:
-                raise Usage(f"unexpected {positional[0]}.")
+                raise Usage(
+                    f"unexpected {positional[0]}. "
+                    f"Pass a pane id as `aether read {positional[0]}` or `--pane {positional[0]}`."
+                )
             body = {}
             if "--lines" in opts:
                 lines = number(opts["--lines"], "--lines")
                 if lines < 1 or lines != int(lines):
                     raise Usage("--lines must be a whole number above 0.")
                 body["lines"] = int(lines)
-            reply = request("/read", body, pane)
+            reply = call("/read", body)
             if raw:
                 return finish(reply)
             sys.stdout.write(reply.get("text", "").rstrip("\n") + "\n")
             return 0
         if cmd == "view":
             if positional:
-                raise Usage(f"unexpected {positional[0]}.")
-            reply = request("/view", {}, pane)
+                raise Usage(f"unexpected {positional[0]}. `aether view` lists every pane.")
+            reply = call("/view", {})
             rows = []
             for row in reply.get("panes", []):
                 mark = ("*" if row.get("focused") else " ") + ("<" if row.get("id") == pane else " ")
-                rows.append(f"{mark} {row.get('id', '')}  desk {str(row.get('desk', ''))[:8]}  {row.get('title', '')}")
+                running = row.get("command") or ""
+                extra = f"  {running}" if running else ""
+                rows.append(f"{mark} {row.get('id', '')}  desk {str(row.get('desk', ''))[:8]}  {row.get('title', '')}{extra}")
+            return finish(reply, "\n".join(rows))
+        if cmd == "windows":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}.")
+            reply = request("/windows", {}, None)
+            rows = []
+            for row in reply.get("windows", []):
+                mark = "*" if row.get("focused") else " "
+                rows.append(f"{mark} {row.get('id', '')}  {row.get('panes', 0)} panes  {row.get('title', '')}")
             return finish(reply, "\n".join(rows))
         if cmd == "zoom":
             if positional:
-                raise Usage(f"unexpected {positional[0]}.")
-            reply = request("/zoom", {}, pane)
+                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether zoom {positional[0]}` or `--pane {positional[0]}`.")
+            reply = call("/zoom", {})
             return finish(reply)
         if cmd == "font":
             if len(positional) > 1 or (positional and "--delta" in opts):
@@ -803,7 +1235,7 @@ enum AgentCLI {
                 raise Usage(f"unknown state {state}. Use " + ", ".join(STATES) + ".")
             message = " ".join(positional[1:])
             if pane and not os.environ.get("AETHER_SESSION"):
-                reply = request("/status", {"state": state, "message": message}, pane)
+                reply = call("/status", {"state": state, "message": message})
                 return finish(reply)
             sequence = "state=" + state
             if message:
@@ -813,18 +1245,118 @@ enum AgentCLI {
         if cmd == "notify":
             if not positional:
                 raise Usage("say what to notify, like `aether notify \"Build finished\"`.")
-            reply = request("/notify", {"message": " ".join(positional)}, pane)
+            reply = call("/notify", {"message": " ".join(positional)})
             return finish(reply)
         if cmd == "title":
             if not positional:
                 raise Usage("give a title, like `aether title \"API server\"`.")
-            tty_write("\x1b]2;" + clean(" ".join(positional)) + "\x07")
-            return 0
+            reply = call("/title", {"text": clean(" ".join(positional))})
+            return finish(reply, reply.get("title"))
         if cmd == "close":
             if len(positional) != 1:
                 raise Usage("give the id of one pane you opened, like `aether close <id>`.")
-            reply = request("/close", {"target": positional[0]}, pane)
+            reply = call("/close", {"target": positional[0]})
             return finish(reply)
+        if cmd == "send":
+            body = {}
+            if opts.get("--keys"):
+                body["keys"] = opts["--keys"]
+                if positional:
+                    raise Usage(f"unexpected {positional[0]}. With --keys, do not also pass text.")
+            else:
+                if not positional:
+                    raise Usage("give text or --keys, like `aether send --keys ctrl+c` or `aether send y --enter`.")
+                body["text"] = " ".join(positional)
+            if opts.get("--enter"):
+                body["enter"] = True
+            reply = call("/send", body)
+            return finish(reply)
+        if cmd == "run":
+            words = list(command) if command is not None else list(positional)
+            if not words:
+                raise Usage("give a command, like `aether run -- make test`.")
+            line = words[0] if len(words) == 1 else " ".join(quote(word) for word in words)
+            timeout = number(opts["--timeout"], "--timeout") if "--timeout" in opts else None
+            if pane:
+                before = call("/wait", {})
+                after = before.get("prompts") if isinstance(before.get("prompts"), int) else 0
+                body = {"text": line, "enter": True}
+                call("/send", body)
+                if opts.get("--title"):
+                    call("/title", {"text": opts["--title"]})
+                state = watch(pane, "idle", timeout, stream=not raw, after_prompts=after)
+                if raw:
+                    return finish(state)
+                code = state.get("lastStatus")
+                if not isinstance(code, int):
+                    code = state.get("exitCode")
+                return int(code) if isinstance(code, int) else 0
+            body = place("tab", opts, [], words)
+            body["command"] = line
+            reply = call("/tab", body)
+            target = reply.get("pane") or pane
+            if raw:
+                print(json.dumps(reply, indent=2))
+            state = watch(target, "exit", timeout, stream=not raw)
+            if raw:
+                print(json.dumps(state, indent=2))
+            if state.get("exited") and isinstance(state.get("exitCode"), int):
+                return int(state["exitCode"])
+            return 0
+        if cmd == "wait":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether wait {positional[0]}` or `--pane {positional[0]}`.")
+            if opts.get("--until-idle") and (opts.get("--exit") or opts.get("--until-exit")):
+                raise Usage("pick one of --until-idle or --exit.")
+            until = "exit" if (opts.get("--exit") or opts.get("--until-exit")) else "idle"
+            timeout = number(opts["--timeout"], "--timeout") if "--timeout" in opts else None
+            state = watch(pane, until, timeout, stream=False)
+            return finish(state)
+        if cmd == "find":
+            if positional:
+                raise Usage("pass --title or --command, like `aether find --command nmap`.")
+            if "--title" not in opts and "--command" not in opts:
+                raise Usage("pass --title or --command, like `aether find --command nmap`.")
+            body = {}
+            if "--title" in opts:
+                body["title"] = opts["--title"]
+            if "--command" in opts:
+                body["command"] = opts["--command"]
+            reply = request("/find", body, None)
+            rows = [f"{row.get('id', '')}  {row.get('title', '')}  {row.get('command', '')}".rstrip() for row in reply.get("panes", [])]
+            return finish(reply, "\n".join(rows))
+        if cmd == "move":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether move {positional[0]} --before <id>`.")
+            body = {}
+            if "--before" in opts:
+                body["before"] = opts["--before"]
+            if "--after" in opts:
+                body["after"] = opts["--after"]
+            if "--index" in opts:
+                index = number(opts["--index"], "--index")
+                if index != int(index) or index < 0:
+                    raise Usage("--index must be a whole number 0 or above.")
+                body["index"] = int(index)
+            if not body:
+                raise Usage("pass --before, --after, or --index.")
+            reply = call("/move", body)
+            order = " ".join(reply.get("order") or [])
+            return finish(reply, order)
+        if cmd == "order":
+            if len(positional) < 2:
+                raise Usage("give every pane in the window, like `aether order <id> <id> ...`.")
+            reply = request("/order", merge(targeting(opts, pane), {"panes": positional}), None)
+            order = " ".join(reply.get("order") or [])
+            return finish(reply, order)
+        if cmd == "screenshot":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}. Pass a pane as `aether screenshot {positional[0]}`.")
+            body = {}
+            if "--out" in opts:
+                body["path"] = os.path.abspath(os.path.expanduser(opts["--out"]))
+            reply = call("/screenshot", body)
+            return finish(reply, reply.get("path"))
         if cmd == "skill":
             if positional:
                 raise Usage(f"unexpected {positional[0]}.")
@@ -855,29 +1387,87 @@ enum AgentCLI {
     static let skill = #"""
     ---
     name: aether
-    description: Control the Aether terminal the agent is running in. Open panes beside you, show a page or PDF, read a pane's screen, show your status, and close panes you opened.
+    description: Control the Aether terminal from a shell. Open panes, type into them, run commands to completion, read output, and close panes you opened.
     ---
 
-    You are in Aether when `AETHER_PANE` is set. Use the `aether` command to change the layout. Do not guess keystrokes for splits.
+    You are in Aether when `AETHER_PANE` is set. Use the `aether` command. Do not guess keystrokes for splits.
 
-    Every command acts on your own pane (`AETHER_PANE`), not on whatever pane the person is typing in. Pass `--pane <id>` to act on another pane. Commands never move the keyboard focus or raise windows unless you pass `--focus`.
+    Every command acts on your own pane (`AETHER_PANE`) unless you pass `--pane <id>`. Pane ids may be positional (`aether read 50BBAE3B`) or given as `--pane`. Outside Aether, with one window open that window is used; with several, pass `--pane`, `--window`, or `--desk`. Commands never move keyboard focus unless you pass `--focus`. Add `--json` to any command for the raw reply.
 
-    - `aether split --right --ratio 30 -- npm run dev` opens a terminal beside you and prints its id. Sides: `--right`, `--left`, `--up`, `--down`. Ratio is the new pane's share, from 10 to 80. Pass one quoted string after `--` for pipes: `aether split --down -- 'make 2>&1 | tee build.log'`.
+    Agent loop: spawn with `tab` or `run`, watch with `wait` / `read`, interrupt with `send --keys ctrl+c`, rerun with `run` or `send`.
+
+    - `aether split --right --ratio 30 -- npm run dev` opens a terminal beside you and prints its id. Sides: `--right`, `--left`, `--up`, `--down`.
     - `aether tab -- command` adds a terminal to your window and prints its id.
-    - `aether open localhost:3000 --right --ratio 40` shows a page beside you. Addresses without a scheme get `http://`.
-    - `aether open docs/spec.pdf --down` shows a PDF. Relative paths are fine.
-    - `aether read` prints your screen. `aether read --pane <id> --lines 200` prints the last 200 lines of another pane, scrollback included.
-    - `aether view` lists panes: `*` marks the focused pane in each window, `<` marks you.
-    - `aether status working "Running tests"` shows a dot on your pane's header. States: `working`, `blocked`, `done`, `error`, `idle`. The message shows when the person points at the dot.
+    - `aether run -- make test` runs a command in a new tab, streams output, and exits with that command's status. `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
+    - `aether send --keys ctrl+c` types into a pane. `aether send y --enter` answers a prompt. `--keys` accepts `ctrl+c`, `enter`, `up`, `tab`, `esc`, and comma-separated chords.
+    - `aether wait <id> --exit` blocks until that pane's job exits. `--until-idle` waits for a prompt.
+    - `aether open localhost:3000 --right --ratio 40` shows a page beside you.
+    - `aether read` prints your screen. `aether read 50BBAE3B --lines 200` prints scrollback from another pane.
+    - `aether view` lists panes (`*` focused, `<` you). `aether view --json` includes `command`, `window`, `desk`, `focused`.
+    - `aether windows` lists windows. `aether find --command nmap` finds panes by title or running command.
+    - `aether move <id> --before <id>` / `aether order <id> <id> ...` reorder panes in a window.
+    - `aether status working "Running tests"` shows a dot on the header. States: `working`, `blocked`, `done`, `error`, `idle`.
     - `aether notify "Build finished"` posts a macOS notification.
-    - `aether title "API server"` names your pane.
-    - `aether close <id>` closes a pane you opened. Aether refuses panes you did not open.
+    - `aether title "API server"` names a pane.
+    - `aether close <id>` closes a pane you opened.
+    - `aether screenshot --out /tmp/pane.png` saves a PNG of a pane.
     - `aether zoom` fills the window with your pane, or puts it back.
     - `aether font 1` or `aether font -1` changes the type size. `aether font 0` resets it.
-    - `aether help <command>` shows options and examples. Add `--json` to get the raw reply.
+    - `aether skill` installs this skill and AGENTS.md.
+    - `aether mcp` speaks MCP on stdin/stdout (one tool per command).
+    - `aether help <command>` shows options and examples.
 
-    Exit codes: 0 worked, 1 Aether refused or is not running (the reason is on stderr), 2 bad arguments.
+    Exit codes: 0 worked, 1 Aether refused or is not running (the reason is on stderr), 2 bad arguments. `aether run` exits with the command's own status.
 
     "Beside you" means split your own pane. Leave focus alone unless asked. Close only panes you opened, and close them when you are done with them.
+    """#
+
+    static let agents = #"""
+    # Aether
+
+    Use the `aether` CLI to drive this macOS terminal. Prefer it over guessing tmux/iTerm keystrokes.
+
+    ## Targeting
+
+    - Inside Aether, `$AETHER_PANE` is your pane. Commands act there unless you pass `--pane <id>`.
+    - Pane ids may be positional (`aether read 50BBAE3B`) or `--pane`. Unique 8-character prefixes work.
+    - Outside Aether, with one window, that window is used. With several, pass `--pane`, `--window <id|this|any>`, or `--desk`.
+    - `aether windows` and `aether view --json` are how you discover ids. `--json` works on every command.
+
+    ## Agent loop
+
+    Keep a shell pane if you need to interrupt and rerun. A tab that is launched with a command (`aether tab -- ping`) exits when that command does.
+
+    ```sh
+    id=$(aether tab --title job)
+    aether send "$id" 'ping -c 20 1.1.1.1' --enter
+    aether send "$id" --keys ctrl+c
+    aether wait "$id" --until-idle --timeout 30
+    aether read "$id" --lines 50
+    aether run --pane "$id" -- echo done
+    aether close "$id"
+    ```
+
+    `aether run -- make test` is the one-shot form: new tab, stream output, exit with the command's status. Ctrl-C on `aether run` sends ctrl+c into the pane. `--pane` is required to type into an existing pane; `$AETHER_PANE` is not enough.
+
+    ## Commands
+
+    | Command | Role |
+    | --- | --- |
+    | `tab` / `split` | Open a visible pane. Prints the id. |
+    | `run` | Run to completion; stream output; exit with the command's status. |
+    | `send` | Type text or `--keys ctrl+c` / `enter`. |
+    | `wait` | `--until-idle` or `--exit`. |
+    | `read` | Screen and scrollback. |
+    | `view` / `windows` / `find` | Discover panes. |
+    | `title` / `status` / `notify` | Label and signal. |
+    | `move` / `order` | Reorder panes in a window. |
+    | `close` | Close a pane you opened. |
+    | `screenshot` | PNG of a pane. |
+    | `mcp` | MCP stdio, one tool per command. |
+
+    `aether help <command>` has flags and examples.
+
+    Exit codes: 0 ok, 1 Aether refused or is not running, 2 bad arguments.
     """#
 }

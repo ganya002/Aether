@@ -183,6 +183,52 @@ private func desk(_ id: String, _ panes: [String], focused: String) -> Desk {
     @Test func embeddedSkillMatchesSkillFile() throws {
         #expect(AgentCLI.skill + "\n" == (try repoFile("scripts/aether-skill/SKILL.md")))
     }
+
+    @Test func embeddedAgentsMatchesAgentsFile() throws {
+        #expect(AgentCLI.agents + "\n" == (try repoFile("scripts/aether-skill/AGENTS.md")))
+    }
+
+    @MainActor @Test func sendAndRunShowUpInHelp() throws {
+        #expect(AgentCLI.source.contains("aether send"))
+        #expect(AgentCLI.source.contains("aether run"))
+        #expect(AgentCLI.source.contains("aether wait"))
+        #expect(AgentCLI.source.contains("--until-idle"))
+        #expect(AgentDesk.routes.contains("/send"))
+        #expect(AgentDesk.routes.contains("/wait"))
+        #expect(AgentDesk.routes.contains("/windows"))
+    }
+
+    @Test func readTakesAPositionalPaneId() throws {
+        let text = try runCLI(["read", "50BBAE3B-AAAA-BBBB-CCCC-0123456789AB"])
+        #expect(!text.err.contains("unexpected"), "CLI still rejected a positional pane id: \(text.err)")
+        #expect(text.status == 1)
+        #expect(text.err.contains("Aether is not running") || text.err.contains("control port"))
+    }
+
+    @Test func sendTakesAPositionalPaneIdWithoutTreatingItAsText() throws {
+        let text = try runCLI(["send", "50BBAE3B-AAAA-BBBB-CCCC-0123456789AB"])
+        #expect(!text.err.contains("unexpected"), "CLI still rejected a positional pane id: \(text.err)")
+        #expect(text.status == 2)
+        #expect(text.err.contains("give text") || text.err.contains("--keys"))
+    }
+
+    private func runCLI(_ arguments: [String]) throws -> (status: Int32, err: String) {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let process = Process()
+        process.executableURL = root.appendingPathComponent("scripts/aether")
+        process.arguments = arguments
+        let err = Pipe()
+        process.standardError = err
+        process.standardOutput = Pipe()
+        var env = ProcessInfo.processInfo.environment
+        env["AETHER_AGENT_PLIST"] = "/tmp/aether-missing-agent.plist"
+        env["AETHER_PANE"] = ""
+        process.environment = env
+        try process.run()
+        process.waitUntilExit()
+        let message = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return (process.terminationStatus, message)
+    }
 }
 
 @Suite struct AgentListenerTests {

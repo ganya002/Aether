@@ -1402,6 +1402,61 @@ final class PaneController {
         return term.getText(start: Position(col: 0, row: 0), end: end)
     }
 
+    func inject(_ bytes: [UInt8]) {
+        chrome.terminal.send(source: chrome.terminal, data: bytes[...])
+    }
+
+    /// Name the pane after the foreground process so agents can tell tabs apart.
+    func syncProcessTitle() {
+        guard customTitle == nil, let running = runningCommand() else { return }
+        setTitle(ShellIntegration.summary(running.line))
+    }
+
+    func agentState(desk: String, focused: Bool) -> [String: Any] {
+        let running = runningCommand()?.line
+        var row: [String: Any] = [
+            "id": id,
+            "desk": desk,
+            "window": desk,
+            "title": customTitle ?? title,
+            "cwd": cwd,
+            "focused": focused,
+            "idle": running == nil && !exited,
+            "exited": exited,
+            "integrated": shellIntegrated,
+            "prompts": shellState.prompts,
+        ]
+        if let running { row["command"] = running }
+        if let code = lastExitCode { row["exitCode"] = Int(code) }
+        if let last = shellState.lastFinished {
+            row["lastCommand"] = last.line
+            if let code = last.exitCode { row["lastStatus"] = Int(code) }
+        }
+        return row
+    }
+
+    func screenshot(to path: String?) -> String? {
+        chrome.layoutSubtreeIfNeeded()
+        let bounds = chrome.bounds
+        guard bounds.width > 1, bounds.height > 1,
+              let rep = chrome.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        chrome.cacheDisplay(in: bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        let dest: URL
+        if let path, !path.isEmpty {
+            dest = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        } else {
+            dest = FileManager.default.temporaryDirectory.appendingPathComponent("aether-\(id.prefix(8)).png")
+        }
+        do {
+            try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try png.write(to: dest)
+            return dest.path
+        } catch {
+            return nil
+        }
+    }
+
     func endRemoteSession() {
         remoteTicket += 1
         remoteResumable = false

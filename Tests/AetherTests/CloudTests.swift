@@ -205,8 +205,13 @@ private final class MemoryStore: SecretStore {
 
 @Test func onlyListingEveryPaneNeedsApprovalWithoutACommand() {
     #expect(CloudPrompt.needsApproval("/view"))
+    #expect(CloudPrompt.needsApproval("/send"))
+    #expect(CloudPrompt.needsApproval("/move"))
+    #expect(CloudPrompt.needsApproval("/order"))
+    #expect(CloudPrompt.needsApproval("/screenshot"))
     #expect(!CloudPrompt.needsApproval("/read"))
     #expect(!CloudPrompt.needsApproval("/status"))
+    #expect(!CloudPrompt.needsApproval("/wait"))
 }
 
 @Test func aLateApprovalRunsNothing() {

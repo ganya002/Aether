@@ -773,7 +773,7 @@ enum CloudPrompt {
 
     /// Requests that show more than the asking terminal, so the person at the Mac decides.
     nonisolated static func needsApproval(_ path: String) -> Bool {
-        path == "/view"
+        path == "/view" || path == "/send" || path == "/move" || path == "/order" || path == "/screenshot"
     }
 
     /// The server's deadline for a request, in Unix milliseconds. Nil when it sent none.

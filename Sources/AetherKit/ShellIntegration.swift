@@ -199,6 +199,8 @@ struct CommandTracker: Equatable, Sendable {
     private(set) var active = false
     private(set) var shell: String?
     private(set) var running: Running?
+    /// How many OSC 133 prompts this pane has reported. Agents wait on this instead of guessing.
+    private(set) var prompts = 0
     /// The command that last finished, kept so the header can say "Ran git diff".
     private(set) var lastFinished: FinishedCommand?
 
@@ -216,6 +218,7 @@ struct CommandTracker: Equatable, Sendable {
             return nil
         case .prompt(let shell, let exit):
             active = true
+            prompts += 1
             if let shell, !shell.isEmpty { self.shell = shell }
             guard let running else { return nil }
             self.running = nil

@@ -1120,6 +1120,10 @@ final class AppModel {
             if !System.sameDirectory(cwd, pane.cwd) {
                 pane.noteDirectory(cwd)
             }
+            pane.syncProcessTitle()
+        }
+        for pane in panes.values {
+            pane.syncProcessTitle()
         }
         watchCommands()
     }
@@ -1359,7 +1363,15 @@ extension AppModel {
 
     func agent(path: String, body: [String: Any], fromCloud: Bool = false) -> [String: Any] {
         let sessions = panes.compactMapValues { $0.chrome.terminal.remoteSession }
-        let resolved = fromCloud ? cloudTarget(body) : AgentArgs.target(pane: body["pane"] as? String, session: body["session"] as? String, desks: desks, sessions: sessions, keyDesk: keyDeskID)
+        let resolved = fromCloud ? cloudTarget(body) : AgentArgs.target(
+            pane: body["pane"] as? String,
+            session: body["session"] as? String,
+            desks: desks,
+            sessions: sessions,
+            keyDesk: keyDeskID,
+            window: body["window"] as? String,
+            desk: body["desk"] as? String
+        )
         if fromCloud, case .failure(let error) = resolved { return failure(error.message) }
         switch path {
         case "/tab", "/split":
@@ -1374,6 +1386,7 @@ extension AppModel {
                 guard let pane = openAgentPane(beside: target, zone: zone, command: command, focus: bool(body["focus"], false), share: share(body["ratio"])) else {
                     return failure("No room for another pane there. Make the window bigger, or close a pane.")
                 }
+                applyAgentTitle(pane, body["title"] as? String)
                 return ["ok": true, "pane": pane]
             case .failure(let error):
                 guard body["pane"] == nil, body["session"] == nil else { return failure(error.message) }
@@ -1417,12 +1430,56 @@ extension AppModel {
             }
             return ["ok": true, "pane": target.pane, "text": pane.screenText()]
         case "/view":
-            let rows = order.compactMap { desks[$0] }.flatMap { desk in
-                Layout.visualIDs(desk.layout).map { id in
-                    ["id": id, "desk": desk.id, "focused": desk.focusedID == id, "title": desk.panes[id]?.title ?? ""] as [String: Any]
-                }
+            return ["ok": true, "panes": viewRows()]
+        case "/windows":
+            return ["ok": true, "windows": windowRows()]
+        case "/title":
+            guard case .success(let target) = resolved else { return failure(resolved) }
+            let text = body["text"] as? String ?? ""
+            rename(target.pane, to: text)
+            return ["ok": true, "pane": target.pane, "title": panes[target.pane]?.customTitle ?? panes[target.pane]?.title ?? text]
+        case "/send":
+            guard case .success(let target) = resolved, let pane = panes[target.pane] else { return failure(resolved) }
+            if pane.exited { return failure("That pane has already exited.") }
+            switch AgentInput.bytes(body) {
+            case .success(let bytes):
+                guard !bytes.isEmpty else { return failure("Give text or --keys.") }
+                pane.inject(bytes)
+                return ["ok": true, "pane": target.pane, "bytes": bytes.count]
+            case .failure(let error):
+                return failure(error.message)
+            }
+        case "/wait":
+            guard case .success(let target) = resolved, let pane = panes[target.pane] else { return failure(resolved) }
+            var state = pane.agentState(desk: target.desk, focused: desks[target.desk]?.focusedID == target.pane)
+            state["ok"] = true
+            return state
+        case "/find":
+            let titleNeedle = (body["title"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let commandNeedle = (body["command"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !titleNeedle.isEmpty || !commandNeedle.isEmpty else {
+                return failure("Pass --title or --command.")
+            }
+            let rows = viewRows().filter { row in
+                let title = (row["title"] as? String ?? "").lowercased()
+                let command = (row["command"] as? String ?? "").lowercased()
+                let titleOK = titleNeedle.isEmpty || title.contains(titleNeedle)
+                let commandOK = commandNeedle.isEmpty || command.contains(commandNeedle)
+                return titleOK && commandOK
             }
             return ["ok": true, "panes": rows]
+        case "/move":
+            guard case .success(let target) = resolved else { return failure(resolved) }
+            return moveAgentPane(target.pane, before: body["before"] as? String, after: body["after"] as? String, index: int(body["index"]))
+        case "/order":
+            let ids = (body["panes"] as? [String]) ?? (body["panes"] as? [Any])?.compactMap { $0 as? String } ?? []
+            return orderAgentPanes(ids)
+        case "/screenshot":
+            guard case .success(let target) = resolved, let pane = panes[target.pane] else { return failure(resolved) }
+            guard let path = pane.screenshot(to: body["path"] as? String) else {
+                return failure("Could not capture that pane.")
+            }
+            return ["ok": true, "pane": target.pane, "path": path]
         case "/status":
             guard case .success(let target) = resolved, target.explicit, let pane = panes[target.pane] else { return failure(resolved) }
             let state = body["state"] as? String ?? ""
@@ -1538,5 +1595,95 @@ extension AppModel {
 
     private func bool(_ raw: Any?, _ fallback: Bool) -> Bool {
         raw as? Bool ?? fallback
+    }
+
+    private func applyAgentTitle(_ paneID: String, _ title: String?) {
+        let cleaned = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !cleaned.isEmpty else { return }
+        rename(paneID, to: cleaned)
+    }
+
+    private func viewRows() -> [[String: Any]] {
+        order.compactMap { desks[$0] }.flatMap { desk in
+            Layout.visualIDs(desk.layout).map { id in
+                panes[id]?.agentState(desk: desk.id, focused: desk.focusedID == id) ?? [
+                    "id": id,
+                    "desk": desk.id,
+                    "window": desk.id,
+                    "focused": desk.focusedID == id,
+                    "title": desk.panes[id]?.customTitle ?? desk.panes[id]?.title ?? "",
+                ]
+            }
+        }
+    }
+
+    private func windowRows() -> [[String: Any]] {
+        order.compactMap { id -> [String: Any]? in
+            guard let desk = desks[id] else { return nil }
+            let paneIDs = Layout.visualIDs(desk.layout)
+            let focusedPane = desk.focusedID
+            let title = panes[focusedPane]?.customTitle ?? panes[focusedPane]?.title ?? controllers[id]?.window?.title ?? "Aether"
+            return [
+                "id": id,
+                "desk": id,
+                "window": id,
+                "title": title,
+                "focused": id == keyDeskID,
+                "panes": paneIDs.count,
+            ]
+        }
+    }
+
+    private func moveAgentPane(_ paneID: String, before: String?, after: String?, index: Int?) -> [String: Any] {
+        guard let owner = deskID(containing: paneID), var desk = desks[owner] else {
+            return failure("No pane \(paneID).")
+        }
+        var beforeID = before
+        var afterID = after
+        if let before, case .success(let id) = AgentArgs.resolvePane(before, desks: desks) { beforeID = id }
+        if let after, case .success(let id) = AgentArgs.resolvePane(after, desks: desks) { afterID = id }
+        if let beforeID, deskID(containing: beforeID) != owner {
+            return failure("Those panes are not in the same window.")
+        }
+        if let afterID, deskID(containing: afterID) != owner {
+            return failure("Those panes are not in the same window.")
+        }
+        let next = Layout.move(desk.layout, id: paneID, before: beforeID, after: afterID, index: index)
+        guard next != desk.layout else {
+            return failure("Pass --before, --after, or --index.")
+        }
+        desk.layout = next
+        desks[owner] = desk
+        controllers[owner]?.sync(animated: true)
+        scheduleSave()
+        return ["ok": true, "pane": paneID, "order": Layout.visualIDs(next)]
+    }
+
+    private func orderAgentPanes(_ ids: [String]) -> [String: Any] {
+        guard let first = ids.first else { return failure("Give the pane ids in the order you want.") }
+        guard case .success(let firstID) = AgentArgs.resolvePane(first, desks: desks), let owner = deskID(containing: firstID), var desk = desks[owner] else {
+            return failure("No pane \(first).")
+        }
+        var resolved: [String] = []
+        for raw in ids {
+            switch AgentArgs.resolvePane(raw, desks: desks) {
+            case .success(let id):
+                guard deskID(containing: id) == owner else {
+                    return failure("Those panes are not in the same window.")
+                }
+                if !resolved.contains(id) { resolved.append(id) }
+            case .failure(let error):
+                return failure(error.message)
+            }
+        }
+        let have = Layout.visualIDs(desk.layout)
+        guard Set(resolved) == Set(have) else {
+            return failure("order needs every pane in the window, once.")
+        }
+        desk.layout = Layout.ordered(desk.layout, as: resolved)
+        desks[owner] = desk
+        controllers[owner]?.sync(animated: true)
+        scheduleSave()
+        return ["ok": true, "order": Layout.visualIDs(desk.layout)]
     }
 }
