@@ -210,14 +210,79 @@ private func marker(in app: URL) throws -> String {
     #expect(leftovers == ["Aether.app"])
 }
 
-@Test @MainActor func updateToastOnlyTakesClicksInTheCorner() {
+@Test @MainActor func updateCardOnlyTakesClicksInTheTopRightCorner() {
     let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
-    let toast = UpdateVeil(frame: host.bounds)
-    host.addSubview(toast)
-    toast.showReady()
-    toast.layoutSubtreeIfNeeded()
-    #expect(toast.hitTest(NSPoint(x: 450, y: 300)) == nil)
-    #expect(toast.hitTest(NSPoint(x: 40, y: 30)) == nil)
-    #expect(toast.hitTest(NSPoint(x: 870, y: 38)) != nil)
-    #expect(toast.hitTest(NSPoint(x: 870, y: 120)) == nil)
+    let card = UpdateCard(frame: host.bounds)
+    host.addSubview(card)
+    card.show(.ready(UpdateDemo.offer))
+    card.layoutSubtreeIfNeeded()
+    #expect(card.hitTest(NSPoint(x: 450, y: 300)) == nil)
+    #expect(card.hitTest(NSPoint(x: 40, y: 570)) == nil)
+    #expect(card.hitTest(NSPoint(x: 870, y: 570)) != nil)
+    #expect(card.hitTest(NSPoint(x: 870, y: 30)) == nil)
+}
+
+@Test func offerCarriesTheReleaseNotesVersionAndDate() throws {
+    let json = #"""
+    {"tag_name":"build-abc123","published_at":"2026-10-29T09:31:46Z",
+     "body":"Faster tabs\n\naether-version: 2.1.0\naether-build: 2000",
+     "assets":[{"name":"Aether.app.zip","browser_download_url":"https://example.com/z"},
+               {"name":"Aether.app.zip.sha256","browser_download_url":"https://example.com/s"}]}
+    """#
+    let offer = try #require(ReleaseFeed.offer(from: Data(json.utf8), local: installed))
+    #expect(offer.version == "2.1.0")
+    #expect(offer.build == 2000)
+    #expect(offer.published == Date(timeIntervalSince1970: 1_793_266_306))
+    #expect(ReleaseNotes.lines(offer.notes) == ["Faster tabs"])
+    // Releases from before version lines still work.
+    #expect(try #require(ReleaseFeed.offer(from: release(), local: installed)).version == "")
+}
+
+@Test func releaseNotesDropMetadataAndRenderMarkdown() {
+    let notes = "Update c557c1e777acae323aa9e5dbec4cb4d112e7c2e6\n\n## New\n- **Bold** and `code`\n\naether-build: 5"
+    #expect(ReleaseNotes.lines(notes) == ["## New", "- **Bold** and `code`"])
+    let text = ReleaseNotes.render(notes, ink: .white)
+    #expect(text.string == "New\n•\tBold and code")
+    let bold = text.attribute(.font, at: (text.string as NSString).range(of: "Bold").location, effectiveRange: nil) as? NSFont
+    #expect(bold?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+    let code = text.attribute(.font, at: (text.string as NSString).range(of: "code").location, effectiveRange: nil) as? NSFont
+    #expect(code?.isFixedPitch == true)
+}
+
+@Test func downloadSpeedIsSmoothedAndGivesTimeLeft() {
+    var progress = DownloadProgress()
+    progress.advance(written: 0, total: 10_000_000, at: 0)
+    #expect(progress.secondsLeft == nil)
+    progress.advance(written: 1_000_000, total: 10_000_000, at: 0.5)
+    #expect(progress.bytesPerSecond == 2_000_000)
+    // Samples closer than a quarter second only move the byte count.
+    progress.advance(written: 1_500_000, total: 10_000_000, at: 0.6)
+    #expect(progress.bytesPerSecond == 2_000_000)
+    #expect(progress.fraction == 0.15)
+    #expect(progress.secondsLeft == 4.25)
+    progress.advance(written: 1_500_000, total: 10_000_000, at: 1.0)
+    #expect(progress.bytesPerSecond == 1_750_000)
+    #expect(progress.detail.contains(" of "))
+    #expect(progress.detail.hasSuffix("left"))
+}
+
+@Test func plainHttpAssetsAreOnlyForThisMachine() {
+    let feed = { (host: String) -> Data in
+        let assets = ["Aether.app.zip", "Aether.app.zip.sha256"].map { #"{"name":"\#($0)","browser_download_url":"http://\#(host)/\#($0)"}"# }
+        return #"{"tag_name":"build-abc123","body":"aether-build: 2000","assets":[\#(assets.joined(separator: ","))]}"#.data(using: .utf8)!
+    }
+    #expect(ReleaseFeed.offer(from: feed("example.com"), local: installed) == nil)
+    // Tests are debug builds, where a local feed may rehearse an install. Release builds refuse it too.
+    #if DEBUG
+    #expect(ReleaseFeed.offer(from: feed("127.0.0.1:8000"), local: installed) != nil)
+    #else
+    #expect(ReleaseFeed.offer(from: feed("127.0.0.1:8000"), local: installed) == nil)
+    #endif
+}
+
+@Test @MainActor func passingStagesDissolveButErrorsAndChoicesWait() {
+    #expect(UpdateStage.upToDate.linger == 2.5)
+    #expect(UpdateStage.failed("x").linger == nil)
+    #expect(UpdateStage.ready(UpdateDemo.offer).linger == nil)
+    #expect(UpdateStage.upToDate.summary.hasPrefix("Up to date · checked "))
 }

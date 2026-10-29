@@ -14,6 +14,8 @@ enum Motion {
     static let frostOut: TimeInterval = 0.36
     static let blur: TimeInterval = GlassFocus.blurDuration
     static let reveal: TimeInterval = 0.42
+    /// Dissolving into vapour: slower than a close, so the blur has time to rise.
+    static let vapor: TimeInterval = 0.6
 
     /// Reduce Motion is on: crossfade only, and quickly. Callers skip their frame and scale changes.
     static var reduced: Bool {
@@ -129,21 +131,20 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         tabs.deskID = deskID
     }
 
-    func showUpdateGauge() -> UpdateVeil {
-        if let veil = canvas.subviews.compactMap({ $0 as? UpdateVeil }).first {
+    func showUpdateGauge() -> UpdateCard {
+        if let veil = canvas.subviews.compactMap({ $0 as? UpdateCard }).first {
             canvas.addSubview(veil)
             return veil
         }
-        let veil = UpdateVeil(frame: canvas.bounds)
+        let veil = UpdateCard(frame: canvas.bounds)
         veil.autoresizingMask = [.width, .height]
         canvas.addSubview(veil)
-        veil.reveal()
         return veil
     }
 
     func hideUpdateGauge() {
-        for case let veil as UpdateVeil in canvas.subviews {
-            veil.removeFromSuperview()
+        for case let veil as UpdateCard in canvas.subviews {
+            veil.dismiss()
         }
     }
 
@@ -182,6 +183,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         }
         tabs.reload(desk, tone: AppModel.shared.settings.text.effective)
         tabs.attach(to: window, dropdown: desk.dropdown)
+        for case let card as UpdateCard in canvas.subviews { card.restyle() }
     }
 
     private static func titlebarToolbar() -> NSToolbar {
@@ -750,7 +752,7 @@ final class DeskCanvas: NSView {
         pinFrostToBack()
         if veil.superview === self { addSubview(veil) }
         if hud.superview === self { addSubview(hud) }
-        for case let update as UpdateVeil in subviews {
+        for case let update as UpdateCard in subviews {
             addSubview(update)
         }
     }
