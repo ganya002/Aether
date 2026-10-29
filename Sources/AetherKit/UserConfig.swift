@@ -247,6 +247,7 @@ struct ConfigKey: Sendable {
             }
         }, carry: { $1.optionKey = $0.optionKey }),
         choice("shell-exit", \.shellExit, "What a terminal does when its shell exits."),
+        choice("editor", \.editor, "Where ⌘-clicked file paths open."),
         flag("warn-multiline-paste", \.warnMultilinePaste, "Ask before pasting several lines into a shell that would run each."),
         flag("copy-on-select", \.copyOnSelect, "Copy text as soon as it's selected."),
         flag("restore-contents", \.restoreContents, "Show each terminal's old text again after Aether restarts."),

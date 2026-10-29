@@ -204,6 +204,8 @@ public struct Settings: Codable, Equatable, Sendable {
     /// Draw terminal text with Metal. Panes fall back to CoreGraphics when Metal is missing or its shaders fail to compile.
     /// Off by default: SwiftTerm's Metal path measured no faster than CoreGraphics and used more CPU per frame.
     public var gpuRendering: Bool = false
+    /// Where ⌘-clicked file paths open.
+    public var editor: EditorChoice = .automatic
 
     public static let currentVersion = 2
 
@@ -303,6 +305,7 @@ public struct Settings: Codable, Equatable, Sendable {
         shellIntegration = field(.shellIntegration, true)
         restoreContents = field(.restoreContents, true)
         gpuRendering = field(.gpuRendering, false)
+        editor = field(.editor, EditorChoice.automatic)
         clamp()
     }
 

@@ -309,6 +309,7 @@ extension AppAction {
         case .previousPrompt: "arrow.up.to.line"
         case .nextPrompt: "arrow.down.to.line"
         case .selectLastOutput: "text.badge.checkmark"
+        case .copyMode: "character.cursor.ibeam"
         }
     }
 
@@ -327,6 +328,7 @@ extension AppAction {
         switch self {
         case .settings: ["preferences", "options", "config"]
         case .clearBuffer: ["clear", "cls", "reset"]
+        case .copyMode: ["vi", "vim", "tmux", "select", "keyboard"]
         case .fill: ["maximize", "zoom"]
         case .newPane: ["shell"]
         case .newTab: ["tab", "workspace", "group"]
