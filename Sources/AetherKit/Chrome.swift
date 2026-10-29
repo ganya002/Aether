@@ -8,6 +8,10 @@ enum PaletteAction: Equatable {
     case checkForUpdates
     case glass(GlassStyle)
     case help
+    case saveWorkspace
+    case openWorkspace(String)
+    case renameWorkspace(String)
+    case deleteWorkspace(String)
 }
 
 struct PaletteRow: Equatable {
@@ -34,6 +38,8 @@ struct PaletteRow: Equatable {
     var shortcut: String = ""
     /// Other words that should find this row, like "preferences" for Settings.
     var keywords: [String] = []
+    /// Left out of the list until something is typed, like Delete Workspace.
+    var searchOnly = false
 
     var runs: Bool {
         if case .action = kind { return false }
@@ -68,7 +74,7 @@ enum Launcher {
             PaletteRow(title: $0, detail: "Ran recently", kind: .command($0, newWindow: false), section: .recent, symbol: "clock.arrow.circlepath")
         }
         if query.isEmpty {
-            return Array(recentRows.prefix(6)) + actions + Array(toolRows.prefix(8)) + Array(hostRows.prefix(4))
+            return Array(recentRows.prefix(6)) + actions.filter { !$0.searchOnly } + Array(toolRows.prefix(8)) + Array(hostRows.prefix(4))
         }
 
         let matches = actions.compactMap { match(query, $0) }.sorted { lhs, rhs in
@@ -628,6 +634,13 @@ final class CommandPalette: NSWindowController, NSTableViewDataSource, NSTableVi
         }
         for kind in LayoutKind.cycle {
             rows.append(PaletteRow(title: "\(kind.title) layout", detail: "Arrange the panes", kind: .action(.layout(kind)), symbol: "rectangle.3.group", keywords: ["tile", "arrange"]))
+        }
+        rows.append(PaletteRow(title: "Save Workspace…", detail: "Name this window's tabs, layouts, and commands", kind: .action(.saveWorkspace), symbol: "square.and.arrow.down", keywords: ["workspace", "session", "save layout"]))
+        for workspace in WorkspaceStore.load() {
+            let name = workspace.name
+            rows.append(PaletteRow(title: "Open Workspace: \(name)", detail: "\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")", kind: .action(.openWorkspace(name)), symbol: "square.stack.3d.up", keywords: [name, "workspace \(name)"]))
+            rows.append(PaletteRow(title: "Rename Workspace: \(name)", detail: "", kind: .action(.renameWorkspace(name)), symbol: "pencil", keywords: ["workspace"], searchOnly: true))
+            rows.append(PaletteRow(title: "Delete Workspace: \(name)", detail: "", kind: .action(.deleteWorkspace(name)), symbol: "trash", keywords: ["remove workspace"], searchOnly: true))
         }
         rows.append(PaletteRow(title: "Arrange windows", detail: "Grid the glass windows on this screen", kind: .action(.arrangeWindows), symbol: "square.grid.2x2", keywords: ["tile windows"]))
         let clear = AppModel.shared.settings.glass == .clear

@@ -15,7 +15,7 @@ final class AgentDesk {
         "/status", "/notify", "/close", "/title", "/send", "/wait",
         "/windows", "/move", "/order", "/find", "/screenshot", "/workspace",
         "/resize", "/layout", "/focus", "/window", "/tabs", "/tab-select", "/tab-rename",
-        "/tab-close", "/tab-move", "/set",
+        "/tab-close", "/tab-move", "/set", "/workspaces", "/workspace-save", "/workspace-open",
     ]
     /// Which pane asked for each pane, so an agent can close only what it opened.
     var openedBy: [String: String] = [:]
@@ -384,7 +384,8 @@ enum AgentCLI {
         "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
         "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
         "find", "screenshot", "workspace", "resize", "layout", "equalize", "focus", "window",
-        "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "set", "imgcat", "hook", "mcp", "help",
+        "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "workspaces", "workspace-save",
+        "workspace-open", "set", "imgcat", "hook", "mcp", "help",
     )
     
     
@@ -441,6 +442,7 @@ enum AgentCLI {
       window      Resize, move, zoom, or full-screen a window.
       tabs        List the tab groups.
       tab-select  Show a tab group. Also tab-rename, tab-close, tab-move.
+      workspaces  List saved workspaces. Also workspace-save, workspace-open.
       font        Make the type bigger or smaller.
       set         Change a setting, like the theme or the glass.
       imgcat      Show an image inline in this pane.
@@ -760,6 +762,36 @@ enum AgentCLI {
     
     Example:
       aether tabs""",
+        "workspaces": """usage: aether workspaces
+    
+    List saved workspaces: name, tabs, and each pane's folder and command.
+    
+    Options:
+      --json                          Print the raw reply.
+    
+    Example:
+      aether workspaces""",
+        "workspace-save": """usage: aether workspace-save <name>
+    
+    Save your window's tab groups as a workspace: tab names, layouts, each
+    pane's folder, and the command running in it. A workspace with the same
+    name is replaced.
+    
+    Options:""" + COMMON + """
+    
+    Example:
+      aether workspace-save school""",
+        "workspace-open": """usage: aether workspace-open <name>
+    
+    Open a saved workspace in a new window. A window that only holds one idle
+    terminal is used instead. Each pane starts in its folder and runs its
+    command. Names ignore case.
+    
+    Options:
+      --json                          Print the raw reply.
+    
+    Example:
+      aether workspace-open school""",
         "tab-select": """usage: aether tab-select <tab-id|index>
     
     Show a tab group. An index counts from 0 in your window (or --window).
@@ -861,6 +893,9 @@ enum AgentCLI {
         "tab-rename": (TARGET, JSON, False),
         "tab-close": (TARGET, JSON, False),
         "tab-move": (TARGET | {"--index"}, JSON, False),
+        "workspaces": (set(), JSON, False),
+        "workspace-save": (TARGET, JSON, False),
+        "workspace-open": (set(), JSON, False),
         "set": (set(), JSON, False),
         "imgcat": ({"--width"}, set(), False),
     }
@@ -1373,7 +1408,7 @@ enum AgentCLI {
             pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
         elif cmd == "run":
             pane = take_pane(positional, opts, env=False)
-        elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move"):
+        elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move", "workspaces", "workspace-save", "workspace-open"):
             pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
         else:
             pane = take_pane(positional, opts)
@@ -1657,6 +1692,27 @@ enum AgentCLI {
                 mark = "*" if row.get("active") else " "
                 rows.append(f"{mark} {row.get('index')}  {row.get('id', '')}  window {str(row.get('window', ''))[:8]}  {len(row.get('panes') or [])} panes  {row.get('title', '')}")
             return finish(reply, "\n".join(rows))
+        if cmd == "workspaces":
+            if positional:
+                raise Usage(f"unexpected {positional[0]}.")
+            reply = request("/workspaces", {}, None)
+            rows = []
+            for row in reply.get("workspaces", []):
+                tabs = row.get("tabs") or []
+                panes = sum(len(tab.get("panes") or []) for tab in tabs)
+                names = ", ".join(tab.get("name") or "untitled" for tab in tabs)
+                rows.append(f"{row.get('name')}  {len(tabs)} tabs  {panes} panes  ({names})")
+            return finish(reply, "\n".join(rows) or "No saved workspaces. `aether workspace-save <name>` saves this window.")
+        if cmd in ("workspace-save", "workspace-open"):
+            name = " ".join(positional).strip()
+            if not name:
+                raise Usage(f"give a name, like `aether {cmd} school`.")
+            if cmd == "workspace-open":
+                reply = request("/workspace-open", {"name": name}, None)
+                return finish(reply, f"opened {name} in window {str(reply.get('window', ''))[:8]}")
+            reply = call("/workspace-save", {"name": name})
+            saved = reply.get("workspace") or {}
+            return finish(reply, f"saved {saved.get('name', name)}: {len(saved.get('tabs') or [])} tabs")
         if cmd.startswith("tab-"):
             if not positional:
                 raise Usage(f"give a tab id or index, like `aether {cmd} 1`. `aether tabs` lists them.")
@@ -1766,6 +1822,7 @@ enum AgentCLI {
     - `aether window --size 1400x900 --position 0,40` resizes and moves a window (points from the top-left of the main screen). `--zoom`, `--fullscreen`, and `--front` toggle. `aether windows --json` shows each frame.
     - `aether focus <id>` moves the keyboard into a pane and brings its window forward.
     - `aether tabs` lists tab groups. `aether tab-select 1`, `aether tab-rename 1 school`, `aether tab-move 1 --index 0`, `aether tab-close 1` take an index (from 0) or a tab id.
+    - `aether workspace-save school` saves the window's tabs, layouts, folders, and running commands. `aether workspaces` lists them; `aether workspace-open school` opens one in a new window.
     - `aether set` lists settings agents may change; `aether set themeName Dracula`, `aether set fontSize 15`, `aether set glass clear`.
     - `aether imgcat chart.png` draws an image inline in your pane (iTerm2 protocol). Aether also draws kitty graphics and sixel, so `kitty +kitten icat` and `img2sixel` work too. `aether open file.pdf` shows a PDF beside you.
     - `aether font 1` or `aether font -1` changes the type size. `aether font 0` resets it.
@@ -1823,6 +1880,7 @@ enum AgentCLI {
     | `window` | Size, move, zoom, or full-screen a window. |
     | `focus` | Move the keyboard into a pane. |
     | `tabs` / `tab-select` / `tab-rename` / `tab-move` / `tab-close` | Tab groups. |
+    | `workspaces` / `workspace-save` / `workspace-open` | Named sets of tabs with their layouts and commands. |
     | `set` | Theme, glass, font size, and other safe settings. |
     | `imgcat` | Draw an image inline (kitty graphics and sixel work too). |
     | `close` | Close a pane you opened. |
