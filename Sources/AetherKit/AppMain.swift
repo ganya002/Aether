@@ -350,6 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .layout(let kind): model.arrange(kind)
             case .arrangeWindows: model.arrangeWindows()
             case .checkForUpdates: checkForUpdates()
+            case .openConfig: UserConfigCenter.shared.openFile()
             case .glass(let style): model.updateSettings { $0.glass = style }
             case .help: openHelp()
             }

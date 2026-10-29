@@ -43,6 +43,7 @@ aether close "$id"
 | `focus` | Move the keyboard into a pane. |
 | `tabs` / `tab-select` / `tab-rename` / `tab-move` / `tab-close` | Tab groups. |
 | `set` | Theme, glass, font size, and other safe settings. |
+| `config` | `path`, `check`, or `defaults` for `~/.config/aether/config`. |
 | `imgcat` | Draw an image inline (kitty graphics and sixel work too). |
 | `close` | Close a pane you opened. |
 | `screenshot` | PNG of a pane. |

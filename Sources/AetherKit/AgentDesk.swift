@@ -15,7 +15,7 @@ final class AgentDesk {
         "/status", "/notify", "/close", "/title", "/send", "/wait",
         "/windows", "/move", "/order", "/find", "/screenshot", "/workspace",
         "/resize", "/layout", "/focus", "/window", "/tabs", "/tab-select", "/tab-rename",
-        "/tab-close", "/tab-move", "/set",
+        "/tab-close", "/tab-move", "/set", "/config",
     ]
     /// Which pane asked for each pane, so an agent can close only what it opened.
     var openedBy: [String: String] = [:]
@@ -384,7 +384,7 @@ enum AgentCLI {
         "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
         "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
         "find", "screenshot", "workspace", "resize", "layout", "equalize", "focus", "window",
-        "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "set", "imgcat", "hook", "mcp", "help",
+        "tabs", "tab-select", "tab-rename", "tab-close", "tab-move", "set", "config", "imgcat", "hook", "mcp", "help",
     )
     
     
@@ -443,6 +443,7 @@ enum AgentCLI {
       tab-select  Show a tab group. Also tab-rename, tab-close, tab-move.
       font        Make the type bigger or smaller.
       set         Change a setting, like the theme or the glass.
+      config      Find, check, or print the config file.
       imgcat      Show an image inline in this pane.
       status      Show what you are doing on this pane's header.
       notify      Post a macOS notification.
@@ -807,6 +808,22 @@ enum AgentCLI {
       aether set
       aether set themeName Dracula
       aether set fontSize 15""",
+        "config": """usage: aether config <path|check|defaults> [file]
+    
+    The config file holds `key = value` lines that win over the Settings
+    window. It lives at ~/.config/aether/config ($XDG_CONFIG_HOME/aether/config).
+    Aether reloads it when you save.
+    
+      path       Print where the file is.
+      check      List mistakes in the file, or in [file]. Exits 1 if there are any.
+      defaults   Print every key, commented out, at its default.
+    
+    Options:
+      --json                          Print the raw reply.
+    
+    Examples:
+      aether config check
+      aether config defaults > ~/.config/aether/config""",
         "imgcat": """usage: aether imgcat <file> [--width N]
     
     Draw an image (PNG, JPEG, GIF) inline in the pane you run it in, with the
@@ -862,6 +879,7 @@ enum AgentCLI {
         "tab-close": (TARGET, JSON, False),
         "tab-move": (TARGET | {"--index"}, JSON, False),
         "set": (set(), JSON, False),
+        "config": (set(), JSON, False),
         "imgcat": ({"--width"}, set(), False),
     }
     
@@ -1373,7 +1391,7 @@ enum AgentCLI {
             pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
         elif cmd == "run":
             pane = take_pane(positional, opts, env=False)
-        elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move"):
+        elif cmd in ("order", "tab-select", "tab-rename", "tab-close", "tab-move", "config"):
             pane = opts.get("--pane") or os.environ.get("AETHER_PANE", "")
         else:
             pane = take_pane(positional, opts)
@@ -1680,6 +1698,33 @@ enum AgentCLI {
                 rows = [f"{key} = {value}" for key, value in sorted((reply.get("settings") or {}).items())]
                 return finish(reply, "\n".join(rows))
             return finish(reply, f"{reply.get('key')} = {reply.get('value')}")
+        if cmd == "config":
+            action = positional.pop(0) if positional else "path"
+            if action not in ("path", "check", "defaults"):
+                raise Usage("use `aether config path`, `aether config check [file]`, or `aether config defaults`.")
+            body = {"action": action}
+            if action == "check" and positional:
+                path = os.path.abspath(os.path.expanduser(positional.pop(0)))
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        body["text"] = handle.read()
+                except OSError as error:
+                    raise Failure(f"could not read {path}: {error.strerror}.")
+                body["file"] = path
+            if positional:
+                raise Usage(f"unexpected {positional[0]}.")
+            reply = request("/config", body, None)
+            if raw or action == "path":
+                return finish(reply, reply.get("path"))
+            if action == "defaults":
+                sys.stdout.write(reply.get("text") or "")
+                return 0
+            problems = reply.get("problems") or []
+            for problem in problems:
+                print(problem.get("text"))
+            if not problems:
+                print(f"{reply.get('path')}: ok, {reply.get('settings', 0)} settings")
+            return 1 if problems else 0
         if cmd == "imgcat":
             if len(positional) != 1:
                 raise Usage("give one image file, like `aether imgcat chart.png`.")
@@ -1767,6 +1812,7 @@ enum AgentCLI {
     - `aether focus <id>` moves the keyboard into a pane and brings its window forward.
     - `aether tabs` lists tab groups. `aether tab-select 1`, `aether tab-rename 1 school`, `aether tab-move 1 --index 0`, `aether tab-close 1` take an index (from 0) or a tab id.
     - `aether set` lists settings agents may change; `aether set themeName Dracula`, `aether set fontSize 15`, `aether set glass clear`.
+    - `aether config path` prints where the person's config file is (`~/.config/aether/config`). `aether config check` lists its mistakes and exits 1 if there are any. `aether config defaults` prints every key, commented out. Values in that file win over `aether set`'s on the next save.
     - `aether imgcat chart.png` draws an image inline in your pane (iTerm2 protocol). Aether also draws kitty graphics and sixel, so `kitty +kitten icat` and `img2sixel` work too. `aether open file.pdf` shows a PDF beside you.
     - `aether font 1` or `aether font -1` changes the type size. `aether font 0` resets it.
     - `aether skill` installs this skill and AGENTS.md.
@@ -1824,6 +1870,7 @@ enum AgentCLI {
     | `focus` | Move the keyboard into a pane. |
     | `tabs` / `tab-select` / `tab-rename` / `tab-move` / `tab-close` | Tab groups. |
     | `set` | Theme, glass, font size, and other safe settings. |
+    | `config` | `path`, `check`, or `defaults` for `~/.config/aether/config`. |
     | `imgcat` | Draw an image inline (kitty graphics and sixel work too). |
     | `close` | Close a pane you opened. |
     | `screenshot` | PNG of a pane. |

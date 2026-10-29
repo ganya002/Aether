@@ -326,6 +326,9 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
 
     private let glassView = NSGlassEffectView()
     private let pageHolder = NSView()
+    /// "Some settings come from ~/.config/aether/config", above every tab while that file exists.
+    private let configNote = NSTextField(labelWithString: "")
+    private var pageTop: NSLayoutConstraint?
     private var pages: [SettingsTab: SettingsPage] = [:]
     private var current: SettingsTab = .general
     private let recorder = ShortcutRecorder()
@@ -430,11 +433,22 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
 
         pageHolder.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(pageHolder)
+        configNote.font = .systemFont(ofSize: 12)
+        configNote.textColor = .secondaryLabelColor
+        configNote.alignment = .center
+        configNote.isHidden = true
+        configNote.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(configNote)
+        let pageTop = pageHolder.topAnchor.constraint(equalTo: host.safeAreaLayoutGuide.topAnchor)
+        self.pageTop = pageTop
         NSLayoutConstraint.activate([
             pageHolder.leadingAnchor.constraint(equalTo: host.leadingAnchor),
             pageHolder.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-            pageHolder.topAnchor.constraint(equalTo: host.safeAreaLayoutGuide.topAnchor),
+            pageTop,
             pageHolder.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            configNote.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 24),
+            configNote.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -24),
+            configNote.topAnchor.constraint(equalTo: host.safeAreaLayoutGuide.topAnchor, constant: 10),
         ])
 
         pages[.general] = generalPage()
@@ -776,7 +790,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         pageHolder.layoutSubtreeIfNeeded()
         page.view.layoutSubtreeIfNeeded()
         let chrome = window.frame.height - window.contentLayoutRect.height
-        var height = page.preferredHeight() + chrome
+        var height = page.preferredHeight() + chrome + (pageTop?.constant ?? 0)
         if let screen = (window.screen ?? NSScreen.main)?.visibleFrame {
             height = min(height, screen.height - 40)
         }
@@ -1162,7 +1176,48 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         keybinds.reload()
         glassView.style = settings.glass == .clear ? .clear : .regular
         paintValues()
+        for (_, controls) in configControls {
+            for control in controls {
+                // Updates stays off in development builds. load() set it above.
+                if control !== updates { control.isEnabled = true }
+                control.toolTip = control is ShortcutButton ? ShortcutButton.hint : nil
+            }
+        }
         enableDependents()
+        let active = UserConfigCenter.shared.active
+        configNote.stringValue = "Some settings come from \(UserConfigCenter.displayPath)"
+        if configNote.isHidden == active {
+            configNote.isHidden = !active
+            pageTop?.constant = active ? 30 : 0
+            if window?.isVisible == true { fit(animate: false) }
+        }
+    }
+
+    /// The controls each config file key sets. They grey out while the file holds that key.
+    private var configControls: [String: [NSControl]] {
+        [
+            "theme": [theme], "font-family": [fontFamily], "font-size": [fontSize.slider], "line-height": [lineHeight.slider],
+            "glass": [glass], "text-tone": [text], "shade": [shade.slider], "minimum-contrast": [contrast.slider],
+            "cursor-shape": [cursorShape], "cursor-blink": [cursorBlink], "unfocused-panes": [rest], "blur-amount": [blur.slider],
+            "corner-radius": [radius.slider], "gap": [gap.slider], "snap-windows": [snap],
+            "option-as-meta": [optionKey], "shell-exit": [shellExit], "warn-multiline-paste": [pasteWarning],
+            "copy-on-select": [copyOnSelect], "bell": [bell], "scrollback": [scrollback],
+            "notify-on-finish": [notify], "notify-after": [notifyAfter], "confirm-close": [confirmClose],
+            "hide-dock-icon": [dock], "check-for-updates": [updates], "dropdown": [dropdown],
+            "dropdown-height": [dropdownHeight.slider], "dropdown-hide-on-focus-loss": [dropdownHide],
+            "keybind:dropdown": [dropdownKey],
+        ]
+    }
+
+    private func lockConfigured() {
+        let sources = UserConfigCenter.shared.config.sources
+        for (key, controls) in configControls {
+            guard let line = sources[key] else { continue }
+            for control in controls {
+                control.isEnabled = false
+                control.toolTip = UserConfigCenter.lockNote(line: line)
+            }
+        }
     }
 
     private func fill<T: Equatable>(_ popup: NSPopUpButton, _ values: [T], current: T, title: (T) -> String) {
@@ -1220,6 +1275,7 @@ final class SettingsController: NSWindowController, NSWindowDelegate, NSToolbarD
         dropdownKey.isEnabled = dropping
         dropdownHeight.isEnabled = dropping
         dropdownHide.isEnabled = dropping
+        lockConfigured()
     }
 }
 
