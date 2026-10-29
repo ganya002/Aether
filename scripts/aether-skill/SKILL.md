@@ -12,7 +12,7 @@ Agent loop: spawn with `tab` or `run`, watch with `wait` / `read`, interrupt wit
 - `aether split --right --ratio 30 -- npm run dev` opens a terminal beside you and prints its id. Sides: `--right`, `--left`, `--up`, `--down`.
 - `aether tab -- command` adds a terminal to this tab group and prints its id.
 - `aether workspace --title school` opens a new tab group in the window. Terminals in other groups keep running.
-- `aether run -- make test` runs a command in a new tab, streams output, and exits with that command's status. `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
+- `aether run -- make test` runs a command in a new pane, streams output, exits with that command's status, and closes the pane (`--keep` leaves it). `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
 - `aether send --keys ctrl+c` types into a pane. `aether send y --enter` answers a prompt. `--keys` accepts `ctrl+c`, `enter`, `up`, `tab`, `esc`, and comma-separated chords.
 - `aether wait <id> --exit` blocks until that pane's job exits. `--until-idle` waits for a prompt.
 - `aether open localhost:3000 --right --ratio 40` shows a page beside you.
@@ -26,6 +26,12 @@ Agent loop: spawn with `tab` or `run`, watch with `wait` / `read`, interrupt wit
 - `aether close <id>` closes a pane you opened.
 - `aether screenshot --out /tmp/pane.png` saves a PNG of a pane.
 - `aether zoom` fills the window with your pane, or puts it back.
+- `aether resize <id> --grow right --by 10` / `--shrink down` moves one edge of a pane. `aether layout tall|fat|grid|columns|rows|stack|next` arranges a window; `aether equalize` evens it out.
+- `aether window --size 1400x900 --position 0,40` resizes and moves a window (points from the top-left of the main screen). `--zoom`, `--fullscreen`, and `--front` toggle. `aether windows --json` shows each frame.
+- `aether focus <id>` moves the keyboard into a pane and brings its window forward.
+- `aether tabs` lists tab groups. `aether tab-select 1`, `aether tab-rename 1 school`, `aether tab-move 1 --index 0`, `aether tab-close 1` take an index (from 0) or a tab id.
+- `aether set` lists settings agents may change; `aether set themeName Dracula`, `aether set fontSize 15`, `aether set glass clear`.
+- `aether imgcat chart.png` draws an image inline in your pane (iTerm2 protocol). Aether also draws kitty graphics and sixel, so `kitty +kitten icat` and `img2sixel` work too. `aether open file.pdf` shows a PDF beside you.
 - `aether font 1` or `aether font -1` changes the type size. `aether font 0` resets it.
 - `aether skill` installs this skill and AGENTS.md.
 - `aether mcp` speaks MCP on stdin/stdout (one tool per command).

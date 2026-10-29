@@ -26,11 +26,17 @@ aether send "$id" --keys ctrl+c
 aether wait "$id" --until-idle --timeout 8
 
 echo "== read what it printed =="
-aether read "$id" --lines 40
+out=$(aether read "$id" --lines 40)
+echo "$out"
+case "$out" in *"tick 1"*) ;; *) echo "FAIL: no ticks" >&2; exit 1 ;; esac
+if echo "$out" | grep -qx NEVER; then echo "FAIL: ctrl+c did not stop the job" >&2; exit 1; fi
 
 echo "== rerun to completion in the same pane =="
-aether run --pane "$id" --title agent-loop -- /bin/sh -c 'echo RERUN; echo OK'
-echo "run exit $?"
+out=$(aether run --pane "$id" --title agent-loop -- /bin/sh -c 'echo RERUN; exit 7') && code=0 || code=$?
+echo "$out"
+echo "run exit $code"
+[ "$code" = 7 ] || { echo "FAIL: expected exit 7" >&2; exit 1; }
+[ "$out" = RERUN ] || { echo "FAIL: expected only RERUN in the output" >&2; exit 1; }
 
 echo "== json view of that pane =="
 aether view --json | python3 -c "import json,sys; panes=json.load(sys.stdin).get('panes',[]);

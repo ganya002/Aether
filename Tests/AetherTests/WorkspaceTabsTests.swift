@@ -109,9 +109,9 @@ import Testing
 }
 
 @Test func agentSkillsMergeClaudeHooksOnce() throws {
-    let command = AgentSkills.hookCommand(binary: URL(fileURLWithPath: "/tmp/aether"))
-    let first = AgentSkills.mergeClaudeSettings(Data("{}".utf8), command: command)
-    let second = AgentSkills.mergeClaudeSettings(first, command: command)
+    let command = AgentSkills.hookCommand()
+    let first = try #require(AgentSkills.mergeClaudeSettings(Data("{}".utf8), command: command))
+    let second = try #require(AgentSkills.mergeClaudeSettings(first, command: command))
     let json = try JSONSerialization.jsonObject(with: second) as? [String: Any]
     let session = ((json?["hooks"] as? [String: Any])?["SessionStart"] as? [[String: Any]]) ?? []
     #expect(session.count == 1)
@@ -120,9 +120,9 @@ import Testing
 }
 
 @Test func agentSkillsMergeCodexHooksOnce() throws {
-    let command = AgentSkills.hookCommand(binary: URL(fileURLWithPath: "/tmp/aether"))
-    let first = AgentSkills.mergeCodexHooks(Data("{}".utf8), command: command)
-    let second = AgentSkills.mergeCodexHooks(first, command: command)
+    let command = AgentSkills.hookCommand()
+    let first = try #require(AgentSkills.mergeCodexHooks(Data("{}".utf8), command: command))
+    let second = try #require(AgentSkills.mergeCodexHooks(first, command: command))
     let json = try JSONSerialization.jsonObject(with: second) as? [String: Any]
     let session = ((json?["hooks"] as? [String: Any])?["SessionStart"] as? [[String: Any]]) ?? []
     #expect(session.count == 1)
@@ -135,7 +135,6 @@ import Testing
     let done = AgentSkills.install(
         skill: "# skill\n",
         agents: "# agents\n",
-        binary: URL(fileURLWithPath: "/tmp/aether"),
         home: home,
         env: [:],
         path: "/usr/bin"
