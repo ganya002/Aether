@@ -79,12 +79,19 @@ enum System {
         return names.filter { !$0.isEmpty }
     }()
 
-    /// The short name of a running process, such as `nvim`.
-    static func processName(pid: pid_t) -> String? {
+    /// The executable path of a running process, or nil.
+    static func processPath(pid: pid_t) -> String? {
         guard pid > 0 else { return nil }
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        if proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 {
-            let name = URL(fileURLWithPath: String(cString: buffer)).lastPathComponent
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        let path = String(cString: buffer)
+        return path.isEmpty ? nil : path
+    }
+
+    /// The short name of a running process, such as `nvim`.
+    static func processName(pid: pid_t) -> String? {
+        if let path = processPath(pid: pid) {
+            let name = URL(fileURLWithPath: path).lastPathComponent
             if !name.isEmpty { return name }
         }
         var short = [CChar](repeating: 0, count: 64)

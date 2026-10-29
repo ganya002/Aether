@@ -196,6 +196,9 @@ private func desk(_ id: String, _ panes: [String], focused: String) -> Desk {
         #expect(AgentDesk.routes.contains("/send"))
         #expect(AgentDesk.routes.contains("/wait"))
         #expect(AgentDesk.routes.contains("/windows"))
+        #expect(AgentDesk.routes.contains("/workspace"))
+        #expect(AgentCLI.source.contains("aether workspace"))
+        #expect(AgentCLI.source.contains("aether hook"))
     }
 
     @Test func readTakesAPositionalPaneId() throws {
@@ -210,6 +213,55 @@ private func desk(_ id: String, _ panes: [String], focused: String) -> Desk {
         #expect(!text.err.contains("unexpected"), "CLI still rejected a positional pane id: \(text.err)")
         #expect(text.status == 2)
         #expect(text.err.contains("give text") || text.err.contains("--keys"))
+    }
+
+    @Test func hookPrintsWhenInsideAether() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let process = Process()
+        process.executableURL = root.appendingPathComponent("scripts/aether")
+        process.arguments = ["hook"]
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = Pipe()
+        var env = ProcessInfo.processInfo.environment
+        env["AETHER_PANE"] = "50BBAE3B-AAAA-BBBB-CCCC-0123456789AB"
+        process.environment = env
+        try process.run()
+        process.waitUntilExit()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(process.terminationStatus == 0)
+        #expect(text.contains("You are in Aether"))
+        #expect(text.contains("aether workspace"))
+    }
+
+    @Test func hookIsSilentOutsideAether() throws {
+        let text = try runCLI(["hook"])
+        #expect(text.status == 0)
+        #expect(text.err.isEmpty)
+    }
+
+    @Test func skillProjectIsAFlag() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("aether-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let process = Process()
+        process.executableURL = root.appendingPathComponent("scripts/aether")
+        process.arguments = ["skill", "--project"]
+        process.currentDirectoryURL = home
+        let err = Pipe()
+        process.standardError = err
+        process.standardOutput = Pipe()
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = home.path
+        env["AETHER_AGENT_PLIST"] = home.appendingPathComponent("missing.plist").path
+        env["AETHER_PANE"] = ""
+        process.environment = env
+        try process.run()
+        process.waitUntilExit()
+        let message = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(!message.contains("needs a value"), "CLI treated --project as a value: \(message)")
+        #expect(process.terminationStatus == 1)
+        try? FileManager.default.removeItem(at: home)
     }
 
     private func runCLI(_ arguments: [String]) throws -> (status: Int32, err: String) {

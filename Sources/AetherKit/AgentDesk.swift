@@ -12,7 +12,7 @@ final class AgentDesk {
     static let routes: Set<String> = [
         "/tab", "/split", "/open", "/font", "/zoom", "/read", "/view",
         "/status", "/notify", "/close", "/title", "/send", "/wait",
-        "/windows", "/move", "/order", "/find", "/screenshot",
+        "/windows", "/move", "/order", "/find", "/screenshot", "/workspace",
     ]
     /// Which pane asked for each pane, so an agent can close only what it opened.
     var openedBy: [String: String] = [:]
@@ -76,6 +76,14 @@ final class AgentDesk {
         try? FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
         try? (AgentCLI.skill + "\n").write(to: skillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
         try? (AgentCLI.agents + "\n").write(to: skillDir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        AgentSkills.install(
+            skill: AgentCLI.skill + "\n",
+            agents: AgentCLI.agents + "\n",
+            binary: script,
+            home: FileManager.default.homeDirectoryForCurrentUser,
+            env: ProcessInfo.processInfo.environment,
+            path: ProcessInfo.processInfo.environment["PATH"] ?? ""
+        )
     }
 
     /// Reads until the headers and the whole body have arrived, however TCP splits them.
@@ -355,8 +363,8 @@ enum AgentCLI {
     fi
     exec python3 - "$@" <<'PY'
     import base64, json, os, re, sys
-
-    VERSION = "3"
+    
+    VERSION = "4"
     STATES = ("idle", "working", "blocked", "done", "error")
     DIRECTIONS = {"right": "right", "left": "left", "up": "top", "top": "top", "down": "bottom", "bottom": "bottom", "center": "right"}
     SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -366,44 +374,45 @@ enum AgentCLI {
     COMMANDS = (
         "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
         "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
-        "find", "screenshot", "mcp", "help",
+        "find", "screenshot", "workspace", "hook", "mcp", "help",
     )
-
-
+    
+    
     CURRENT = ""
-
-
+    
+    
     class Usage(Exception):
         pass
-
-
+    
+    
     class Failure(Exception):
         pass
-
-
+    
+    
     PLACE = """
     Placement:
       --right, --left, --up, --down   Side of the pane to open on. Default: --right.
       --split <side>                  Same, as a value: right, left, up, down, top, bottom.
       --ratio <10-80>                 The new pane's share of the space, in percent.
       --focus                         Move the keyboard into the new pane. Default: leave focus alone."""
-
+    
     COMMON = """
       --pane <id>                     Act on this pane instead of the one you are in ($AETHER_PANE).
       --window <id|this|any>          Act in this window. `any` is the front window; with one window you can omit this.
       --desk <id>                     Same as --window.
       --json                          Print the raw reply."""
-
+    
     HELP = {
         "": """usage: aether <command> [options]
-
+    
     Control the Aether terminal. Commands act on your own pane ($AETHER_PANE)
     unless you pass --pane <id>. Outside Aether, with one window open, that
     window is used; with several, pass --pane, --window, or --desk.
-
+    
     Commands:
       split       Open a terminal beside this pane.
-      tab         Add a terminal to this window.
+      tab         Add a terminal to this tab group.
+      workspace   Open a new tab group in this window.
       open        Show a web page or PDF beside this pane.
       read        Print this pane's screen.
       view        List the panes.
@@ -421,237 +430,256 @@ enum AgentCLI {
       title       Set this pane's title.
       close       Close a pane that you opened.
       screenshot  Save a PNG of a pane.
-      skill       Install the Aether skill and AGENTS.md for agents.
+      skill       Install the Aether skill and session hook for agents.
+      hook        Print Aether context for an agent session (used by hooks).
       mcp         Speak MCP over stdin/stdout (one tool per command).
       help        Show help for a command.
-
+    
     Options:
       -h, --help     Show help.
       --version      Show the version.
-
+    
     Run `aether help <command>` for details and examples.""",
         "split": """usage: aether split [--right|--left|--up|--down] [--ratio N] [--focus] [--title T] [-- command ...]
-
+    
     Open a terminal beside this pane. Prints the new pane's id. Words after --
     run in the new pane; pass one quoted string for pipes and other shell syntax.
     """ + PLACE + COMMON + """
           --title <text>                  Name the new pane.
-
+    
     Examples:
       aether split --right --ratio 30 -- npm run dev
       aether split --down -- tail -f log.txt
       aether split --left --focus
       aether split --up -- 'make 2>&1 | tee build.log'""",
         "tab": """usage: aether tab [--focus] [--title T] [-- command ...]
-
+    
     Add a terminal to this pane's window. Prints the new pane's id. Words after --
     run in the new pane.
-
+    
     Options:
           --focus                         Move the keyboard into the new pane.
           --title <text>                  Name the new pane.""" + COMMON + """
-
+    
     Examples:
       aether tab
       aether tab -- htop""",
         "open": """usage: aether open [web|pdf] <url-or-file> [--right|--left|--up|--down] [--ratio N]
-
+    
     Show a web page or a PDF in a pane beside this one. Prints the new pane's id.
     Addresses without a scheme get http://, so `localhost:3000` works. Relative
     PDF paths are taken from the current directory.
     """ + PLACE + COMMON + """
-
+    
     Examples:
       aether open localhost:3000 --right --ratio 40
       aether open web https://example.com
       aether open docs/spec.pdf --down""",
         "read": """usage: aether read [pane-id] [--lines N]
-
+    
     Print the text on this pane's screen. With --lines, print the last N lines,
     including scrollback. A pane id may be positional or --pane.
-
+    
     Options:
       --lines <N>                     How many lines to print.""" + COMMON + """
-
+    
     Examples:
       aether read
       aether read 50BBAE3B --lines 200""",
         "view": """usage: aether view
-
+    
     List every pane: its id, window, title, and running command. The focused pane
     in each window is marked with *, and your own pane with <.
-
+    
     Options:""" + COMMON + """
-
+    
     Example:
       aether view
       aether view --json""",
         "windows": """usage: aether windows
-
+    
     List every Aether window and how many panes it has.
-
+    
     Options:
       --json                          Print the raw reply.
-
+    
     Example:
       aether windows""",
         "send": """usage: aether send [pane-id] [<text> | --keys <chord>] [--enter]
-
+    
     Inject keystrokes into a pane as if they were typed. --keys takes named chords
     separated by commas: ctrl+c, enter, up, tab, esc, ctrl+d.
-
+    
     Options:
       --keys <chord>                  Send a key or chord instead of text.
       --enter                         Press return after the text.""" + COMMON + """
-
+    
     Examples:
       aether send --keys ctrl+c
       aether send 50BBAE3B y --enter
       aether send --pane 50BBAE3B --keys ctrl+c,enter""",
         "run": """usage: aether run [--pane <id>] [--title T] [--timeout N] [--] <command...>
-
+    
     Run a command and wait until it finishes. Prints the command's output as it
     appears, then exits with the command's status. Without --pane, opens a new tab.
     SIGINT (Ctrl-C on aether run) sends ctrl+c to the pane's job.
-
+    
     Options:
       --title <text>                  Name the pane.
       --timeout <seconds>             Give up after this many seconds.
       --focus                         Move the keyboard into the pane.""" + COMMON + """
-
+    
     Examples:
       aether run -- make test
       aether run --pane 50BBAE3B -- npm test""",
         "wait": """usage: aether wait [pane-id] [--until-idle|--exit] [--timeout N]
-
+    
     Block until the pane's shell is idle (prompt at the bottom) or its job exits.
-
+    
     Options:
       --until-idle                    Return when the shell is at a prompt.
       --exit, --until-exit            Return when the pane's process exits.
       --timeout <seconds>             Give up after this many seconds.""" + COMMON + """
-
+    
     Examples:
       aether wait 50BBAE3B --exit
       aether wait --until-idle --timeout 30""",
         "find": """usage: aether find [--title T] [--command T]
-
+    
     Find panes whose title or running command contains the text.
-
+    
     Options:
       --title <text>                  Match the pane title.
       --command <text>                Match the running command.""" + COMMON + """
-
+    
     Examples:
       aether find --command nmap
       aether find --title API""",
         "move": """usage: aether move [pane-id] (--before <id>|--after <id>|--index N)
-
+    
     Move a pane in its window.
-
+    
     Options:
       --before <id>                   Place it before this pane.
       --after <id>                    Place it after this pane.
       --index <N>                     Place it at this 0-based index.""" + COMMON + """
-
+    
     Examples:
       aether move 50BBAE3B --before AABBCCDD
       aether move --index 0""",
         "order": """usage: aether order <pane-id> <pane-id> ...
-
+    
     Set the pane order of a window. Pass every pane in that window, once.
-
+    
     Options:""" + COMMON + """
-
+    
     Example:
       aether order 50BBAE3B AABBCCDD""",
         "zoom": """usage: aether zoom [pane-id]
-
+    
     Make this pane fill its window. Run it again to put it back.
-
+    
     Options:""" + COMMON + """
-
+    
     Example:
       aether zoom""",
         "font": """usage: aether font [N | --delta N]
-
+    
     Change the type size by N points. 0 resets it. Prints the new size.
-
+    
     Options:
       --delta <N>                     Points to add. Negative makes it smaller.
       --json                          Print the raw reply.
-
+    
     Examples:
       aether font 1
       aether font --delta -2
       aether font 0""",
         "status": """usage: aether status <working|blocked|done|error|idle> [message]
-
+    
     Show a colored dot on this pane's header. The message appears when you point at it.
-
+    
     Options:""" + COMMON + """
-
+    
     Examples:
       aether status working "Running the test suite"
       aether status blocked "Waiting for your answer"
       aether status done""",
         "notify": """usage: aether notify <message>
-
+    
     Post a macOS notification titled with this pane's title.
-
+    
     Options:""" + COMMON + """
-
+    
     Example:
       aether notify "Build finished"
     """.rstrip(),
         "title": """usage: aether title [pane-id] <text>
-
+    
     Set this pane's title.
-
+    
     Options:""" + COMMON + """
-
+    
     Example:
       aether title "API server"
       aether title 50BBAE3B "port sweep"
     """.rstrip(),
         "close": """usage: aether close <pane-id>
-
+    
     Close a pane that this pane opened with split, tab, or open.
-
+    
     Options:""" + COMMON + """
-
+    
     Example:
       id=$(aether split -- npm test) && ... && aether close "$id"
     """.rstrip(),
         "screenshot": """usage: aether screenshot [pane-id] [--out <path>]
-
+    
     Save a PNG of the pane. Prints the path.
-
+    
     Options:
       --out <path>                    Where to write the PNG.""" + COMMON + """
-
+    
     Example:
       aether screenshot --out /tmp/pane.png""",
-        "skill": """usage: aether skill
-
-    Install the Aether skill and AGENTS.md into ~/.claude, ~/.cursor, and ~/.agents.
-    Only tools that are already set up (their folder exists) get it; the rest are
-    listed as skipped. Also writes AGENTS.md in the current directory if none exists.
-
+        "workspace": """usage: aether workspace [--title T] [-- command ...]
+    
+    Open a new tab group in this window, with one blank terminal. Other tab groups
+    keep running. Prints the new tab id.
+    
+    Options:
+          --title <text>                  Name the tab.""" + COMMON + """
+    
+    Examples:
+      aether workspace --title school
+      aether workspace -- claude""",
+        "hook": """usage: aether hook
+    
+    Print a short briefing for an agent session started inside Aether. Session
+    hooks call this. Outside Aether it prints nothing.
+    
+    Example:
+      aether hook""",
+        "skill": """usage: aether skill [--project]
+    
+    Install the Aether skill and a session hook into every agent home Aether finds
+    (~/.claude, ~/.cursor, ~/.codex, ~/.agents, ~/.gemini, ~/.opencode). Aether also
+    does this when it launches. --project writes AGENTS.md in this folder.
+    
     Example:
       aether skill""",
         "mcp": """usage: aether mcp
-
+    
     Speak the Model Context Protocol on stdin/stdout. Each aether command is one
     tool, so an MCP client can call send, run, wait, read, and the rest natively.
-
+    
     Example:
       aether mcp""",
         "help": """usage: aether help [command]
-
+    
     Show help for aether or one command.""",
     }
-
+    
     PLACE_VALUES = {"--split", "--ratio"}
     PLACE_BOOLS = {"--right", "--left", "--up", "--down", "--top", "--bottom", "--focus"}
     TARGET = {"--pane", "--window", "--desk"}
@@ -668,7 +696,9 @@ enum AgentCLI {
         "notify": (TARGET, JSON, False),
         "title": (TARGET, JSON, False),
         "close": (TARGET, JSON, False),
-        "skill": (set(), JSON, False),
+        "skill": (set(), {"--project"} | JSON, False),
+        "workspace": (TARGET | {"--title"}, JSON, True),
+        "hook": (set(), set(), False),
         "send": (TARGET | {"--keys"}, {"--enter"} | JSON, False),
         "run": (TARGET | {"--title", "--timeout"}, {"--focus"} | JSON, True),
         "wait": (TARGET | {"--timeout"}, {"--until-idle", "--exit", "--until-exit"} | JSON, False),
@@ -679,8 +709,8 @@ enum AgentCLI {
         "screenshot": (TARGET | {"--out"}, JSON, False),
         "mcp": (set(), set(), False),
     }
-
-
+    
+    
     def parse(cmd, argv):
         values, bools, takes_command = SPECS[cmd]
         opts, positional, command = {}, [], None
@@ -713,27 +743,27 @@ enum AgentCLI {
                 positional.append(word)
             i += 1
         return opts, positional, command
-
-
+    
+    
     def show(cmd):
         print(HELP.get(cmd, HELP[""]))
         return 0
-
-
+    
+    
     def is_pane_id(word):
         if PANE_ID.match(word):
             return True
         compact = word.replace("-", "")
         return bool(PANE_PREFIX.match(compact))
-
-
+    
+    
     def take_pane(positional, opts, env=True):
         pane = opts.get("--pane") or (os.environ.get("AETHER_PANE", "") if env else "")
         if positional and is_pane_id(positional[0]):
             pane = positional.pop(0)
         return pane
-
-
+    
+    
     def targeting(opts, pane):
         body = {}
         if pane:
@@ -743,14 +773,14 @@ enum AgentCLI {
         if opts.get("--desk"):
             body["desk"] = opts["--desk"]
         return body
-
-
+    
+    
     def merge(base, extra):
         body = dict(base)
         body.update(extra)
         return body
-
-
+    
+    
     def direction(opts, positional):
         picked = [name[2:] for name in ("--right", "--left", "--up", "--down", "--top", "--bottom") if opts.get(name)]
         if "--split" in opts:
@@ -763,8 +793,8 @@ enum AgentCLI {
         if side not in DIRECTIONS:
             raise Usage(f"unknown side {side}. Use right, left, up, or down.")
         return DIRECTIONS[side]
-
-
+    
+    
     def ratio(opts):
         raw = opts.get("--ratio")
         if raw is None:
@@ -778,15 +808,15 @@ enum AgentCLI {
         if not 10 <= value <= 80:
             raise Usage("--ratio must be between 10 and 80.")
         return value
-
-
+    
+    
     def number(raw, name):
         try:
             return float(raw)
         except (TypeError, ValueError):
             raise Usage(f"{name} must be a number, not {raw}.")
-
-
+    
+    
     def web_address(target):
         if SCHEME.match(target):
             if not target.lower().startswith(("http://", "https://")):
@@ -795,8 +825,8 @@ enum AgentCLI {
         if os.path.exists(target):
             raise Usage(f"{target} is a file. Aether shows web pages over http or https, and PDFs with `aether open pdf`.")
         return "http://" + target
-
-
+    
+    
     def place(cmd, opts, positional, command):
         body = {"focus": bool(opts.get("--focus"))}
         if opts.get("--title"):
@@ -822,14 +852,14 @@ enum AgentCLI {
         elif command:
             body["command"] = " ".join(quote(word) for word in command)
         return body
-
-
+    
+    
     def quote(word):
         if word and re.match(r"^[A-Za-z0-9_@%+=:,./-]+$", word):
             return word
         return "'" + word.replace("'", "'\"'\"'") + "'"
-
-
+    
+    
     def credentials():
         import plistlib
         path = os.environ.get("AETHER_AGENT_PLIST") or os.path.expanduser("~/Library/Application Support/Aether/agent.plist")
@@ -841,8 +871,8 @@ enum AgentCLI {
             raise Failure("Aether is not running. Open Aether and run this in one of its panes.")
         except Exception:
             raise Failure(f"could not read {path}. Quit and reopen Aether to rewrite it.")
-
-
+    
+    
     def request(path, body, pane=None):
         import socket, urllib.error, urllib.request
         if pane:
@@ -890,20 +920,20 @@ enum AgentCLI {
         if reply.get("ok") is False:
             raise Failure(reply.get("error") or "Aether could not do that.")
         return reply
-
-
+    
+    
     def tty_write(text):
         try:
             with open("/dev/tty", "w") as tty:
                 tty.write(text)
         except OSError:
             raise Failure("no terminal to write to. Run this inside an Aether pane.")
-
-
+    
+    
     def clean(text):
         return re.sub(r"[\x00-\x1f\x7f]", " ", text)
-
-
+    
+    
     def added_text(previous, current):
         if current.startswith(previous):
             return current[len(previous):]
@@ -912,15 +942,15 @@ enum AgentCLI {
         while i < n and previous[i] == current[i]:
             i += 1
         return current[i:]
-
-
+    
+    
     def watch(pane, until, timeout, stream=False, after_prompts=None):
         import signal, time
         deadline = time.monotonic() + timeout if timeout else None
         previous = ""
         sent_interrupt = False
         saw_busy = after_prompts is None
-
+    
         def handle(_sig, _frame):
             nonlocal sent_interrupt
             if sent_interrupt:
@@ -930,7 +960,7 @@ enum AgentCLI {
                 request("/send", merge(targeting({}, pane), {"keys": "ctrl+c"}), pane)
             except Exception:
                 raise KeyboardInterrupt
-
+    
         old = signal.signal(signal.SIGINT, handle)
         try:
             while True:
@@ -967,9 +997,24 @@ enum AgentCLI {
                 time.sleep(0.08)
         finally:
             signal.signal(signal.SIGINT, old)
-
-
-    def install_skill():
+    
+    
+    def show_hook():
+        pane = os.environ.get("AETHER_PANE", "")
+        if not pane:
+            return 0
+        print(
+            "You are in Aether, a native macOS terminal.\n"
+            f"This pane's id is {pane}. The `aether` CLI is on PATH.\n"
+            "Use it to split, open workspace tabs, send keys, run commands, and read screens.\n"
+            "Do not guess tmux, iTerm, or Terminal.app keystrokes.\n"
+            "`aether workspace` is a new tab group; `aether tab` is a new pane in this group.\n"
+            "Run `aether help` for the rest."
+        )
+        return 0
+    
+    
+    def install_skill(project=False):
         import shutil
         home = os.path.expanduser("~")
         plist = os.environ.get("AETHER_AGENT_PLIST") or os.path.join(home, "Library/Application Support/Aether/agent.plist")
@@ -989,7 +1034,7 @@ enum AgentCLI {
         if not source:
             raise Failure("could not find the Aether skill. Open Aether once so it can write it.")
         installed, skipped = [], []
-        for tool in (".claude", ".cursor", ".agents"):
+        for tool in (".claude", ".cursor", ".agents", ".codex", ".gemini", ".opencode"):
             root = os.path.join(home, tool)
             if not os.path.isdir(root):
                 skipped.append(root)
@@ -1003,8 +1048,8 @@ enum AgentCLI {
                 installed.append(dest)
             except OSError as error:
                 skipped.append(f"{root} ({error.strerror})")
-        cwd_agents = os.path.join(os.getcwd(), "AGENTS.md")
-        if agents and (not os.path.isfile(cwd_agents) or open(cwd_agents, encoding="utf-8").read(20).startswith("# Aether")):
+        if project and agents:
+            cwd_agents = os.path.join(os.getcwd(), "AGENTS.md")
             try:
                 shutil.copy(agents, cwd_agents)
                 installed.append(cwd_agents)
@@ -1016,8 +1061,8 @@ enum AgentCLI {
             print(f"skipped {root}")
         if not installed:
             print("No agent folders found. Create ~/.claude, ~/.cursor, or ~/.agents first.")
-
-
+    
+    
     def mcp():
         def read_message():
             headers = {}
@@ -1034,18 +1079,18 @@ enum AgentCLI {
                 return None
             payload = sys.stdin.buffer.read(length)
             return json.loads(payload)
-
+    
         def write_message(message):
             raw = json.dumps(message, separators=(",", ":")).encode()
             sys.stdout.buffer.write(f"Content-Length: {len(raw)}\r\n\r\n".encode() + raw)
             sys.stdout.buffer.flush()
-
+    
         def tools():
             return [
                 {"name": name, "description": HELP.get(name, "").split("\n")[0], "inputSchema": {"type": "object", "additionalProperties": True}}
                 for name in COMMANDS if name not in ("help", "mcp")
             ]
-
+    
         def call(name, arguments):
             import contextlib, io
             argv = [name]
@@ -1082,7 +1127,7 @@ enum AgentCLI {
             if code not in (0, None):
                 result["isError"] = True
             return result
-
+    
         while True:
             message = read_message()
             if message is None:
@@ -1110,8 +1155,8 @@ enum AgentCLI {
                     write_message({"jsonrpc": "2.0", "id": ident, "error": {"code": -32000, "message": str(error)}})
             elif ident is not None:
                 write_message({"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"unknown method {method}"}})
-
-
+    
+    
     def main(argv):
         if not argv or argv[0] in ("-h", "--help"):
             return show("")
@@ -1127,6 +1172,8 @@ enum AgentCLI {
             return show(rest[0] if rest else "")
         if cmd == "mcp":
             return mcp()
+        if cmd in ("hook", "context"):
+            return show_hook()
         if cmd not in SPECS:
             if cmd.startswith("-"):
                 raise Usage(f"unknown option {cmd}.")
@@ -1140,20 +1187,20 @@ enum AgentCLI {
         else:
             pane = take_pane(positional, opts)
         raw = opts.get("--json")
-
+    
         def finish(reply, text=None):
             if raw:
                 print(json.dumps(reply, indent=2))
             elif text:
                 print(text)
             return 0
-
+    
         def call(path, body=None):
             payload = targeting(opts, pane)
             if body:
                 payload.update(body)
             return request(path, payload, pane)
-
+    
         if cmd in ("split", "tab"):
             reply = call("/" + cmd, place(cmd, opts, positional, command))
             return finish(reply, reply.get("pane"))
@@ -1360,11 +1407,22 @@ enum AgentCLI {
         if cmd == "skill":
             if positional:
                 raise Usage(f"unexpected {positional[0]}.")
-            install_skill()
+            install_skill(bool(opts.get("--project")))
             return 0
+        if cmd == "workspace":
+            body = {}
+            if opts.get("--title"):
+                body["title"] = opts["--title"]
+            words = list(command) if command is not None else list(positional)
+            if len(words) == 1:
+                body["command"] = words[0]
+            elif words:
+                body["command"] = " ".join(quote(word) for word in words)
+            reply = call("/workspace", body)
+            return finish(reply, reply.get("tab") or reply.get("pane"))
         raise Usage(f"unknown command {cmd}.")
-
-
+    
+    
     try:
         sys.exit(main(sys.argv[1:]))
     except Usage as error:
@@ -1389,15 +1447,16 @@ enum AgentCLI {
     name: aether
     description: Control the Aether terminal from a shell. Open panes, type into them, run commands to completion, read output, and close panes you opened.
     ---
-
-    You are in Aether when `AETHER_PANE` is set. Use the `aether` command. Do not guess keystrokes for splits.
-
+    
+    You are in Aether when `AETHER_PANE` or `AETHER=1` is set. Use the `aether` command. Do not guess keystrokes for splits. Aether installs this skill and a session hook on launch.
+    
     Every command acts on your own pane (`AETHER_PANE`) unless you pass `--pane <id>`. Pane ids may be positional (`aether read 50BBAE3B`) or given as `--pane`. Outside Aether, with one window open that window is used; with several, pass `--pane`, `--window`, or `--desk`. Commands never move keyboard focus unless you pass `--focus`. Add `--json` to any command for the raw reply.
-
+    
     Agent loop: spawn with `tab` or `run`, watch with `wait` / `read`, interrupt with `send --keys ctrl+c`, rerun with `run` or `send`.
-
+    
     - `aether split --right --ratio 30 -- npm run dev` opens a terminal beside you and prints its id. Sides: `--right`, `--left`, `--up`, `--down`.
-    - `aether tab -- command` adds a terminal to your window and prints its id.
+    - `aether tab -- command` adds a terminal to this tab group and prints its id.
+    - `aether workspace --title school` opens a new tab group in the window. Terminals in other groups keep running.
     - `aether run -- make test` runs a command in a new tab, streams output, and exits with that command's status. `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
     - `aether send --keys ctrl+c` types into a pane. `aether send y --enter` answers a prompt. `--keys` accepts `ctrl+c`, `enter`, `up`, `tab`, `esc`, and comma-separated chords.
     - `aether wait <id> --exit` blocks until that pane's job exits. `--until-idle` waits for a prompt.
@@ -1416,28 +1475,28 @@ enum AgentCLI {
     - `aether skill` installs this skill and AGENTS.md.
     - `aether mcp` speaks MCP on stdin/stdout (one tool per command).
     - `aether help <command>` shows options and examples.
-
+    
     Exit codes: 0 worked, 1 Aether refused or is not running (the reason is on stderr), 2 bad arguments. `aether run` exits with the command's own status.
-
+    
     "Beside you" means split your own pane. Leave focus alone unless asked. Close only panes you opened, and close them when you are done with them.
     """#
 
     static let agents = #"""
     # Aether
-
+    
     Use the `aether` CLI to drive this macOS terminal. Prefer it over guessing tmux/iTerm keystrokes.
-
+    
     ## Targeting
-
+    
     - Inside Aether, `$AETHER_PANE` is your pane. Commands act there unless you pass `--pane <id>`.
     - Pane ids may be positional (`aether read 50BBAE3B`) or `--pane`. Unique 8-character prefixes work.
     - Outside Aether, with one window, that window is used. With several, pass `--pane`, `--window <id|this|any>`, or `--desk`.
-    - `aether windows` and `aether view --json` are how you discover ids. `--json` works on every command.
-
+    - `aether windows` and `aether view --json` are how you discover ids. `--json` works on every command. View JSON includes `tab` for the workspace group.
+    
     ## Agent loop
-
+    
     Keep a shell pane if you need to interrupt and rerun. A tab that is launched with a command (`aether tab -- ping`) exits when that command does.
-
+    
     ```sh
     id=$(aether tab --title job)
     aether send "$id" 'ping -c 20 1.1.1.1' --enter
@@ -1447,14 +1506,15 @@ enum AgentCLI {
     aether run --pane "$id" -- echo done
     aether close "$id"
     ```
-
+    
     `aether run -- make test` is the one-shot form: new tab, stream output, exit with the command's status. Ctrl-C on `aether run` sends ctrl+c into the pane. `--pane` is required to type into an existing pane; `$AETHER_PANE` is not enough.
-
+    
     ## Commands
-
+    
     | Command | Role |
     | --- | --- |
-    | `tab` / `split` | Open a visible pane. Prints the id. |
+    | `tab` / `split` | Open a visible pane in this tab group. Prints the id. |
+    | `workspace` | New tab group in the window. Other groups keep running. |
     | `run` | Run to completion; stream output; exit with the command's status. |
     | `send` | Type text or `--keys ctrl+c` / `enter`. |
     | `wait` | `--until-idle` or `--exit`. |
@@ -1465,9 +1525,9 @@ enum AgentCLI {
     | `close` | Close a pane you opened. |
     | `screenshot` | PNG of a pane. |
     | `mcp` | MCP stdio, one tool per command. |
-
+    
     `aether help <command>` has flags and examples.
-
+    
     Exit codes: 0 ok, 1 Aether refused or is not running, 2 bad arguments.
     """#
 }

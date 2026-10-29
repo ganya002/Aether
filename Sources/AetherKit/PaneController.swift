@@ -1518,6 +1518,27 @@ final class PaneController {
         return (name, System.commandLine(pid: foreground) ?? name)
     }
 
+    /// Name and path for the tab chip: the foreground job, else the shell.
+    func tabProcess() -> (name: String, path: String?) {
+        if let running = runningCommand() {
+            let view = chrome.terminal
+            if view.remoteSession != nil {
+                return (running.name, nil)
+            }
+            if let process = view.process, process.childfd >= 0 {
+                let foreground = tcgetpgrp(process.childfd)
+                if foreground > 0 {
+                    return (running.name, System.processPath(pid: foreground) ?? System.processPath(pid: process.shellPid))
+                }
+            }
+            return (running.name, nil)
+        }
+        let pid = chrome.terminal.process.shellPid
+        let path = System.processPath(pid: pid)
+        let name = path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? URL(fileURLWithPath: System.userShell()).lastPathComponent
+        return (name, path)
+    }
+
     /// A restored pane that last ran a command starts as a plain shell and offers to run it again.
     func offerRerun(_ command: String) {
         chrome.showLastRan(command)
@@ -1858,7 +1879,7 @@ final class PaneController {
         let current = ProcessInfo.processInfo.environment
         var env: [String] = []
         for (key, value) in current.sorted(by: { $0.key < $1.key }) {
-            if inheritedNoise.contains(key) || key.hasPrefix("AETHER_") { continue }
+            if inheritedNoise.contains(key) || key == "AETHER" || key.hasPrefix("AETHER_") { continue }
             env.append("\(key)=\(value)")
         }
         env.append("TERM=xterm-256color")
@@ -1876,12 +1897,19 @@ final class PaneController {
             env.append("LANG=en_US.UTF-8")
         }
         let bin = System.supportDirectory().appendingPathComponent("bin").path
-        env = env.map { $0.hasPrefix("PATH=") ? "PATH=\(bin):" + $0.dropFirst(5) : $0 }
+        let skill = System.supportDirectory().appendingPathComponent("skill/SKILL.md").path
+        if env.contains(where: { $0.hasPrefix("PATH=") }) {
+            env = env.map { $0.hasPrefix("PATH=") ? "PATH=\(bin):" + $0.dropFirst(5) : $0 }
+        } else {
+            env.append("PATH=\(bin):/usr/bin:/bin:/usr/sbin:/sbin")
+        }
         env.append("TERM_PROGRAM=Aether")
         env.append("TERM_PROGRAM_VERSION=\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")")
+        env.append("AETHER=1")
         env.append("AETHER_PANE=\(pane)")
         env.append("AETHER_CONTROL=127.0.0.1:\(AgentDesk.port)")
         env.append("AETHER_AGENT_PLIST=\(System.supportDirectory().appendingPathComponent("agent.plist").path)")
+        env.append("AETHER_SKILL=\(skill)")
         return env
     }
 

@@ -54,6 +54,7 @@ private final class ShortcutProbe: NSObject {
     var seen: [String: AppAction] = [:]
     for action in AppAction.allCases {
         let chord = action.defaultChord
+        guard !chord.key.isEmpty else { continue }
         let id = "\(chord.key)|\(chord.modifiers)"
         if let other = seen[id] {
             Issue.record("\(action) shares \(id) with \(other)")

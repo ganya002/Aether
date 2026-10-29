@@ -85,6 +85,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     private var dragWatch: Timer?
     private var fullScreenTransition = false
     private var lastDividerSync: CFTimeInterval = 0
+    private let tabs = WorkspaceTabStrip()
 
     static var dropdownHeightFraction: CGFloat { CGFloat(AppModel.shared.settings.dropdownHeight) }
     static var dropdownHidesOnFocusLoss: Bool { AppModel.shared.settings.dropdownHideOnFocusLoss }
@@ -122,6 +123,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         GlassPanel.mount(glass, on: window, radius: 20)
         highlight.isHidden = true
         canvas.addSubview(highlight)
+        tabs.deskID = deskID
     }
 
     func showUpdateGauge() -> UpdateVeil {
@@ -158,11 +160,20 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         canvas.layOut(desk: desk, settings: settings, animated: animated && !liveResizing)
         canvas.setInactiveFrost(window?.isKeyWindow == false, settings: settings)
         let focused = desk.panes[desk.focusedID]
-        let title = focused.map { $0.customTitle ?? $0.title } ?? "Aether"
+        let title = desk.tabs.first(where: { $0.id == desk.activeTabID })?.name
+            ?? focused.map { $0.customTitle ?? $0.title }
+            ?? "Aether"
         window?.title = "\(title) — Aether"
+        reloadTabs()
         if window?.isKeyWindow == true {
             focusTerminal(desk.focusedID)
         }
+    }
+
+    func reloadTabs() {
+        guard let desk = AppModel.shared.desks[deskID] else { return }
+        tabs.reload(desk)
+        tabs.attach(to: window, dropdown: desk.dropdown)
     }
 
     func presentAnimated() {
@@ -326,7 +337,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
         liveResizing = false
         settlingResize = true
         let settings = AppModel.shared.settings
-        for id in AppModel.shared.desks[deskID]?.layout.panes ?? [] {
+        for id in AppModel.shared.desks[deskID]?.allPaneIDs ?? [] {
             AppModel.shared.panes[id]?.apply(settings)
         }
         canvas.endResizeDim { [weak self] in
@@ -348,6 +359,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         fullScreenTransition = false
+        reloadTabs()
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
@@ -361,6 +373,7 @@ final class DeskController: NSWindowController, NSWindowDelegate {
     func windowDidExitFullScreen(_ notification: Notification) {
         fullScreenTransition = false
         rememberFrame()
+        reloadTabs()
     }
 
     func windowDidFailToExitFullScreen(_ window: NSWindow) {

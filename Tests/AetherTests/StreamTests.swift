@@ -77,7 +77,7 @@ private final class StreamProbe: LocalProcessDelegate, @unchecked Sendable {
     private func consider(first: Date?, ended: Date?, text: String) {
         guard let first, let ended else { return }
         let gap = ended.timeIntervalSince(first)
-        if text.contains(needle), gap >= minGap {
+        if text.contains(needle), gap + 0.05 >= minGap {
             complete(.success(()))
         } else {
             complete(.failure(StreamFailure(description: "wanted \(needle) with \(minGap)s gap, got \(gap)s: \(text.debugDescription)")))

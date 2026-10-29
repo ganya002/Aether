@@ -7,7 +7,7 @@ fi
 exec python3 - "$@" <<'PY'
 import base64, json, os, re, sys
 
-VERSION = "3"
+VERSION = "4"
 STATES = ("idle", "working", "blocked", "done", "error")
 DIRECTIONS = {"right": "right", "left": "left", "up": "top", "top": "top", "down": "bottom", "bottom": "bottom", "center": "right"}
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -17,7 +17,7 @@ PANE_PREFIX = re.compile(r"^[0-9A-Fa-f]{8,32}$")
 COMMANDS = (
     "split", "tab", "open", "read", "view", "zoom", "font", "status", "notify",
     "title", "close", "skill", "send", "run", "wait", "windows", "move", "order",
-    "find", "screenshot", "mcp", "help",
+    "find", "screenshot", "workspace", "hook", "mcp", "help",
 )
 
 
@@ -54,7 +54,8 @@ window is used; with several, pass --pane, --window, or --desk.
 
 Commands:
   split       Open a terminal beside this pane.
-  tab         Add a terminal to this window.
+  tab         Add a terminal to this tab group.
+  workspace   Open a new tab group in this window.
   open        Show a web page or PDF beside this pane.
   read        Print this pane's screen.
   view        List the panes.
@@ -72,7 +73,8 @@ Commands:
   title       Set this pane's title.
   close       Close a pane that you opened.
   screenshot  Save a PNG of a pane.
-  skill       Install the Aether skill and AGENTS.md for agents.
+  skill       Install the Aether skill and session hook for agents.
+  hook        Print Aether context for an agent session (used by hooks).
   mcp         Speak MCP over stdin/stdout (one tool per command).
   help        Show help for a command.
 
@@ -283,11 +285,29 @@ Options:
 
 Example:
   aether screenshot --out /tmp/pane.png""",
-    "skill": """usage: aether skill
+    "workspace": """usage: aether workspace [--title T] [-- command ...]
 
-Install the Aether skill and AGENTS.md into ~/.claude, ~/.cursor, and ~/.agents.
-Only tools that are already set up (their folder exists) get it; the rest are
-listed as skipped. Also writes AGENTS.md in the current directory if none exists.
+Open a new tab group in this window, with one blank terminal. Other tab groups
+keep running. Prints the new tab id.
+
+Options:
+      --title <text>                  Name the tab.""" + COMMON + """
+
+Examples:
+  aether workspace --title school
+  aether workspace -- claude""",
+    "hook": """usage: aether hook
+
+Print a short briefing for an agent session started inside Aether. Session
+hooks call this. Outside Aether it prints nothing.
+
+Example:
+  aether hook""",
+    "skill": """usage: aether skill [--project]
+
+Install the Aether skill and a session hook into every agent home Aether finds
+(~/.claude, ~/.cursor, ~/.codex, ~/.agents, ~/.gemini, ~/.opencode). Aether also
+does this when it launches. --project writes AGENTS.md in this folder.
 
 Example:
   aether skill""",
@@ -319,7 +339,9 @@ SPECS = {
     "notify": (TARGET, JSON, False),
     "title": (TARGET, JSON, False),
     "close": (TARGET, JSON, False),
-    "skill": (set(), JSON, False),
+    "skill": (set(), {"--project"} | JSON, False),
+    "workspace": (TARGET | {"--title"}, JSON, True),
+    "hook": (set(), set(), False),
     "send": (TARGET | {"--keys"}, {"--enter"} | JSON, False),
     "run": (TARGET | {"--title", "--timeout"}, {"--focus"} | JSON, True),
     "wait": (TARGET | {"--timeout"}, {"--until-idle", "--exit", "--until-exit"} | JSON, False),
@@ -620,7 +642,22 @@ def watch(pane, until, timeout, stream=False, after_prompts=None):
         signal.signal(signal.SIGINT, old)
 
 
-def install_skill():
+def show_hook():
+    pane = os.environ.get("AETHER_PANE", "")
+    if not pane:
+        return 0
+    print(
+        "You are in Aether, a native macOS terminal.\n"
+        f"This pane's id is {pane}. The `aether` CLI is on PATH.\n"
+        "Use it to split, open workspace tabs, send keys, run commands, and read screens.\n"
+        "Do not guess tmux, iTerm, or Terminal.app keystrokes.\n"
+        "`aether workspace` is a new tab group; `aether tab` is a new pane in this group.\n"
+        "Run `aether help` for the rest."
+    )
+    return 0
+
+
+def install_skill(project=False):
     import shutil
     home = os.path.expanduser("~")
     plist = os.environ.get("AETHER_AGENT_PLIST") or os.path.join(home, "Library/Application Support/Aether/agent.plist")
@@ -640,7 +677,7 @@ def install_skill():
     if not source:
         raise Failure("could not find the Aether skill. Open Aether once so it can write it.")
     installed, skipped = [], []
-    for tool in (".claude", ".cursor", ".agents"):
+    for tool in (".claude", ".cursor", ".agents", ".codex", ".gemini", ".opencode"):
         root = os.path.join(home, tool)
         if not os.path.isdir(root):
             skipped.append(root)
@@ -654,8 +691,8 @@ def install_skill():
             installed.append(dest)
         except OSError as error:
             skipped.append(f"{root} ({error.strerror})")
-    cwd_agents = os.path.join(os.getcwd(), "AGENTS.md")
-    if agents and (not os.path.isfile(cwd_agents) or open(cwd_agents, encoding="utf-8").read(20).startswith("# Aether")):
+    if project and agents:
+        cwd_agents = os.path.join(os.getcwd(), "AGENTS.md")
         try:
             shutil.copy(agents, cwd_agents)
             installed.append(cwd_agents)
@@ -778,6 +815,8 @@ def main(argv):
         return show(rest[0] if rest else "")
     if cmd == "mcp":
         return mcp()
+    if cmd in ("hook", "context"):
+        return show_hook()
     if cmd not in SPECS:
         if cmd.startswith("-"):
             raise Usage(f"unknown option {cmd}.")
@@ -1011,8 +1050,19 @@ def main(argv):
     if cmd == "skill":
         if positional:
             raise Usage(f"unexpected {positional[0]}.")
-        install_skill()
+        install_skill(bool(opts.get("--project")))
         return 0
+    if cmd == "workspace":
+        body = {}
+        if opts.get("--title"):
+            body["title"] = opts["--title"]
+        words = list(command) if command is not None else list(positional)
+        if len(words) == 1:
+            body["command"] = words[0]
+        elif words:
+            body["command"] = " ".join(quote(word) for word in words)
+        reply = call("/workspace", body)
+        return finish(reply, reply.get("tab") or reply.get("pane"))
     raise Usage(f"unknown command {cmd}.")
 
 

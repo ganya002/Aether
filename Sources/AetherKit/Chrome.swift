@@ -254,6 +254,10 @@ extension AppAction {
         switch self {
         case .newWindow: "macwindow.badge.plus"
         case .newPane: "plus.rectangle"
+        case .newTab: "plus.square.on.square"
+        case .closeTab: "minus.square"
+        case .nextTab: "chevron.right.to.line"
+        case .previousTab: "chevron.left.to.line"
         case .splitRight: "rectangle.split.2x1"
         case .splitDown: "rectangle.split.1x2"
         case .closePane: "xmark.rectangle"
@@ -317,7 +321,11 @@ extension AppAction {
         case .settings: ["preferences", "options", "config"]
         case .clearBuffer: ["clear", "cls", "reset"]
         case .fill: ["maximize", "zoom"]
-        case .newPane: ["tab", "shell"]
+        case .newPane: ["shell"]
+        case .newTab: ["tab", "workspace", "group"]
+        case .closeTab: ["workspace"]
+        case .nextTab: ["workspace"]
+        case .previousTab: ["workspace"]
         case .broadcast: ["sync", "all panes"]
         case .dropdown: ["quake", "hotkey", "visor"]
         case .renamePane: ["title", "name"]

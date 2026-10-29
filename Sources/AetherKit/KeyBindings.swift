@@ -112,6 +112,8 @@ public struct KeyChord: Codable, Equatable, Sendable {
 public enum AppAction: String, CaseIterable, Codable, Sendable {
     case newWindow
     case newPane
+    case newTab
+    case closeTab
     case splitRight
     case splitDown
     case closePane
@@ -155,6 +157,8 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
     case focusPane9
     case previousPane
     case nextPane
+    case nextTab
+    case previousTab
     case swapNext
     case movePaneToWindow
     case renamePane
@@ -188,6 +192,10 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         switch self {
         case .newWindow: "New window"
         case .newPane: "New terminal"
+        case .newTab: "New tab"
+        case .closeTab: "Close tab"
+        case .nextTab: "Next tab"
+        case .previousTab: "Previous tab"
         case .splitRight: "Split right"
         case .splitDown: "Split down"
         case .closePane: "Close terminal"
@@ -260,6 +268,10 @@ public enum AppAction: String, CaseIterable, Codable, Sendable {
         switch self {
         case .newWindow: return chord("n", command, kVK_ANSI_N)
         case .newPane: return chord("t", command, kVK_ANSI_T)
+        case .newTab: return chord("t", [command, .shift], kVK_ANSI_T)
+        case .closeTab: return KeyChord(key: "", modifiers: 0, keyCode: 0)
+        case .nextTab: return chord("\t", .control, kVK_Tab)
+        case .previousTab: return chord("\t", [.control, .shift], kVK_Tab)
         case .splitRight: return chord("d", command, kVK_ANSI_D)
         case .splitDown: return chord("d", [command, .shift], kVK_ANSI_D)
         case .closePane: return chord("w", command, kVK_ANSI_W)
@@ -617,10 +629,10 @@ enum ShortcutGroup: String, CaseIterable, Sendable {
 
     static func of(_ action: AppAction) -> ShortcutGroup {
         switch action {
-        case .newWindow, .newPane, .splitRight, .splitDown, .closePane, .closeWindow, .broadcast,
+        case .newWindow, .newPane, .newTab, .closeTab, .splitRight, .splitDown, .closePane, .closeWindow, .broadcast,
              .renamePane, .restartPane, .swapNext, .movePaneToWindow: .windows
         case .fill, .equalize, .nextLayout, .previousLayout: .layout
-        case .focusLeft, .focusRight, .focusUp, .focusDown, .previousPane, .nextPane,
+        case .focusLeft, .focusRight, .focusUp, .focusDown, .previousPane, .nextPane, .nextTab, .previousTab,
              .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9: .focus
         case .growLeft, .growRight, .growUp, .growDown: .resize
         case .fontUp, .fontDown, .fontReset, .copy, .paste, .selectAll, .clearBuffer, .insertPath: .text

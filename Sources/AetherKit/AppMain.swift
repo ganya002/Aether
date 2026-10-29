@@ -323,6 +323,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return desk != nil
         case .previousPane, .nextPane, .swapNext, .movePaneToWindow:
             return model.keyPaneOrder.count > 1
+        case .nextTab, .previousTab:
+            return (desk.flatMap { model.desks[$0]?.tabs.count } ?? 0) > 1
         case .focusPane1, .focusPane2, .focusPane3, .focusPane4, .focusPane5, .focusPane6, .focusPane7, .focusPane8, .focusPane9:
             return (action.paneNumber ?? 99) <= model.keyPaneOrder.count
         default:
@@ -357,6 +359,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         switch action {
         case .newWindow: model.newWindow()
         case .newPane: model.newPane()
+        case .newTab: model.newTab()
+        case .closeTab: model.closeActiveTab()
+        case .nextTab: model.cycleTab(by: 1)
+        case .previousTab: model.cycleTab(by: -1)
         case .splitRight: model.splitFocused(.right)
         case .splitDown: model.splitFocused(.bottom)
         case .closePane: closePane()
@@ -531,6 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         main.addItem(menu("Shell", items: [
             bind(.newWindow, item("New Window", .newWindow)),
             bind(.newPane, item("New Terminal", .newPane)),
+            bind(.newTab, item("New Tab", .newTab)),
+            bind(.closeTab, item("Close Tab", .closeTab)),
             .separator(),
             bind(.launch, item("Launch…", .launch)),
             bind(.insertPath, item("Insert Path…", .insertPath)),
@@ -592,6 +600,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             bind(.previousPane, item("Previous Terminal", .previousPane)),
             bind(.nextPane, item("Next Terminal", .nextPane)),
+            bind(.previousTab, item("Previous Tab", .previousTab)),
+            bind(.nextTab, item("Next Tab", .nextTab)),
             .separator(),
         ]
         for number in 1...9 {

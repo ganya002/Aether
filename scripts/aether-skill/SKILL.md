@@ -3,14 +3,15 @@ name: aether
 description: Control the Aether terminal from a shell. Open panes, type into them, run commands to completion, read output, and close panes you opened.
 ---
 
-You are in Aether when `AETHER_PANE` is set. Use the `aether` command. Do not guess keystrokes for splits.
+You are in Aether when `AETHER_PANE` or `AETHER=1` is set. Use the `aether` command. Do not guess keystrokes for splits. Aether installs this skill and a session hook on launch.
 
 Every command acts on your own pane (`AETHER_PANE`) unless you pass `--pane <id>`. Pane ids may be positional (`aether read 50BBAE3B`) or given as `--pane`. Outside Aether, with one window open that window is used; with several, pass `--pane`, `--window`, or `--desk`. Commands never move keyboard focus unless you pass `--focus`. Add `--json` to any command for the raw reply.
 
 Agent loop: spawn with `tab` or `run`, watch with `wait` / `read`, interrupt with `send --keys ctrl+c`, rerun with `run` or `send`.
 
 - `aether split --right --ratio 30 -- npm run dev` opens a terminal beside you and prints its id. Sides: `--right`, `--left`, `--up`, `--down`.
-- `aether tab -- command` adds a terminal to your window and prints its id.
+- `aether tab -- command` adds a terminal to this tab group and prints its id.
+- `aether workspace --title school` opens a new tab group in the window. Terminals in other groups keep running.
 - `aether run -- make test` runs a command in a new tab, streams output, and exits with that command's status. `aether run --pane <id> -- npm test` types into an existing pane and waits until the shell is idle.
 - `aether send --keys ctrl+c` types into a pane. `aether send y --enter` answers a prompt. `--keys` accepts `ctrl+c`, `enter`, `up`, `tab`, `esc`, and comma-separated chords.
 - `aether wait <id> --exit` blocks until that pane's job exits. `--until-idle` waits for a prompt.

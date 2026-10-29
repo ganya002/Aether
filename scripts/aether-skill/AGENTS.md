@@ -7,7 +7,7 @@ Use the `aether` CLI to drive this macOS terminal. Prefer it over guessing tmux/
 - Inside Aether, `$AETHER_PANE` is your pane. Commands act there unless you pass `--pane <id>`.
 - Pane ids may be positional (`aether read 50BBAE3B`) or `--pane`. Unique 8-character prefixes work.
 - Outside Aether, with one window, that window is used. With several, pass `--pane`, `--window <id|this|any>`, or `--desk`.
-- `aether windows` and `aether view --json` are how you discover ids. `--json` works on every command.
+- `aether windows` and `aether view --json` are how you discover ids. `--json` works on every command. View JSON includes `tab` for the workspace group.
 
 ## Agent loop
 
@@ -29,7 +29,8 @@ aether close "$id"
 
 | Command | Role |
 | --- | --- |
-| `tab` / `split` | Open a visible pane. Prints the id. |
+| `tab` / `split` | Open a visible pane in this tab group. Prints the id. |
+| `workspace` | New tab group in the window. Other groups keep running. |
 | `run` | Run to completion; stream output; exit with the command's status. |
 | `send` | Type text or `--keys ctrl+c` / `enter`. |
 | `wait` | `--until-idle` or `--exit`. |

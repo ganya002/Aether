@@ -23,6 +23,7 @@ private func launch(_ query: String, recents: [String] = [], hosts: [String] = [
     #expect(launch("settings").first?.kind == .action(.app(.settings)))
     #expect(launch("split").first?.section == .actions)
     #expect(launch("preferences").first?.kind == .action(.app(.settings)))
+    #expect(launch("workspace").contains { $0.kind == .action(.app(.newTab)) })
 }
 
 @Test func launcherRunsSomethingThatLooksLikeACommand() {

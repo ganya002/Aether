@@ -153,6 +153,8 @@ import Testing
     #expect(env.contains("TERM=xterm-256color"))
     #expect(env.contains("TERM_PROGRAM=Aether"))
     #expect(env.contains("AETHER_PANE=p1"))
+    #expect(env.contains("AETHER=1"))
+    #expect(env.filter { $0.hasPrefix("AETHER=") }.count == 1)
     #expect(keys.contains("SHELL"))
     #expect(keys.contains("TMPDIR"))
     #expect(keys.contains("PATH"))
