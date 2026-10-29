@@ -366,6 +366,8 @@ private func desk(_ id: String, _ panes: [String], focused: String) -> Desk {
             #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
             #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"args":["50BBAE3B"]}}}"#,
         ]
+        // The CLI may exit before reading everything; that must fail the test, not kill the test process.
+        signal(SIGPIPE, SIG_IGN)
         input.fileHandleForWriting.write(Data((lines.joined(separator: "\n") + "\n").utf8))
         try input.fileHandleForWriting.close()
         process.waitUntilExit()

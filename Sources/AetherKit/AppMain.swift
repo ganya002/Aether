@@ -6,6 +6,9 @@ public enum AetherApplication {
     private static let delegate = AppDelegate()
 
     public static func launch() {
+        // A write to a socket or pipe whose reader is gone (an agent that hung up mid-reply,
+        // a hook that quit early) should fail with EPIPE, not kill every terminal at once.
+        signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared
         app.delegate = delegate
         app.setActivationPolicy(.regular)
