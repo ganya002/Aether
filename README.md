@@ -6,6 +6,18 @@ A native macOS terminal. Every pane is a real shell, and the window is Liquid Gl
 
 Clear glass, in the picture. Regular, the default, is the same window with more shade.
 
+![A shell, a second shell, and a web page, on Regular glass.](docs/screenshots/splits.png)
+
+## Themes
+
+| Aether | Tokyo Night | Dracula |
+| --- | --- | --- |
+| ![Aether](docs/screenshots/themes/aether.png) | ![Tokyo Night](docs/screenshots/themes/tokyo-night.png) | ![Dracula](docs/screenshots/themes/dracula.png) |
+
+| Nord | Catppuccin Mocha | Solarized Light |
+| --- | --- | --- |
+| ![Nord](docs/screenshots/themes/nord.png) | ![Catppuccin Mocha](docs/screenshots/themes/catppuccin-mocha.png) | ![Solarized Light](docs/screenshots/themes/solarized-light.png) |
+
 Open as many windows as you want, split them, and drag a pane out into a window of its own. Windows snap to each other when you let go. Hold Option to skip the snap.
 
 Requires macOS 26 or later.
